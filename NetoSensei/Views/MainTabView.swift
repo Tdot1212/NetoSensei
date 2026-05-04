@@ -12,7 +12,7 @@ import SwiftUI
 struct MainTabView: View {
     var body: some View {
         TabView {
-            // Tab 1: Home (Dashboard)
+            // Tab 1: Home (Dashboard) — also hosts the AI Assistant FAB
             DashboardView()
                 .tabItem {
                     Label("Home", systemImage: "house.fill")
@@ -40,19 +40,12 @@ struct MainTabView: View {
                 }
                 .tag(3)
 
-            // Tab 5: AI Assistant (Chat with AI about network issues)
-            AIChatView()
-                .tabItem {
-                    Label("AI Assist", systemImage: "bubble.left.and.text.bubble.right")
-                }
-                .tag(4)
-
-            // Tab 6: History (Timeline, baseline, stability, past results)
+            // Tab 5: History (Timeline, baseline, stability, past results)
             NetworkHistoryView()
                 .tabItem {
                     Label("History", systemImage: "chart.line.uptrend.xyaxis")
                 }
-                .tag(5)
+                .tag(4)
         }
         .accentColor(AppColors.accent)
     }

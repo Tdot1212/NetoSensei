@@ -15,6 +15,7 @@ struct DashboardView: View {
     // These buttons are now in DiagnoseTabView and SecurityTabView
     @State private var showingIPInfo = false
     @State private var showingDebugPanel = false
+    @State private var showingAIChat = false
     @State private var versionTapCount = 0
 
     var body: some View {
@@ -93,6 +94,9 @@ struct DashboardView: View {
                     LoadingOverlay(message: "Refreshing network status...")
                 }
             }
+            .overlay(alignment: .bottomTrailing) {
+                aiAssistantFAB
+            }
             .navigationTitle("Netosensei")
             .navigationBarTitleDisplayMode(.large)
             .onAppear {
@@ -107,7 +111,29 @@ struct DashboardView: View {
             .sheet(isPresented: $showingDebugPanel) {
                 NetworkDebugView()
             }
+            .sheet(isPresented: $showingAIChat) {
+                AIChatView()
+            }
         }
+    }
+
+    // MARK: - AI Assistant Floating Action Button
+
+    private var aiAssistantFAB: some View {
+        Button {
+            showingAIChat = true
+        } label: {
+            Image(systemName: "sparkles")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 56, height: 56)
+                .background(Color.blue)
+                .clipShape(Circle())
+                .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
+        }
+        .accessibilityLabel("AI Assistant")
+        .padding(.trailing, 20)
+        .padding(.bottom, 20)
     }
 
     // MARK: - Version Label (tap 5 times for debug panel)
