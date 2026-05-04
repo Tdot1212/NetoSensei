@@ -545,8 +545,11 @@ class NetworkMonitorService: ObservableObject {
             // China without VPN: use domestic server for accurate latency
             pingHost = "www.baidu.com"
         } else {
-            // Outside China or VPN active: use Cloudflare
-            pingHost = "cloudflare-dns.com"
+            // Outside China or VPN active: use apple.com
+            // CLEANUP 4: was cloudflare-dns.com — Cloudflare endpoints are
+            // throttled/blocked in mainland China and produced false-positive
+            // probe failures even on healthy connections.
+            pingHost = "apple.com"
         }
 
         // HTTP connectivity check with Apple (works in China)

@@ -55,7 +55,7 @@ class SpeedTestEngine: ObservableObject {
         // Phase 2: Testing Ping (20%) - 5s timeout
         self.currentPhase = .testingPing; self.progress = 0.2
         // China-aware ping target
-        let pingTarget = (isInChina && !vpnActive) ? "www.baidu.com" : "cloudflare-dns.com"
+        let pingTarget = (isInChina && !vpnActive) ? "www.baidu.com" : "apple.com"
         let (ping, jitter) = await testLatency(server: pingTarget, timeout: 5.0)
         debugLog("✅ Ping: \(ping)ms, Jitter: \(jitter)ms")
         self.progress = 0.3
@@ -363,8 +363,8 @@ class SpeedTestEngine: ObservableObject {
                 let totalPings = 10
 
                 for _ in 0..<totalPings {
-                    // FIXED: Use cloudflare-dns.com instead of 1.1.1.1
-                    let (success, _) = await NetworkMonitorService.shared.pingHost("cloudflare-dns.com", timeout: 1.0)
+                    // CLEANUP 4: apple.com instead of cloudflare-dns.com (China reliability)
+                    let (success, _) = await NetworkMonitorService.shared.pingHost("apple.com", timeout: 1.0)
                     if success { successCount += 1 }
                     try? await Task.sleep(nanoseconds: 50_000_000)
                 }

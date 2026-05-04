@@ -652,7 +652,7 @@ struct NetworkFacts {
     // Internet
     let domesticReachable: Bool
     let domesticLatencyMs: Double?
-    let domesticTarget: String       // e.g. "baidu.com" or "cloudflare-dns.com"
+    let domesticTarget: String       // e.g. "baidu.com" or "apple.com"
     let overseasReachable: Bool
     let overseasLatencyMs: Double?
     let overseasTarget: String       // e.g. "google.com"
@@ -686,7 +686,7 @@ struct NetworkFacts {
             gatewayJitterMs: status.router.jitter,
             domesticReachable: status.internet.isReachable,
             domesticLatencyMs: status.internet.latencyToExternal,
-            domesticTarget: (vpnResult?.isLikelyInChina == true) ? "baidu.com" : "cloudflare-dns.com",
+            domesticTarget: (vpnResult?.isLikelyInChina == true) ? "baidu.com" : "apple.com",
             overseasReachable: status.internet.httpTestSuccess,
             overseasLatencyMs: nil,  // Measured separately by probe
             overseasTarget: "google.com",

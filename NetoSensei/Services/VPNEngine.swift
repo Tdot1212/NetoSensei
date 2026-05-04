@@ -126,7 +126,8 @@ class VPNEngine: ObservableObject {
     }
 
     private func testTunnelReachability() async -> (Bool, Double?) {
-        return await NetworkMonitorService.shared.pingHost("cloudflare-dns.com", timeout: 5.0)
+        // CLEANUP 4: apple.com instead of cloudflare-dns.com (China reliability)
+        return await NetworkMonitorService.shared.pingHost("apple.com", timeout: 5.0)
     }
 
     private func testPacketLoss() async -> Double? {
@@ -134,7 +135,8 @@ class VPNEngine: ObservableObject {
         let totalPings = 3
 
         for _ in 0..<totalPings {
-            let (success, _) = await NetworkMonitorService.shared.pingHost("cloudflare-dns.com", timeout: 2.0)
+            // CLEANUP 4: apple.com instead of cloudflare-dns.com (China reliability)
+            let (success, _) = await NetworkMonitorService.shared.pingHost("apple.com", timeout: 2.0)
             if success { successCount += 1 }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }

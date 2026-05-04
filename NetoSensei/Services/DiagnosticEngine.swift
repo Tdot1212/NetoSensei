@@ -288,9 +288,9 @@ class DiagnosticEngine: ObservableObject {
         tests.append(routerStabilityTest)
 
         // Test ISP latency stability
-        // FIXED: Use cloudflare-dns.com instead of 1.1.1.1 - more reliable through VPN
+        // CLEANUP 4: apple.com — universally reachable, not throttled in China
         let ispStabilityTest = await testLatencyStability(
-            host: "cloudflare-dns.com",
+            host: "apple.com",
             name: "ISP Latency Stability",
             samples: 5
         )
