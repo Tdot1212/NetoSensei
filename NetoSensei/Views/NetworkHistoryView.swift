@@ -773,20 +773,11 @@ struct NetworkHistoryView: View {
 
     private var emptyStateCard: some View {
         CardView {
-            VStack(spacing: UIConstants.spacingM) {
-                Image(systemName: "chart.bar.xaxis")
-                    .font(.system(size: 48))
-                    .foregroundColor(AppColors.textSecondary)
-
-                Text("No History Yet")
-                    .font(.headline)
-
-                Text("Run diagnostics and speed tests to build your network history.")
-                    .font(.subheadline)
-                    .foregroundColor(AppColors.textSecondary)
-                    .multilineTextAlignment(.center)
-            }
-            .padding()
+            EmptyStateView(
+                symbol: "chart.bar.xaxis",
+                title: "No history yet",
+                message: "Run diagnostics or speed tests on the other tabs and your results will collect here over time."
+            )
         }
     }
 

@@ -179,26 +179,27 @@ struct DeviceHistoryView: View {
 
     // MARK: - Empty State
 
+    @ViewBuilder
     private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "desktopcomputer.trianglebadge.exclamationmark")
-                .font(.system(size: 48))
-                .foregroundColor(.gray.opacity(0.5))
-
-            if historyManager.devices.isEmpty {
-                Text("No devices discovered yet")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
-                Text("Run a network scan to discover devices")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            } else {
-                Text("No devices match your filter")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
-            }
+        if historyManager.devices.isEmpty {
+            EmptyStateView(
+                symbol: "iphone.gen3",
+                title: "No devices discovered yet",
+                message: "Once you scan your network, every device that shows up will be tracked here.",
+                primaryActionTitle: "Scan now",
+                primaryAction: {
+                    Task { await discovery.scanNetwork() }
+                }
+            )
+            .padding(.vertical, 40)
+        } else {
+            EmptyStateView(
+                symbol: "line.3.horizontal.decrease.circle",
+                title: "No devices match your filter",
+                message: "Try a different filter or clear the search to see all devices."
+            )
+            .padding(.vertical, 40)
         }
-        .padding(.vertical, 40)
     }
 
     // MARK: - Filtering
