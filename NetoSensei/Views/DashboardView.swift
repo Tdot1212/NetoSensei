@@ -16,6 +16,7 @@ struct DashboardView: View {
     @State private var showingIPInfo = false
     @State private var showingDebugPanel = false
     @State private var showingAIChat = false
+    @State private var showingSettings = false
     @State private var versionTapCount = 0
 
     var body: some View {
@@ -99,6 +100,16 @@ struct DashboardView: View {
             }
             .navigationTitle("Netosensei")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
             .onAppear {
                 // PART 1: Only refresh once on launch (not on every tab switch)
                 Task {
@@ -113,6 +124,9 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $showingAIChat) {
                 AIChatView()
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
             }
         }
     }
