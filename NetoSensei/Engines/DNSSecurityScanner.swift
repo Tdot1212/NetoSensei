@@ -197,10 +197,7 @@ actor DNSSecurityScanner {
         // 142.250.x, 142.251.x, 172.217.x, 216.58.x, 64.233.x, 74.125.x, etc.
         // Must accept all of these to avoid false positives.
 
-        // ISSUE 7 FIX: Known proxy/VPN fake-IP ranges used by Surge, Shadowrocket,
-        // Quantumult X, Clash, etc. These apps intercept DNS and return synthetic
-        // addresses to route traffic through the tunnel. This is NORMAL behavior.
-        let proxyFakeRanges = ["198.18.", "198.19.", "100.100.", "10.10.10.", "28.0.0."]
+        // CLEANUP 5: proxy fake-IP ranges live in ProxyDetection.fakeIPRangePrefixes.
 
         // FIXED: Expanded Google IP ranges (AS15169) to prevent false positives
         // Google owns 192.178.0.0/15, 216.239.0.0/16, and many cloud ranges
@@ -229,7 +226,7 @@ actor DNSSecurityScanner {
         for (domain, expectedPrefixes) in testDomains {
             if let resolvedIP = await resolveDomain(domain) {
                 // ISSUE 7 FIX: Check if this is a proxy fake-IP BEFORE declaring hijack
-                let isProxyFakeIP = proxyFakeRanges.contains { resolvedIP.hasPrefix($0) }
+                let isProxyFakeIP = ProxyDetection.isProxyFakeIP(resolvedIP)
                 if isProxyFakeIP {
                     proxyDNSCount += 1
                     continue  // Normal VPN/proxy DNS routing, not hijacking

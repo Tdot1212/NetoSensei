@@ -693,11 +693,10 @@ class PrivacyShieldService: ObservableObject {
                 return
             }
 
-            // Same fake-IP ranges as DNSSecurityScanner.testDNSHijacking
-            let proxyFakeRanges = ["198.18.", "198.19.", "100.100.", "10.10.10.", "28.0.0."]
+            // CLEANUP 5: shared ranges via ProxyDetection.isProxyFakeIP
             let resolvedIPs = addresses.compactMap { Self.ipString(from: $0) }
             let allProxyFake = !resolvedIPs.isEmpty && resolvedIPs.allSatisfy { ip in
-                proxyFakeRanges.contains(where: { ip.hasPrefix($0) })
+                ProxyDetection.isProxyFakeIP(ip)
             }
             // Real IPs returned for NXDOMAIN → ISP hijack. Proxy fake → normal.
             continuation.resume(returning: !allProxyFake)
@@ -849,8 +848,8 @@ class PrivacyShieldService: ObservableObject {
         if let resolved = resolvedNormally, resolved != vpnResult.publicIP {
             // If resolver returns a proxy fake-IP, the proxy is handling DNS
             // locally — that's expected, not a leak.
-            let proxyFakeRanges = ["198.18.", "198.19.", "100.100.", "10.10.10.", "28.0.0."]
-            if proxyFakeRanges.contains(where: { resolved.hasPrefix($0) }) {
+            // CLEANUP 5: shared ranges via ProxyDetection.isProxyFakeIP
+            if ProxyDetection.isProxyFakeIP(resolved) {
                 return VPNLeakTestResult.LeakCheck(
                     name: "DNS Leak",
                     isLeaking: false,

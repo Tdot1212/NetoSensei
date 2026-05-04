@@ -56,11 +56,7 @@ actor SecurityEngine {
         // FIXED: Check VPN status - VPN routing can cause DNS to resolve differently
         let vpnActive = await isVPNActiveAsync()
 
-        // ISSUE 7 FIX: Known proxy/VPN fake-IP ranges used by Surge, Shadowrocket,
-        // Quantumult X, Clash, etc. These intercept DNS and return synthetic addresses
-        // to route traffic through the tunnel. This is NORMAL, not hijacking.
-        let proxyFakeRanges = ["198.18.", "198.19.", "100.100.", "10.10.10.", "28.0.0."]
-
+        // CLEANUP 5: proxy fake-IP ranges live in ProxyDetection.fakeIPRangePrefixes.
         for test in testDomains {
             do {
                 let resolvedIPs = try await withTimeout(seconds: 2) {
@@ -69,7 +65,7 @@ actor SecurityEngine {
 
                 // ISSUE 7 FIX: Check if ALL resolved IPs are in proxy fake-IP ranges
                 let allProxyFakeIPs = !resolvedIPs.isEmpty && resolvedIPs.allSatisfy { ip in
-                    proxyFakeRanges.contains { ip.hasPrefix($0) }
+                    ProxyDetection.isProxyFakeIP(ip)
                 }
 
                 if allProxyFakeIPs {
