@@ -20,14 +20,22 @@ class LocationPermissionManager: NSObject, CLLocationManagerDelegate {
     /// Cached authorization status — updated via delegate, safe to read from any thread
     private(set) var currentStatus: CLAuthorizationStatus = .notDetermined
 
-    /// Cached location services enabled flag
-    private(set) var isLocationEnabled: Bool = false
+    /// Whether the app has location permission and can therefore read SSID.
+    /// Derived from `currentStatus` so we never call the main-thread-warning
+    /// `CLLocationManager.locationServicesEnabled()`. iOS reports `.denied`
+    /// when system-level Location Services is off, so this still reflects
+    /// the system gate.
+    var isLocationEnabled: Bool {
+        currentStatus == .authorizedWhenInUse || currentStatus == .authorizedAlways
+    }
 
     private override init() {
         super.init()
-        // ISSUE 5 FIX: Don't call locationServicesEnabled() or authorizationStatus on main thread
-        // in init(). Setting the delegate triggers locationManagerDidChangeAuthorization immediately,
-        // which populates currentStatus and isLocationEnabled off the synchronous init path.
+        // CLEANUP 2: Setting the delegate triggers locationManagerDidChangeAuthorization
+        // immediately, which populates currentStatus off the synchronous init path.
+        // We never call locationServicesEnabled() — its UI-unresponsiveness warning
+        // is loud and the .denied authorization status already covers the case where
+        // the user disables location services system-wide.
         locationManager.delegate = self
     }
 
@@ -49,12 +57,8 @@ class LocationPermissionManager: NSObject, CLLocationManagerDelegate {
     // MARK: - CLLocationManagerDelegate
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        if #available(iOS 14.0, *) {
-            currentStatus = manager.authorizationStatus
-        } else {
-            currentStatus = CLLocationManager.authorizationStatus()
-        }
-        isLocationEnabled = CLLocationManager.locationServicesEnabled()
+        // Deployment target is iOS 18.5; manager.authorizationStatus is always available.
+        currentStatus = manager.authorizationStatus
 
         switch currentStatus {
         case .authorizedWhenInUse, .authorizedAlways:
