@@ -27,7 +27,7 @@ final class AdvancedDiagnosticViewModel: ObservableObject {
     // MARK: - Run Full Diagnostics
 
     func runFullDiagnostics(targetHost: String = "www.google.com") {
-        print("🔧 [AdvancedDiagnostics] Starting full diagnostics for \(targetHost)...")
+        debugLog("🔧 [AdvancedDiagnostics] Starting full diagnostics for \(targetHost)...")
 
         // Cancel any existing diagnostic task
         currentDiagnosticTask?.cancel()
@@ -50,11 +50,11 @@ final class AdvancedDiagnosticViewModel: ObservableObject {
                 UIApplication.shared.isIdleTimerDisabled = false
             }
 
-            print("🔧 [AdvancedDiagnostics] Calling DiagnosticsEngine.runAdvancedDiagnostics()...")
+            debugLog("🔧 [AdvancedDiagnostics] Calling DiagnosticsEngine.runAdvancedDiagnostics()...")
             let result = await DiagnosticsEngine.shared.runAdvancedDiagnostics(
                 targetHost: targetHost,
                 onProgress: { [weak self] progress, task in
-                    print("🔧 [AdvancedDiagnostics] Progress: \(progress) - \(task)")
+                    debugLog("🔧 [AdvancedDiagnostics] Progress: \(progress) - \(task)")
                     // Use MainActor.run instead of nested Task to avoid race conditions
                     Task { @MainActor [weak self] in
                         guard let self = self else { return }
@@ -66,7 +66,7 @@ final class AdvancedDiagnosticViewModel: ObservableObject {
 
             // MUST update UI on main actor
             await MainActor.run {
-                print("🔧 [AdvancedDiagnostics] Diagnostics complete! Threat level: \(result.overallThreatLevel)")
+                debugLog("🔧 [AdvancedDiagnostics] Diagnostics complete! Threat level: \(result.overallThreatLevel)")
                 self.summary = result
                 self.isRunning = false
                 self.progress = 1.0

@@ -1093,7 +1093,7 @@ class VPNIntelligenceViewModel: ObservableObject {
     // FIXED: Only load if not already loaded - prevents freeze from repeated heavy loads
     func loadIfNeeded() async {
         guard !hasLoaded && !isLoading else {
-            print("🔐 [VPNIntelligence] Skipping load - already loaded or loading")
+            debugLog("🔐 [VPNIntelligence] Skipping load - already loaded or loading")
             return
         }
         await loadData()
@@ -1101,24 +1101,24 @@ class VPNIntelligenceViewModel: ObservableObject {
     }
 
     func loadData() async {
-        print("🔐 [VPNIntelligence] Starting VPN intelligence load...")
+        debugLog("🔐 [VPNIntelligence] Starting VPN intelligence load...")
         isLoading = true
 
         // Load VPN intelligence data
-        print("🔐 [VPNIntelligence] Fetching reports...")
+        debugLog("🔐 [VPNIntelligence] Fetching reports...")
 
         // Get reliability report
         reliabilityReport = await VPNReliabilityTracker.shared.getReliabilityReport()
-        print("🔐 [VPNIntelligence] ✅ Reliability report loaded")
+        debugLog("🔐 [VPNIntelligence] ✅ Reliability report loaded")
 
         // Get mode comparison
         modeComparison = await VPNModeBenchmark.shared.getModeComparison()
-        print("🔐 [VPNIntelligence] ✅ Mode comparison loaded")
+        debugLog("🔐 [VPNIntelligence] ✅ Mode comparison loaded")
 
         // Get failure prediction for current region
         let currentRegion = reliabilityReport?.currentRegion ?? "Unknown"
         failurePrediction = await VPNFailurePredictor.shared.predictFailure(currentRegion: currentRegion)
-        print("🔐 [VPNIntelligence] ✅ Failure prediction loaded")
+        debugLog("🔐 [VPNIntelligence] ✅ Failure prediction loaded")
 
         // Get best setup score for current region/mode if VPN is active
         if let region = reliabilityReport?.currentRegion {
@@ -1127,9 +1127,9 @@ class VPNIntelligenceViewModel: ObservableObject {
             // No VPN active - set to nil so we show "No data yet" message
             bestSetup = nil
         }
-        print("🔐 [VPNIntelligence] ✅ Best setup loaded")
+        debugLog("🔐 [VPNIntelligence] ✅ Best setup loaded")
 
-        print("🔐 [VPNIntelligence] ✅ All data loaded successfully!")
+        debugLog("🔐 [VPNIntelligence] ✅ All data loaded successfully!")
         isLoading = false
     }
 
@@ -1138,7 +1138,7 @@ class VPNIntelligenceViewModel: ObservableObject {
     }
 
     func runLiveSecurityAnalysis() async {
-        print("🔐 [VPNIntelligence] Running live VPN security analysis...")
+        debugLog("🔐 [VPNIntelligence] Running live VPN security analysis...")
         isAnalyzingSecurity = true
 
         // FIXED: Don't create new DashboardViewModel - use existing cached data
@@ -1164,10 +1164,10 @@ class VPNIntelligenceViewModel: ObservableObject {
         liveSecurityTest = securityTest
         isAnalyzingSecurity = false
 
-        print("🔐 [VPNIntelligence] ✅ Security analysis complete!")
-        print("🔐 Detection Risk: \(securityTest.detectionSignals.overallDetectionRisk.rawValue)")
-        print("🔐 Security Rating: \(securityTest.securityLeaks.securityRating)")
-        print("🔐 IP Type: \(securityTest.detectionSignals.ipType.rawValue)")
+        debugLog("🔐 [VPNIntelligence] ✅ Security analysis complete!")
+        debugLog("🔐 Detection Risk: \(securityTest.detectionSignals.overallDetectionRisk.rawValue)")
+        debugLog("🔐 Security Rating: \(securityTest.securityLeaks.securityRating)")
+        debugLog("🔐 IP Type: \(securityTest.detectionSignals.ipType.rawValue)")
     }
 
     func cancel() {

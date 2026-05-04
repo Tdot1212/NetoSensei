@@ -44,13 +44,13 @@ struct ContentView: View {
         }
         .onAppear {
             // Debug: Print to console when view appears
-            print("📱 ContentView appeared, isLoaded: \(isLoaded)")
+            debugLog("📱 ContentView appeared, isLoaded: \(isLoaded)")
         }
         .task {
-            print("📱 ContentView task started")
+            debugLog("📱 ContentView task started")
             // Simple delay to let UI render first, then show main content
             try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
-            print("📱 ContentView setting isLoaded = true")
+            debugLog("📱 ContentView setting isLoaded = true")
             isLoaded = true
         }
     }

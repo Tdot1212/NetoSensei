@@ -35,12 +35,12 @@ class LocationPermissionManager: NSObject, CLLocationManagerDelegate {
     func requestPermissionIfNeeded() {
         switch currentStatus {
         case .notDetermined:
-            print("📍 Requesting location permission for WiFi SSID access...")
+            debugLog("📍 Requesting location permission for WiFi SSID access...")
             locationManager.requestWhenInUseAuthorization()
         case .authorizedWhenInUse, .authorizedAlways:
-            print("📍 Location permission already granted")
+            debugLog("📍 Location permission already granted")
         case .restricted, .denied:
-            print("📍 Location permission denied - WiFi SSID will not be available")
+            debugLog("📍 Location permission denied - WiFi SSID will not be available")
         @unknown default:
             break
         }
@@ -58,9 +58,9 @@ class LocationPermissionManager: NSObject, CLLocationManagerDelegate {
 
         switch currentStatus {
         case .authorizedWhenInUse, .authorizedAlways:
-            print("📍 Location permission granted - WiFi SSID access enabled")
+            debugLog("📍 Location permission granted - WiFi SSID access enabled")
         case .denied:
-            print("📍 Location permission denied - WiFi SSID access disabled")
+            debugLog("📍 Location permission denied - WiFi SSID access disabled")
         default:
             break
         }
@@ -85,8 +85,8 @@ class CrashLogger {
         // Check if app crashed last time
         if UserDefaults.standard.bool(forKey: crashKey) {
             let lastActivity = UserDefaults.standard.string(forKey: activityKey) ?? "Unknown"
-            print("⚠️ APP CRASHED PREVIOUSLY!")
-            print("⚠️ Last activity before crash: \(lastActivity)")
+            debugLog("⚠️ APP CRASHED PREVIOUSLY!")
+            debugLog("⚠️ Last activity before crash: \(lastActivity)")
             logToFile("Previous crash detected. Last activity: \(lastActivity)")
         }
         // Mark that app is running (will be cleared on normal exit)
@@ -117,39 +117,39 @@ class CrashLogger {
             Call Stack:
             \(exception.callStackSymbols.joined(separator: "\n"))
             """
-            print(message)
+            debugLog(message)
             CrashLogger.shared.logToFile(message)
         }
 
         // Set up signal handlers for common crash signals
         signal(SIGABRT) { signal in
             let message = "🚨 CRASH: SIGABRT (signal \(signal)) - Abort"
-            print(message)
+            debugLog(message)
             CrashLogger.shared.logToFile(message)
         }
         signal(SIGSEGV) { signal in
             let message = "🚨 CRASH: SIGSEGV (signal \(signal)) - Segmentation fault"
-            print(message)
+            debugLog(message)
             CrashLogger.shared.logToFile(message)
         }
         signal(SIGBUS) { signal in
             let message = "🚨 CRASH: SIGBUS (signal \(signal)) - Bus error"
-            print(message)
+            debugLog(message)
             CrashLogger.shared.logToFile(message)
         }
         signal(SIGILL) { signal in
             let message = "🚨 CRASH: SIGILL (signal \(signal)) - Illegal instruction"
-            print(message)
+            debugLog(message)
             CrashLogger.shared.logToFile(message)
         }
         signal(SIGFPE) { signal in
             let message = "🚨 CRASH: SIGFPE (signal \(signal)) - Floating point exception"
-            print(message)
+            debugLog(message)
             CrashLogger.shared.logToFile(message)
         }
         signal(SIGTRAP) { signal in
             let message = "🚨 CRASH: SIGTRAP (signal \(signal)) - Trace/breakpoint trap (Swift runtime error)"
-            print(message)
+            debugLog(message)
             CrashLogger.shared.logToFile(message)
         }
     }
@@ -173,7 +173,7 @@ class CrashLogger {
     }
 
     func log(_ message: String) {
-        print("📱 [NetoSensei] \(message)")
+        debugLog("📱 [NetoSensei] \(message)")
         setActivity(message)
     }
 
@@ -209,7 +209,7 @@ struct NetoSenseiApp: App {
 
     init() {
         // MINIMAL INIT - just print to console
-        print("🚀 App init() called")
+        debugLog("🚀 App init() called")
 
         // IMPORTANT: Reset crash flag so app doesn't think it's perpetually crashing
         UserDefaults.standard.set(false, forKey: "CrashLogger_DidCrash")
@@ -234,7 +234,7 @@ struct NetoSenseiApp: App {
 
     @MainActor
     private func setupAppLightweight() {
-        print("📱 setupAppLightweight starting...")
+        debugLog("📱 setupAppLightweight starting...")
 
         // FIXED: Clean up potentially bloated UserDefaults data to prevent crashes
         cleanupBloatedUserDefaults()
@@ -245,7 +245,7 @@ struct NetoSenseiApp: App {
         // Request location permission (async, doesn't block)
         LocationPermissionManager.shared.requestPermissionIfNeeded()
 
-        print("📱 setupAppLightweight complete")
+        debugLog("📱 setupAppLightweight complete")
     }
 
     /// FIXED: Clean up UserDefaults entries that may be too large and causing crashes
@@ -269,68 +269,68 @@ struct NetoSenseiApp: App {
         for key in keysToCheck {
             if let data = UserDefaults.standard.data(forKey: key) {
                 if data.count > maxSafeSize {
-                    print("⚠️ UserDefaults cleanup: '\(key)' is bloated (\(data.count) bytes) - removing")
+                    debugLog("⚠️ UserDefaults cleanup: '\(key)' is bloated (\(data.count) bytes) - removing")
                     UserDefaults.standard.removeObject(forKey: key)
                 } else {
-                    print("✅ UserDefaults check: '\(key)' is OK (\(data.count) bytes)")
+                    debugLog("✅ UserDefaults check: '\(key)' is OK (\(data.count) bytes)")
                 }
             }
         }
 
         // Force synchronize to ensure cleanup is persisted
         UserDefaults.standard.synchronize()
-        print("🧹 UserDefaults cleanup complete")
+        debugLog("🧹 UserDefaults cleanup complete")
     }
 
     // MARK: - Background Initialization (runs after UI is visible)
 
     @MainActor
     private func initializeServicesInBackground() async {
-        print("📱 initializeServicesInBackground starting...")
+        debugLog("📱 initializeServicesInBackground starting...")
 
         // Wrap each service in its own error handling so one failure doesn't kill all
 
         // 1. Network Monitor
-        print("📱 Starting NetworkMonitorService...")
+        debugLog("📱 Starting NetworkMonitorService...")
         NetworkMonitorService.shared.startMonitoring()
-        print("📱 NetworkMonitorService started")
+        debugLog("📱 NetworkMonitorService started")
 
         // 2. Diagnostic Engine
-        print("📱 Initializing DiagnosticEngine...")
+        debugLog("📱 Initializing DiagnosticEngine...")
         _ = DiagnosticEngine.shared
-        print("📱 DiagnosticEngine initialized")
+        debugLog("📱 DiagnosticEngine initialized")
 
         // 3. Streaming Diagnostic Service
-        print("📱 Initializing StreamingDiagnosticService...")
+        debugLog("📱 Initializing StreamingDiagnosticService...")
         _ = StreamingDiagnosticService.shared
-        print("📱 StreamingDiagnosticService initialized")
+        debugLog("📱 StreamingDiagnosticService initialized")
 
         // 4. VPN Engine
-        print("📱 Initializing VPNEngine...")
+        debugLog("📱 Initializing VPNEngine...")
         _ = VPNEngine.shared
-        print("📱 VPNEngine initialized")
+        debugLog("📱 VPNEngine initialized")
 
         // 5. Speed Test Engine
-        print("📱 Initializing SpeedTestEngine...")
+        debugLog("📱 Initializing SpeedTestEngine...")
         _ = SpeedTestEngine.shared
-        print("📱 SpeedTestEngine initialized")
+        debugLog("📱 SpeedTestEngine initialized")
 
         // 6. History Manager
-        print("📱 Initializing HistoryManager...")
+        debugLog("📱 Initializing HistoryManager...")
         _ = HistoryManager.shared
-        print("📱 HistoryManager initialized")
+        debugLog("📱 HistoryManager initialized")
 
         // 7. Connection Stability Monitor
-        print("📱 Starting ConnectionStabilityMonitor...")
+        debugLog("📱 Starting ConnectionStabilityMonitor...")
         ConnectionStabilityMonitor.shared.startMonitoring()
-        print("📱 ConnectionStabilityMonitor started")
+        debugLog("📱 ConnectionStabilityMonitor started")
 
-        print("📱 All services initialization complete")
+        debugLog("📱 All services initialization complete")
 
         // Fetch GeoIP data in background (don't await, let it complete whenever)
         Task.detached {
             _ = await GeoIPService.shared.fetchGeoIPInfo()
-            print("📱 GeoIP fetch complete")
+            debugLog("📱 GeoIP fetch complete")
         }
     }
 

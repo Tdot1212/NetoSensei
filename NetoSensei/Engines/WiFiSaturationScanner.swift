@@ -23,7 +23,7 @@ actor WiFiSaturationScanner {
     func performWiFiSaturationScan() async -> WiFiSaturationStatus {
         // DISABLED: NWConnection tests causing app freeze
         guard Self.NWCONNECTION_TESTS_ENABLED else {
-            print("⚠️ WiFi saturation scan DISABLED — NWConnection causing freeze")
+            debugLog("⚠️ WiFi saturation scan DISABLED — NWConnection causing freeze")
             return WiFiSaturationStatus(
                 lanJitter: 0,
                 highLANJitter: false,

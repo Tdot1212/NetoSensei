@@ -40,7 +40,7 @@ class BackgroundTaskManager: ObservableObject {
 
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-            print("[BackgroundTask] Notification permission: \(granted)")
+            debugLog("[BackgroundTask] Notification permission: \(granted)")
         }
     }
 
@@ -66,7 +66,7 @@ class BackgroundTaskManager: ObservableObject {
             result: nil
         )
 
-        print("[BackgroundTask] Started: \(name) (\(taskID))")
+        debugLog("[BackgroundTask] Started: \(name) (\(taskID))")
         return taskID
     }
 
@@ -90,7 +90,7 @@ class BackgroundTaskManager: ObservableObject {
         state.result = result
         activeTasks[taskID] = state
 
-        print("[BackgroundTask] Completed: \(state.name) - \(result)")
+        debugLog("[BackgroundTask] Completed: \(state.name) - \(result)")
 
         // Send notification if app is in background
         if notify && UIApplication.shared.applicationState != .active {
@@ -116,7 +116,7 @@ class BackgroundTaskManager: ObservableObject {
     }
 
     private func forceEndTask(_ taskID: String) {
-        print("[BackgroundTask] Force ending: \(taskID)")
+        debugLog("[BackgroundTask] Force ending: \(taskID)")
         if var state = activeTasks[taskID] {
             state.status = "Interrupted"
             state.isComplete = true

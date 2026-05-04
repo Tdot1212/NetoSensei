@@ -108,21 +108,21 @@ actor DiagnosticsEngine {
 
         // 1. DNS Hijacking Test (25%) - 3s timeout
         onProgress?(0.25, "Checking for DNS hijacking...")
-        print("🔧 [DiagnosticsEngine] About to call SecurityEngine.shared.runDNSHijackTest()...")
+        debugLog("🔧 [DiagnosticsEngine] About to call SecurityEngine.shared.runDNSHijackTest()...")
         let dnsTestResult = await withHardTimeout(
             seconds: 3,
             fallback: Result<[DNSHijackResult], DiagnosticError>.success([])
         ) {
             await SecurityEngine.shared.runDNSHijackTest()
         }
-        print("🔧 [DiagnosticsEngine] DNS hijack test returned with \(dnsTestResult)")
+        debugLog("🔧 [DiagnosticsEngine] DNS hijack test returned with \(dnsTestResult)")
         if case .success(let results) = dnsTestResult {
             dnsHijackResults = results
         }
 
         // 2. VPN Leak Test (50%) - 3s timeout
         onProgress?(0.5, "Testing for VPN leaks...")
-        print("🔧 [DiagnosticsEngine] About to call SecurityEngine.shared.runVPNLeakTest()...")
+        debugLog("🔧 [DiagnosticsEngine] About to call SecurityEngine.shared.runVPNLeakTest()...")
         let vpnLeakTestResult = await withHardTimeout(
             seconds: 3,
             fallback: Result<VPNLeakResult, DiagnosticError>.success(VPNLeakResult(
@@ -135,7 +135,7 @@ actor DiagnosticsEngine {
         ) {
             await SecurityEngine.shared.runVPNLeakTest()
         }
-        print("🔧 [DiagnosticsEngine] VPN leak test returned with \(vpnLeakTestResult)")
+        debugLog("🔧 [DiagnosticsEngine] VPN leak test returned with \(vpnLeakTestResult)")
         if case .success(let result) = vpnLeakTestResult {
             vpnLeakResult = result
         }

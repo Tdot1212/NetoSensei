@@ -238,7 +238,7 @@ actor DNSSecurityScanner {
                 // Check if resolved IP matches ANY expected prefix
                 let matches = expectedPrefixes.contains { resolvedIP.hasPrefix($0) }
                 if !matches && !resolvedIP.isEmpty {
-                    print("⚠️ DNS Hijack detected: \(domain) resolved to \(resolvedIP), expected prefixes: \(expectedPrefixes)")
+                    debugLog("⚠️ DNS Hijack detected: \(domain) resolved to \(resolvedIP), expected prefixes: \(expectedPrefixes)")
                     hijackDetected = true
                     break
                 }
@@ -247,7 +247,7 @@ actor DNSSecurityScanner {
 
         // ISSUE 7 FIX: If all domains resolved to proxy fake IPs, this is VPN routing
         if proxyDNSCount > 0 && !hijackDetected {
-            print("[DNS] All \(proxyDNSCount) domains resolved to proxy fake IPs (198.18.x.x) — normal VPN/proxy behavior, not hijacking")
+            debugLog("[DNS] All \(proxyDNSCount) domains resolved to proxy fake IPs (198.18.x.x) — normal VPN/proxy behavior, not hijacking")
         }
 
         return hijackDetected

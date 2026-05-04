@@ -25,7 +25,7 @@ actor LatencyStabilityScanner {
         // DISABLED: NWConnection tests causing app freeze
         // Creates 60+ connections (30 to gateway + 30 to internet)
         guard Self.NWCONNECTION_TESTS_ENABLED else {
-            print("⚠️ Latency stability scan DISABLED — NWConnection causing freeze")
+            debugLog("⚠️ Latency stability scan DISABLED — NWConnection causing freeze")
             return LatencyStabilityStatus(
                 gatewayLatency: 0,
                 gatewayJitter: 0,

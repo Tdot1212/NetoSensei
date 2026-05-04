@@ -119,9 +119,11 @@ struct DashboardView: View {
             .sheet(isPresented: $showingIPInfo) {
                 IPInfoView()
             }
+            #if DEBUG
             .sheet(isPresented: $showingDebugPanel) {
                 NetworkDebugView()
             }
+            #endif
             .sheet(isPresented: $showingAIChat) {
                 AIChatView()
             }
@@ -156,11 +158,14 @@ struct DashboardView: View {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
 
-        return Text("NetoSensei v\(version) (\(build))")
+        let label = Text("NetoSensei v\(version) (\(build))")
             .font(.caption2)
             .foregroundColor(.secondary.opacity(0.5))
             .frame(maxWidth: .infinity)
             .padding(.top, 8)
+
+        #if DEBUG
+        return label
             .onTapGesture {
                 versionTapCount += 1
                 if versionTapCount >= 5 {
@@ -172,6 +177,9 @@ struct DashboardView: View {
                     versionTapCount = 0
                 }
             }
+        #else
+        return label
+        #endif
     }
 
     // MARK: - Header View (PART 1: Uses smoothed/stable health rating)

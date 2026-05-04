@@ -183,27 +183,27 @@ actor SecurityEngine {
     // MARK: - VPN Leak Test
 
     func runVPNLeakTest() async -> Result<VPNLeakResult, DiagnosticError> {
-        print("🔍 [VPN Leak Test] Starting VPN leak test...")
+        debugLog("🔍 [VPN Leak Test] Starting VPN leak test...")
 
         // FIXED: Use SmartVPNDetector's cached result instead of separate detection
         // This ensures consistency with the main VPN detection shown in the app
-        print("🔍 [VPN Leak Test] Checking SmartVPNDetector cached result...")
+        debugLog("🔍 [VPN Leak Test] Checking SmartVPNDetector cached result...")
         let vpnActive: Bool
         if let cachedResult = await MainActor.run(body: { SmartVPNDetector.shared.detectionResult }) {
             vpnActive = cachedResult.isVPNActive
-            print("🔍 [VPN Leak Test] Using cached VPN detection: \(vpnActive)")
+            debugLog("🔍 [VPN Leak Test] Using cached VPN detection: \(vpnActive)")
         } else {
             // Fallback to async check if no cached result available
             // FIXED: Replaced blocking semaphore.wait with async continuation
             vpnActive = await isVPNActiveAsync()
-            print("🔍 [VPN Leak Test] No cached result, using async check: \(vpnActive)")
+            debugLog("🔍 [VPN Leak Test] No cached result, using async check: \(vpnActive)")
         }
-        print("🔍 [VPN Leak Test] VPN active: \(vpnActive)")
+        debugLog("🔍 [VPN Leak Test] VPN active: \(vpnActive)")
 
         // If no VPN, skip the leak test entirely - return immediately
         if !vpnActive {
-            print("🔍 [VPN Leak Test] ✅ No VPN active - cannot test for leaks (no VPN to leak from)")
-            print("🔍 [VPN Leak Test] Returning immediately...")
+            debugLog("🔍 [VPN Leak Test] ✅ No VPN active - cannot test for leaks (no VPN to leak from)")
+            debugLog("🔍 [VPN Leak Test] Returning immediately...")
 
             let result = VPNLeakResult(
                 realIP: nil,
@@ -213,24 +213,24 @@ actor SecurityEngine {
                 timestamp: Date()
             )
 
-            print("🔍 [VPN Leak Test] ✅ Returned successfully")
+            debugLog("🔍 [VPN Leak Test] ✅ Returned successfully")
             return .success(result)
         }
 
         // VPN is active - check for leaks
-        print("🔍 [VPN Leak Test] VPN active, checking for leaks...")
+        debugLog("🔍 [VPN Leak Test] VPN active, checking for leaks...")
         guard let ipifyURL = URL(string: "https://api.ipify.org?format=json"),
               let currentIP = try? await URLSession.shared.data(from: ipifyURL).0,
               let ipResponse = try? JSONDecoder().decode([String: String].self, from: currentIP),
               let publicIP = ipResponse["ip"] else {
-            print("🔍 [VPN Leak Test] ❌ Failed to fetch IP")
+            debugLog("🔍 [VPN Leak Test] ❌ Failed to fetch IP")
             return .failure(.timeout)
         }
-        print("🔍 [VPN Leak Test] Got public IP: \(publicIP)")
+        debugLog("🔍 [VPN Leak Test] Got public IP: \(publicIP)")
 
         // Get stored real IP
         let storedRealIP = UserDefaults.standard.string(forKey: "real_ip_no_vpn")
-        print("🔍 [VPN Leak Test] Stored real IP: \(storedRealIP ?? "none")")
+        debugLog("🔍 [VPN Leak Test] Stored real IP: \(storedRealIP ?? "none")")
 
         var leaked = false
         var leakType: VPNLeakType = .noLeak
@@ -238,7 +238,7 @@ actor SecurityEngine {
         if let realIP = storedRealIP, realIP == publicIP {
             leaked = true
             leakType = .ipLeak
-            print("🔍 [VPN Leak Test] ⚠️ VPN LEAK DETECTED!")
+            debugLog("🔍 [VPN Leak Test] ⚠️ VPN LEAK DETECTED!")
         }
 
         let result = VPNLeakResult(
@@ -249,7 +249,7 @@ actor SecurityEngine {
             timestamp: Date()
         )
 
-        print("🔍 [VPN Leak Test] ✅ Test complete! Leaked: \(leaked)")
+        debugLog("🔍 [VPN Leak Test] ✅ Test complete! Leaked: \(leaked)")
         return .success(result)
     }
 
@@ -301,7 +301,7 @@ actor SecurityEngine {
     }
 
     private func fetchPublicIP() async throws -> String {
-        print("🔍 [fetchPublicIP] Fetching from api.ipify.org...")
+        debugLog("🔍 [fetchPublicIP] Fetching from api.ipify.org...")
         guard let url = URL(string: "https://api.ipify.org?format=json") else {
             throw URLError(.badURL)
         }
@@ -310,20 +310,20 @@ actor SecurityEngine {
         request.timeoutInterval = 5  // 5 second timeout
 
         let (data, _) = try await URLSession.shared.data(for: request)
-        print("🔍 [fetchPublicIP] Got response data")
+        debugLog("🔍 [fetchPublicIP] Got response data")
 
         struct IPResponse: Codable {
             let ip: String
         }
 
         let response = try JSONDecoder().decode(IPResponse.self, from: data)
-        print("🔍 [fetchPublicIP] Decoded IP: \(response.ip)")
+        debugLog("🔍 [fetchPublicIP] Decoded IP: \(response.ip)")
         return response.ip
     }
 
     private func isVPNActive() async -> Bool {
         // Use Network framework to detect VPN interfaces (iOS-compatible)
-        print("🔍 [isVPNActive] Starting VPN detection...")
+        debugLog("🔍 [isVPNActive] Starting VPN detection...")
         return await withCheckedContinuation { continuation in
             let monitor = NWPathMonitor()
             let queue = DispatchQueue(label: "vpn-detection-security")
@@ -331,7 +331,7 @@ actor SecurityEngine {
             let safeContinuation = TimeoutContinuation(continuation)
 
             monitor.pathUpdateHandler = { path in
-                print("🔍 [isVPNActive] Path update handler called")
+                debugLog("🔍 [isVPNActive] Path update handler called")
 
                 let hasVPN = path.availableInterfaces.contains { interface in
                     let name = interface.name.lowercased()
@@ -342,18 +342,18 @@ actor SecurityEngine {
                            name.contains("tap")
                 }
 
-                print("🔍 [isVPNActive] VPN detected: \(hasVPN), resuming continuation")
+                debugLog("🔍 [isVPNActive] VPN detected: \(hasVPN), resuming continuation")
                 monitor.cancel()
                 safeContinuation.resume(returning: hasVPN)
             }
 
             monitor.start(queue: queue)
-            print("🔍 [isVPNActive] Monitor started, setting 2s timeout")
+            debugLog("🔍 [isVPNActive] Monitor started, setting 2s timeout")
 
             queue.asyncAfter(deadline: .now() + 2) {
-                print("🔍 [isVPNActive] Timeout fired")
+                debugLog("🔍 [isVPNActive] Timeout fired")
                 monitor.cancel()
-                print("🔍 [isVPNActive] Timeout: resuming with false")
+                debugLog("🔍 [isVPNActive] Timeout: resuming with false")
                 safeContinuation.resume(returning: false)
             }
         }

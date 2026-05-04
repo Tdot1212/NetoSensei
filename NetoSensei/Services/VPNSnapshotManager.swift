@@ -26,12 +26,12 @@ class VPNSnapshotManager: ObservableObject {
     private func loadSnapshots() {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
               let decoded = try? JSONDecoder().decode([VPNSnapshot].self, from: data) else {
-            print("📸 [VPNSnapshotManager] No saved snapshots found")
+            debugLog("📸 [VPNSnapshotManager] No saved snapshots found")
             return
         }
 
         snapshots = decoded.sorted(by: { $0.timestamp > $1.timestamp })
-        print("📸 [VPNSnapshotManager] Loaded \(snapshots.count) snapshots")
+        debugLog("📸 [VPNSnapshotManager] Loaded \(snapshots.count) snapshots")
     }
 
     private func saveSnapshots() {
@@ -48,31 +48,31 @@ class VPNSnapshotManager: ObservableObject {
         // Trim to max limit
         if snapshots.count > maxSnapshots {
             snapshots = Array(snapshots.prefix(maxSnapshots))
-            print("🗑️ [VPNSnapshotManager] Trimmed to \(maxSnapshots) snapshots")
+            debugLog("🗑️ [VPNSnapshotManager] Trimmed to \(maxSnapshots) snapshots")
         }
 
         saveSnapshots()
-        print("✅ [VPNSnapshotManager] Added snapshot: \(snapshot.vpnLabel)")
+        debugLog("✅ [VPNSnapshotManager] Added snapshot: \(snapshot.vpnLabel)")
     }
 
     func deleteSnapshot(_ snapshot: VPNSnapshot) {
         snapshots.removeAll { $0.id == snapshot.id }
         saveSnapshots()
-        print("🗑️ [VPNSnapshotManager] Deleted snapshot: \(snapshot.vpnLabel)")
+        debugLog("🗑️ [VPNSnapshotManager] Deleted snapshot: \(snapshot.vpnLabel)")
     }
 
     func updateSnapshot(_ snapshot: VPNSnapshot) {
         if let index = snapshots.firstIndex(where: { $0.id == snapshot.id }) {
             snapshots[index] = snapshot
             saveSnapshots()
-            print("✏️ [VPNSnapshotManager] Updated snapshot: \(snapshot.vpnLabel)")
+            debugLog("✏️ [VPNSnapshotManager] Updated snapshot: \(snapshot.vpnLabel)")
         }
     }
 
     func deleteAll() {
         snapshots.removeAll()
         saveSnapshots()
-        print("🗑️ [VPNSnapshotManager] Deleted all snapshots")
+        debugLog("🗑️ [VPNSnapshotManager] Deleted all snapshots")
     }
 
     // MARK: - Queries
@@ -136,7 +136,7 @@ class VPNSnapshotManager: ObservableObject {
         }
 
         saveSnapshots()
-        print("📥 [VPNSnapshotManager] Imported \(newSnapshots.count) new snapshots")
+        debugLog("📥 [VPNSnapshotManager] Imported \(newSnapshots.count) new snapshots")
         return true
     }
 

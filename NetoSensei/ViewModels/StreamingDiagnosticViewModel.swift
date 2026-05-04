@@ -186,7 +186,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
 
         do {
             guard let url = URL(string: testURL) else {
-                print("⚠️ Invalid test URL: \(testURL)")
+                debugLog("⚠️ Invalid test URL: \(testURL)")
                 return 0.0
             }
             let startTime = Date()
@@ -387,11 +387,9 @@ class StreamingDiagnosticViewModel: ObservableObject {
             // Fallback to restart router
             return .restartRouter
         case .vpn:
-            if let impact = vpnImpact, impact > 40 {
-                return .disconnectVPN
-            } else {
-                return .switchVPNServer(region: "nearest")
-            }
+            // Disconnect-VPN action removed: app cannot disconnect a VPN it
+            // didn't install. Recommend a faster server in both branches.
+            return .switchVPNServer(region: "nearest")
         case .cdn:
             if vpnImpact != nil {
                 return .changeVPNRegion(recommended: "US East")

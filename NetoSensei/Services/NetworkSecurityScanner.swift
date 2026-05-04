@@ -103,7 +103,7 @@ class NetworkSecurityScanner: ObservableObject {
             return
         }
 
-        print("🔍 Scanning network: \(networkInfo.ssid ?? "Unknown")")
+        debugLog("🔍 Scanning network: \(networkInfo.ssid ?? "Unknown")")
 
         // Scan for devices
         let foundDevices = await scanForDevices(networkInfo: networkInfo)
@@ -115,7 +115,7 @@ class NetworkSecurityScanner: ObservableObject {
             devices = foundDevices
             securityIssues = issues
             isScanning = false
-            print("✅ Security scan complete: \(foundDevices.count) devices, \(issues.count) issues")
+            debugLog("✅ Security scan complete: \(foundDevices.count) devices, \(issues.count) issues")
         }
     }
 
@@ -348,7 +348,7 @@ class NetworkSecurityScanner: ObservableObject {
 
     func blockDevice(_ deviceId: String) {
         // In production, this would integrate with router API to block MAC address
-        print("🚫 Block device: \(deviceId)")
+        debugLog("🚫 Block device: \(deviceId)")
         // For now, just remove from trusted list
         if let index = devices.firstIndex(where: { $0.id == deviceId }) {
             devices[index].isTrusted = false

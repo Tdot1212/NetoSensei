@@ -147,7 +147,7 @@ class ConnectionStabilityMonitor: ObservableObject {
         // Initial metrics calculation
         updateMetrics()
 
-        print("📊 Connection Stability Monitor started")
+        debugLog("📊 Connection Stability Monitor started")
     }
 
     func stopMonitoring() {
@@ -159,7 +159,7 @@ class ConnectionStabilityMonitor: ObservableObject {
         // Save final state
         saveEvents()
 
-        print("📊 Connection Stability Monitor stopped")
+        debugLog("📊 Connection Stability Monitor stopped")
     }
 
     // MARK: - Status Processing
@@ -259,13 +259,13 @@ class ConnectionStabilityMonitor: ObservableObject {
 
         // FIXED: Skip events during startup (first 5 seconds)
         guard now.timeIntervalSince(appStartTime) > startupDelay else {
-            print("📊 Stability event skipped (startup): \(type.rawValue)")
+            debugLog("📊 Stability event skipped (startup): \(type.rawValue)")
             return
         }
 
         // FIXED: Debounce - don't fire more than 1 event per 5 seconds
         if let lastTime = lastEventTime, now.timeIntervalSince(lastTime) < minEventInterval {
-            print("📊 Stability event debounced: \(type.rawValue)")
+            debugLog("📊 Stability event debounced: \(type.rawValue)")
             return
         }
         lastEventTime = now
@@ -286,7 +286,7 @@ class ConnectionStabilityMonitor: ObservableObject {
             updateMetrics()
         }
 
-        print("📊 Stability event: \(type.rawValue) - \(details)")
+        debugLog("📊 Stability event: \(type.rawValue) - \(details)")
     }
 
     // MARK: - Metrics Calculation

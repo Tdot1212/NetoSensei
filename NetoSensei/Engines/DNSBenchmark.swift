@@ -376,7 +376,7 @@ actor DNSBenchmark {
 
                 guard sendResult > 0 else {
                     let err = String(cString: strerror(errno))
-                    print("[DNS] Send to \(dnsServer) failed: \(err)")
+                    debugLog("[DNS] Send to \(dnsServer) failed: \(err)")
                     close(socketFD)
                     continuation.resume(returning: (false, nil))
                     return
@@ -394,7 +394,7 @@ actor DNSBenchmark {
                     continuation.resume(returning: (true, latency))
                 } else {
                     let err = recvResult == 0 ? "connection closed" : String(cString: strerror(savedErrno))
-                    print("[DNS] Recv from \(dnsServer) failed: \(err) (errno=\(savedErrno))")
+                    debugLog("[DNS] Recv from \(dnsServer) failed: \(err) (errno=\(savedErrno))")
                     continuation.resume(returning: (false, nil))
                 }
             }

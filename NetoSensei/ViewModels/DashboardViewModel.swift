@@ -209,7 +209,7 @@ class DashboardViewModel: ObservableObject {
     private func syncDiagnosticRootCause(from history: [DiagnosticHistoryEntry]) {
         // FIXED: Re-entry guard to prevent cascading updates
         guard !isSyncingDiagnostic else {
-            print("🔄 syncDiagnosticRootCause skipped - already in progress")
+            debugLog("🔄 syncDiagnosticRootCause skipped - already in progress")
             return
         }
         isSyncingDiagnostic = true
@@ -226,7 +226,7 @@ class DashboardViewModel: ObservableObject {
         lastDiagnosticRootCause = lastDiagnostic.primaryIssueCategory
         lastDiagnosticSummary = lastDiagnostic.summary
 
-        print("📊 Dashboard synced diagnostic: \(lastDiagnostic.primaryIssueCategory) - \(lastDiagnostic.summary)")
+        debugLog("📊 Dashboard synced diagnostic: \(lastDiagnostic.primaryIssueCategory) - \(lastDiagnostic.summary)")
 
         // Update UI to reflect the diagnostic result
         updateUIStatus()
@@ -240,7 +240,7 @@ class DashboardViewModel: ObservableObject {
     func refresh(forceRefresh: Bool = false) async {
         // Prevent multiple concurrent refreshes
         guard !isLoading else {
-            print("🔄 Dashboard refresh already in progress, skipping")
+            debugLog("🔄 Dashboard refresh already in progress, skipping")
             return
         }
 
@@ -248,7 +248,7 @@ class DashboardViewModel: ObservableObject {
         if !forceRefresh {
             if hasRefreshedOnLaunch {
                 if let lastTime = lastRefreshTime, Date().timeIntervalSince(lastTime) < minRefreshInterval {
-                    print("🔄 Dashboard refresh() skipped — auto-refresh limited to once per 60s")
+                    debugLog("🔄 Dashboard refresh() skipped — auto-refresh limited to once per 60s")
                     return
                 }
             }
@@ -256,7 +256,7 @@ class DashboardViewModel: ObservableObject {
         }
         lastRefreshTime = Date()
 
-        print("🔄 Dashboard refresh() called")
+        debugLog("🔄 Dashboard refresh() called")
         isLoading = true
 
         // Use a timeout to prevent infinite loading
@@ -289,12 +289,12 @@ class DashboardViewModel: ObservableObject {
                 group.cancelAll()
             }
         } catch {
-            print("⚠️ Dashboard refresh timeout or error: \(error)")
+            debugLog("⚠️ Dashboard refresh timeout or error: \(error)")
         }
 
         // Update UI with whatever data we have
         let currentStatus = networkMonitor.currentStatus
-        print("📊 Got network status: WiFi connected=\(currentStatus.wifi.isConnected), SSID=\(currentStatus.wifi.ssid ?? "nil")")
+        debugLog("📊 Got network status: WiFi connected=\(currentStatus.wifi.isConnected), SSID=\(currentStatus.wifi.ssid ?? "nil")")
 
         status = currentStatus
         updateUIStatus()
@@ -307,7 +307,7 @@ class DashboardViewModel: ObservableObject {
 
         lastUpdated = Date()
         isLoading = false
-        print("✅ Dashboard refresh complete")
+        debugLog("✅ Dashboard refresh complete")
     }
 
     private enum RefreshError: Error {
@@ -338,7 +338,7 @@ class DashboardViewModel: ObservableObject {
                 group.cancelAll()
             }
         } catch {
-            print("⚠️ GeoIP fetch timeout")
+            debugLog("⚠️ GeoIP fetch timeout")
         }
     }
 
@@ -357,7 +357,7 @@ class DashboardViewModel: ObservableObject {
     func updateUIStatus() {
         // FIXED: Re-entry guard to prevent cascading updates
         guard !isUpdatingUIStatus else {
-            print("🔄 updateUIStatus skipped - already in progress")
+            debugLog("🔄 updateUIStatus skipped - already in progress")
             return
         }
         isUpdatingUIStatus = true

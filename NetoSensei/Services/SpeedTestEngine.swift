@@ -33,7 +33,7 @@ class SpeedTestEngine: ObservableObject {
     @Published var lastTestWasOverseas: Bool = false
 
     func runSpeedTest() async -> SpeedTestResult {
-        print("🚀 SpeedTestEngine: Starting speed test")
+        debugLog("🚀 SpeedTestEngine: Starting speed test")
 
         // Update MainActor state
         self.isRunning = true
@@ -50,39 +50,39 @@ class SpeedTestEngine: ObservableObject {
         self.currentPhase = .findingServer; self.progress = 0.1
         selectedServer = await findBestServer()
         let serverLabel = isInternationalTest ? "\(currentServer.label) (overseas)" : currentServer.label
-        print("✅ Server selected: \(serverLabel)")
+        debugLog("✅ Server selected: \(serverLabel)")
 
         // Phase 2: Testing Ping (20%) - 5s timeout
         self.currentPhase = .testingPing; self.progress = 0.2
         // China-aware ping target
         let pingTarget = (isInChina && !vpnActive) ? "www.baidu.com" : "cloudflare-dns.com"
         let (ping, jitter) = await testLatency(server: pingTarget, timeout: 5.0)
-        print("✅ Ping: \(ping)ms, Jitter: \(jitter)ms")
+        debugLog("✅ Ping: \(ping)ms, Jitter: \(jitter)ms")
         self.progress = 0.3
 
         // Phase 3: Testing Download (40%) - 30s timeout
         self.currentPhase = .testingDownload; self.progress = 0.4
         let (downloadSpeed, _) = await testDownloadSpeed(timeout: 30.0)
         if downloadSpeed == 0 && isInChina && !vpnActive {
-            print("⚠️ Download test failed — overseas server unreachable from China without VPN")
+            debugLog("⚠️ Download test failed — overseas server unreachable from China without VPN")
         } else {
-            print("✅ Download: \(downloadSpeed) Mbps")
+            debugLog("✅ Download: \(downloadSpeed) Mbps")
         }
         self.progress = 0.7
 
         // Phase 4: Testing Upload (20%) - 20s timeout
         self.currentPhase = .testingUpload; self.progress = 0.75
         let uploadSpeed = await testUploadSpeed(timeout: 20.0)
-        print("✅ Upload: \(uploadSpeed) Mbps")
+        debugLog("✅ Upload: \(uploadSpeed) Mbps")
         self.progress = 0.9
 
         // Phase 5: Measure Packet Loss (10%) - 5s timeout
         let packetLoss = await measurePacketLoss(timeout: 5.0)
         // CHINA RULE 5: 100% loss to ONE server ≠ network dead
         if packetLoss >= 100 && isInChina && !vpnActive {
-            print("⚠️ Packet loss 100% — test endpoint may be unreachable or blocked from China")
+            debugLog("⚠️ Packet loss 100% — test endpoint may be unreachable or blocked from China")
         } else {
-            print("✅ Packet Loss: \(packetLoss)%")
+            debugLog("✅ Packet Loss: \(packetLoss)%")
         }
         self.progress = 1.0; self.currentPhase = .complete
 
@@ -105,7 +105,7 @@ class SpeedTestEngine: ObservableObject {
         self.isRunning = false
         self.currentPhase = .idle
 
-        print("✅ SpeedTestEngine: Test complete")
+        debugLog("✅ SpeedTestEngine: Test complete")
         return result
     }
 
@@ -173,14 +173,14 @@ class SpeedTestEngine: ObservableObject {
                     let isDomestic = (latency ?? 999) < 80
                     isInternationalTest = !isDomestic
                     let routeLabel = isDomestic ? "domestic" : "international"
-                    print("[SpeedTest] In China, \(server.label) reachable (\(routeLabel), \(Int(latency ?? 0))ms)")
+                    debugLog("[SpeedTest] In China, \(server.label) reachable (\(routeLabel), \(Int(latency ?? 0))ms)")
                     return server.hostname
                 }
             }
             // No servers reachable
             isInternationalTest = true
             currentServer = Self.cloudflareServer
-            print("[SpeedTest] In China without VPN, all servers unreachable — speed test will likely fail")
+            debugLog("[SpeedTest] In China without VPN, all servers unreachable — speed test will likely fail")
             return "speed.cloudflare.com"
         }
 
@@ -246,7 +246,7 @@ class SpeedTestEngine: ObservableObject {
         for (i, testSize) in testSizes.enumerated() {
             // Skip the large test if first test showed very slow speeds (<2 Mbps)
             if i == 1, let firstSpeed = collectedSpeeds.first, firstSpeed < 2.0 {
-                print("📥 Skipping \(testSize.label) test — connection too slow (\(String(format: "%.1f", firstSpeed)) Mbps)")
+                debugLog("📥 Skipping \(testSize.label) test — connection too slow (\(String(format: "%.1f", firstSpeed)) Mbps)")
                 break
             }
 
@@ -264,7 +264,7 @@ class SpeedTestEngine: ObservableObject {
                     let megabits = Double(data.count) * 8 / 1_000_000
                     let mbps = megabits / duration
 
-                    print("📥 Download test \(i+1) (\(testSize.label)): \(String(format: "%.1f", mbps)) Mbps (\(data.count) bytes in \(String(format: "%.1f", duration))s)")
+                    debugLog("📥 Download test \(i+1) (\(testSize.label)): \(String(format: "%.1f", mbps)) Mbps (\(data.count) bytes in \(String(format: "%.1f", duration))s)")
                     return mbps
                 }
 
@@ -272,14 +272,14 @@ class SpeedTestEngine: ObservableObject {
                     collectedSpeeds.append(speed)
                 }
             } catch {
-                print("⚠️ Download test \(i+1) (\(testSize.label)) failed: \(error.localizedDescription)")
+                debugLog("⚠️ Download test \(i+1) (\(testSize.label)) failed: \(error.localizedDescription)")
             }
 
             try? await Task.sleep(nanoseconds: 300_000_000)
         }
 
         guard !collectedSpeeds.isEmpty else {
-            print("⚠️ All download tests failed")
+            debugLog("⚠️ All download tests failed")
             return (0.0, nil)
         }
 
@@ -292,7 +292,7 @@ class SpeedTestEngine: ObservableObject {
         let jitter = sqrt(variance)
 
         // Use the larger test result if available (more accurate), otherwise use first
-        print("📥 Download result: \(String(format: "%.1f", bestSpeed)) Mbps (from \(collectedSpeeds.count) test(s))")
+        debugLog("📥 Download result: \(String(format: "%.1f", bestSpeed)) Mbps (from \(collectedSpeeds.count) test(s))")
         return (bestSpeed, jitter)
     }
 
@@ -327,7 +327,7 @@ class SpeedTestEngine: ObservableObject {
                     let megabits = Double(testData.count) * 8 / 1_000_000
                     let mbps = megabits / duration
 
-                    print("📤 Upload test \(i+1): \(String(format: "%.1f", mbps)) Mbps (\(testData.count) bytes in \(String(format: "%.1f", duration))s)")
+                    debugLog("📤 Upload test \(i+1): \(String(format: "%.1f", mbps)) Mbps (\(testData.count) bytes in \(String(format: "%.1f", duration))s)")
                     return mbps
                 }
 
@@ -335,7 +335,7 @@ class SpeedTestEngine: ObservableObject {
                     collectedSpeeds.append(speed)
                 }
             } catch {
-                print("⚠️ Upload test \(i+1) failed: \(error.localizedDescription)")
+                debugLog("⚠️ Upload test \(i+1) failed: \(error.localizedDescription)")
                 // Continue to use whatever successful results we have
             }
 
@@ -345,12 +345,12 @@ class SpeedTestEngine: ObservableObject {
 
         // FIXED: Return whatever successful measurements we collected
         guard !collectedSpeeds.isEmpty else {
-            print("⚠️ All upload tests failed")
+            debugLog("⚠️ All upload tests failed")
             return 0.0
         }
 
         let avgSpeed = collectedSpeeds.reduce(0, +) / Double(collectedSpeeds.count)
-        print("📤 Upload result: \(String(format: "%.1f", avgSpeed)) Mbps (from \(collectedSpeeds.count) successful test(s))")
+        debugLog("📤 Upload result: \(String(format: "%.1f", avgSpeed)) Mbps (from \(collectedSpeeds.count) successful test(s))")
         return avgSpeed
     }
 

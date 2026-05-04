@@ -45,11 +45,11 @@ class DiagnosticViewModel: ObservableObject {
     func runFullDiagnostic() {
         // CRITICAL: Prevent running while already in progress
         guard !isRunning else {
-            print("⚠️ Diagnostic already in progress, ignoring tap")
+            debugLog("⚠️ Diagnostic already in progress, ignoring tap")
             return
         }
 
-        print("🚀 ========== DIAGNOSTIC STARTED ==========")
+        debugLog("🚀 ========== DIAGNOSTIC STARTED ==========")
 
         // Cancel any existing diagnostic (should not happen with guard above, but defensive)
         diagnosticTask?.cancel()
@@ -73,17 +73,17 @@ class DiagnosticViewModel: ObservableObject {
                 }
                 return
             }
-            print("📋 Diagnostic task created")
+            debugLog("📋 Diagnostic task created")
 
             do {
-                print("✅ Diagnostic initialized, starting tests...")
+                debugLog("✅ Diagnostic initialized, starting tests...")
                 try Task.checkCancellation()
 
                 // Capture network snapshot ONCE at the beginning (on MainActor)
                 let networkSnapshot = await MainActor.run {
                     self.networkMonitor.currentStatus
                 }
-                print("✅ Network snapshot captured")
+                debugLog("✅ Network snapshot captured")
 
                 // STEP 1: Ping Router/Gateway (0.1 = 10%) - 3s timeout
                 try Task.checkCancellation()
@@ -144,7 +144,7 @@ class DiagnosticViewModel: ObservableObject {
                 let isp = try await withTimeout(seconds: 3) {
                     await self.testISP()
                 }
-                print("✅ testISP() completed")
+                debugLog("✅ testISP() completed")
 
                 // STEP 7: Evaluate and produce result (0.7+ = 70-100%)
                 await MainActor.run {
@@ -152,7 +152,7 @@ class DiagnosticViewModel: ObservableObject {
                     self.progress = 0.8
                 }
 
-                print("✅ All tests completed, evaluating results...")
+                debugLog("✅ All tests completed, evaluating results...")
 
                 // Use the snapshot we captured at the beginning (no MainActor access needed)
                 let diagnosticResult = self.evaluate(
@@ -165,22 +165,22 @@ class DiagnosticViewModel: ObservableObject {
                     networkSnapshot: networkSnapshot
                 )
 
-                print("✅ Diagnostic result created")
+                debugLog("✅ Diagnostic result created")
 
                 // Analyze root cause (on MainActor since rootCauseAnalyzer is MainActor-isolated)
-                print("🧠 Analyzing root cause...")
+                debugLog("🧠 Analyzing root cause...")
                 let rootCauseAnalysis = await MainActor.run {
                     self.rootCauseAnalyzer.analyze(diagnostic: diagnosticResult)
                 }
-                print("✅ Root cause identified: \(rootCauseAnalysis.primaryProblem.rawValue)")
+                debugLog("✅ Root cause identified: \(rootCauseAnalysis.primaryProblem.rawValue)")
 
                 // Update UI and save to history
-                print("📱 Updating UI on MainActor...")
+                debugLog("📱 Updating UI on MainActor...")
 
                 // FIXED: Use re-entry guard to prevent cascading updates
                 await MainActor.run {
                     guard !self.isUpdatingUI else {
-                        print("⚠️ Skipping re-entrant UI update")
+                        debugLog("⚠️ Skipping re-entrant UI update")
                         return
                     }
                     self.isUpdatingUI = true
@@ -216,7 +216,7 @@ class DiagnosticViewModel: ObservableObject {
                         publicIP: networkSnapshot.publicIP,
                         isp: vpnResult?.publicISP
                     )
-                    print("🧠 NetworkInterpreter updated after diagnostic")
+                    debugLog("🧠 NetworkInterpreter updated after diagnostic")
 
                     // Haptic feedback based on health score
                     if rootCauseAnalysis.healthScore >= 80 {
@@ -230,8 +230,8 @@ class DiagnosticViewModel: ObservableObject {
                     // Re-enable idle timer
                     UIApplication.shared.isIdleTimerDisabled = false
 
-                    print("✅ Diagnostic UI update finished")
-                    print("📊 Health Score: \(rootCauseAnalysis.healthScore)/100")
+                    debugLog("✅ Diagnostic UI update finished")
+                    debugLog("📊 Health Score: \(rootCauseAnalysis.healthScore)/100")
                 }
 
                 // FIXED: Save history AFTER UI update completes, in background task
@@ -289,7 +289,7 @@ class DiagnosticViewModel: ObservableObject {
                         NetworkHistoryManager.shared.addEntry(historyEntry)
                     }
 
-                    print("📊 History saved in background")
+                    debugLog("📊 History saved in background")
                 }
 
             } catch is CancellationError {
@@ -321,7 +321,7 @@ class DiagnosticViewModel: ObservableObject {
                 }
             }
 
-            print("========== DIAGNOSTIC FINISHED ==========")
+            debugLog("========== DIAGNOSTIC FINISHED ==========")
         }
     }
 
@@ -340,12 +340,12 @@ class DiagnosticViewModel: ObservableObject {
     // MARK: - Test Functions (ALL NONISOLATED)
 
     private func testGateway() async -> DiagnosticTest {
-        print("🔍 testGateway() started")
+        debugLog("🔍 testGateway() started")
 
         let (success, latency) = await networkMonitor.pingHost("192.168.1.1", timeout: 2.0)
         let latencyMs = latency ?? 0
 
-        print("🔍 testGateway() - success: \(success), latency: \(latencyMs)")
+        debugLog("🔍 testGateway() - success: \(success), latency: \(latencyMs)")
 
         if !success {
             return DiagnosticTest(
@@ -367,12 +367,12 @@ class DiagnosticViewModel: ObservableObject {
     }
 
     private func testExternal() async -> DiagnosticTest {
-        print("🔍 testExternal() started")
+        debugLog("🔍 testExternal() started")
 
         let (success, latency) = await networkMonitor.pingHost("1.1.1.1", timeout: 2.0)
         let latencyMs = latency ?? 0
 
-        print("🔍 testExternal() - success: \(success), latency: \(latencyMs)")
+        debugLog("🔍 testExternal() - success: \(success), latency: \(latencyMs)")
 
         if !success {
             return DiagnosticTest(
@@ -394,13 +394,13 @@ class DiagnosticViewModel: ObservableObject {
     }
 
     private func testDNS() async -> DiagnosticTest {
-        print("🔍 testDNS() started")
+        debugLog("🔍 testDNS() started")
 
         let start = Date()
         let success = await safeDNSLookup(hostname: "www.apple.com", timeout: 2.0)
         let latency = Date().timeIntervalSince(start) * 1000
 
-        print("🔍 testDNS() - success: \(success), latency: \(latency)")
+        debugLog("🔍 testDNS() - success: \(success), latency: \(latency)")
 
         if !success {
             return DiagnosticTest(
@@ -430,11 +430,11 @@ class DiagnosticViewModel: ObservableObject {
     }
 
     private func testHTTP() async -> DiagnosticTest {
-        print("🔍 testHTTP() started")
+        debugLog("🔍 testHTTP() started")
 
         let success = await safeHTTPCheck(url: "https://www.apple.com/library/test/success.html", timeout: 3.0)
 
-        print("🔍 testHTTP() - success: \(success)")
+        debugLog("🔍 testHTTP() - success: \(success)")
 
         if !success {
             return DiagnosticTest(
@@ -456,7 +456,7 @@ class DiagnosticViewModel: ObservableObject {
     }
 
     private func testVPN() async -> DiagnosticTest {
-        print("🔍 testVPN() started")
+        debugLog("🔍 testVPN() started")
 
         // FIXED: Check BOTH NetworkMonitor AND SmartVPNDetector for consistency
         // The SmartVPNDetector uses routing analysis which is more reliable
@@ -473,7 +473,7 @@ class DiagnosticViewModel: ObservableObject {
         // This prevents false negatives when one detector is slower
         let isActive = networkMonitorVPN || smartDetectorVPN
 
-        print("🔍 testVPN() - networkMonitor: \(networkMonitorVPN), smartDetector: \(smartDetectorVPN), final: \(isActive)")
+        debugLog("🔍 testVPN() - networkMonitor: \(networkMonitorVPN), smartDetector: \(smartDetectorVPN), final: \(isActive)")
 
         if isActive {
             return DiagnosticTest(
@@ -495,13 +495,13 @@ class DiagnosticViewModel: ObservableObject {
     }
 
     private func testISP() async -> DiagnosticTest {
-        print("🔍 testISP() started")
+        debugLog("🔍 testISP() started")
 
         // Do a fresh ping test instead of reading cached status
         let (success, latency) = await networkMonitor.pingHost("1.1.1.1", timeout: 2.0)
         let internetLatency = latency ?? 0
 
-        print("🔍 testISP() - success: \(success), latency: \(internetLatency)")
+        debugLog("🔍 testISP() - success: \(success), latency: \(internetLatency)")
 
         // Check if VPN is active to give accurate diagnosis
         let vpnActive = await MainActor.run {

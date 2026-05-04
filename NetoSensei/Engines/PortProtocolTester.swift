@@ -114,7 +114,7 @@ actor PortProtocolTester {
         // DISABLED: NWConnection tests causing app freeze
         // Creates 12+ connections that flood the main thread
         guard Self.NWCONNECTION_TESTS_ENABLED else {
-            print("⚠️ Port test DISABLED — NWConnection causing freeze")
+            debugLog("⚠️ Port test DISABLED — NWConnection causing freeze")
             return PortProtocolTestSuite(
                 timestamp: Date(),
                 results: [],

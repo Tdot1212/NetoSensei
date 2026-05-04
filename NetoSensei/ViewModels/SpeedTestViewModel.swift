@@ -86,7 +86,7 @@ class SpeedTestViewModel: ObservableObject {
     // MARK: - Run Speed Test (FIXED: Proper async pattern with cancellation support)
 
     func runSpeedTest() {
-        print("🚀 SpeedTestViewModel: Starting speed test")
+        debugLog("🚀 SpeedTestViewModel: Starting speed test")
 
         // Cancel any existing speed test
         currentSpeedTestTask?.cancel()
@@ -123,12 +123,12 @@ class SpeedTestViewModel: ObservableObject {
             // Check for cancellation before updating UI
             guard !Task.isCancelled else { return }
 
-            print("✅ SpeedTestViewModel: Got result - Download: \(final.downloadSpeed) Mbps")
+            debugLog("✅ SpeedTestViewModel: Got result - Download: \(final.downloadSpeed) Mbps")
 
             // Update UI: Complete (already on MainActor)
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
-                print("📱 Updating UI...")
+                debugLog("📱 Updating UI...")
                 self.result = final
                 self.history.insert(final, at: 0)
                 self.isRunning = false
@@ -177,7 +177,7 @@ class SpeedTestViewModel: ObservableObject {
                 )
                 NetworkHistoryManager.shared.addEntry(historyEntry)
 
-                print("✅ SpeedTestViewModel: UI updated with results")
+                debugLog("✅ SpeedTestViewModel: UI updated with results")
             }
         }
     }

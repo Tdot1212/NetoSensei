@@ -267,13 +267,13 @@ class VPNOptimizer: ObservableObject {
         isOptimizing = true
         regionResults = []
 
-        print("🚀 Starting VPN optimization for: \(purpose.rawValue)")
+        debugLog("🚀 Starting VPN optimization for: \(purpose.rawValue)")
 
         // Test all popular regions
         var results: [RegionTestResult] = []
 
         for region in Self.popularRegions {
-            print("🌍 Testing region: \(region.displayName)")
+            debugLog("🌍 Testing region: \(region.displayName)")
             let result = await testRegion(region)
             results.append(result)
 
@@ -302,7 +302,7 @@ class VPNOptimizer: ObservableObject {
             isOptimizing = false
         }
 
-        print("✅ VPN optimization complete. Recommended: \(bestRegion?.region.displayName ?? "None")")
+        debugLog("✅ VPN optimization complete. Recommended: \(bestRegion?.region.displayName ?? "None")")
     }
 
     enum OptimizationPurpose: String {
@@ -505,11 +505,11 @@ class VPNOptimizer: ObservableObject {
     func optimizeForStreaming(platform: String) -> VPNRegion? {
         // Find CDN locations for the platform
         guard let cdn = Self.streamingCDNs.first(where: { $0.platform == platform }) else {
-            print("⚠️ No CDN info for platform: \(platform)")
+            debugLog("⚠️ No CDN info for platform: \(platform)")
             return nil
         }
 
-        print("🎬 Optimizing VPN for \(platform) streaming...")
+        debugLog("🎬 Optimizing VPN for \(platform) streaming...")
 
         // For each CDN location, find the closest VPN region
         var bestRegion: VPNRegion?
@@ -529,7 +529,7 @@ class VPNOptimizer: ObservableObject {
         }
 
         if let best = bestRegion {
-            print("✅ Best VPN region for \(platform): \(best.displayName) (\(Int(shortestDistance))km from CDN)")
+            debugLog("✅ Best VPN region for \(platform): \(best.displayName) (\(Int(shortestDistance))km from CDN)")
         }
 
         return bestRegion

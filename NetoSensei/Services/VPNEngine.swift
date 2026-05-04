@@ -217,16 +217,16 @@ class VPNEngine: ObservableObject {
     // MARK: - VPN Control (Stub Methods)
 
     func disconnectVPN() {
-        print("VPN disconnect not available - use your VPN app to disconnect")
+        debugLog("VPN disconnect not available - use your VPN app to disconnect")
     }
 
     func reconnectVPN() async {
-        print("VPN reconnect not available - use your VPN app to reconnect")
+        debugLog("VPN reconnect not available - use your VPN app to reconnect")
         await refreshVPNStatus()
     }
 
     func connectVPN() async {
-        print("VPN connect not available - use your VPN app to connect")
+        debugLog("VPN connect not available - use your VPN app to connect")
     }
 
     // MARK: - Recovery Guidance

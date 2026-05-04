@@ -721,7 +721,7 @@ class NetworkInterpreter: ObservableObject {
         current = interpretation
         lastInterpretedAt = Date()
 
-        print("🧠 NetworkInterpreter: Score=\(score), RootCause=\(rootCause.title), VPNActive=\(vpnActive), VPNOverhead=\(Int(vpnOverhead))ms")
+        debugLog("🧠 NetworkInterpreter: Score=\(score), RootCause=\(rootCause.title), VPNActive=\(vpnActive), VPNOverhead=\(Int(vpnOverhead))ms")
 
         return interpretation
     }

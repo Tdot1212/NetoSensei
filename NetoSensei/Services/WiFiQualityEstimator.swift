@@ -78,7 +78,7 @@ class WiFiQualityEstimator {
         // DISABLED: NWConnection tests causing app freeze
         // Creates 10 connections that can flood the system
         guard Self.NWCONNECTION_TESTS_ENABLED else {
-            print("⚠️ WiFi quality test DISABLED — NWConnection causing freeze")
+            debugLog("⚠️ WiFi quality test DISABLED — NWConnection causing freeze")
             return WiFiQualityResult(
                 quality: .unknown,
                 medianLatencyMs: 0,

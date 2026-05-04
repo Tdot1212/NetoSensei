@@ -277,7 +277,7 @@ final class AIPreflightCollector: ObservableObject {
         let payload = (try? JSONEncoder().encode(snapshot))?.count ?? 0
         let succeeded = snapshot.featuresTested.filter { $0.value }.count
         let total = snapshot.featuresTested.count
-        print("[AI] Sending \(payload) bytes of diagnostic data to AI (\(succeeded)/\(total) features collected in \(Int(snapshot.collectionDurationMs))ms)")
+        debugLog("[AI] Sending \(payload) bytes of diagnostic data to AI (\(succeeded)/\(total) features collected in \(Int(snapshot.collectionDurationMs))ms)")
 
         return snapshot
     }
@@ -433,7 +433,7 @@ final class AIPreflightCollector: ObservableObject {
             await completeStep(5, status: .failed)
         } else if let cached = recentCachedSpeedTest() {
             let age = Int(Date().timeIntervalSince(cached.timestamp) / 60)
-            print("[AI Preflight] Using cached speed test from \(age)m ago")
+            debugLog("[AI Preflight] Using cached speed test from \(age)m ago")
             applySpeedTestResult(cached, to: &snapshot)
             setFeature("speed_test", cached.downloadSpeed > 0)
             await completeStep(5, status: cached.downloadSpeed > 0 ? .completed : .failed)

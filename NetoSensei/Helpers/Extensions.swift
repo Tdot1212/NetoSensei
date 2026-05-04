@@ -266,12 +266,12 @@ extension UserDefaults {
     /// FIXED: NO loops, NO recursion. Encode once, check once, save once.
     func setCodable<T: Codable>(_ object: T, forKey key: String) {
         guard let encoded = try? JSONEncoder().encode(object) else {
-            print("❌ UserDefaults: Failed to encode \(key)")
+            debugLog("❌ UserDefaults: Failed to encode \(key)")
             return
         }
 
         if encoded.count > UserDefaults.maxEncodedSize {
-            print("⚠️ UserDefaults: \(key) too large (\(encoded.count) bytes), NOT saving")
+            debugLog("⚠️ UserDefaults: \(key) too large (\(encoded.count) bytes), NOT saving")
             return
         }
 
@@ -292,7 +292,7 @@ extension UserDefaults {
 
         // Step 2: Encode ONCE
         guard let data = try? JSONEncoder().encode(trimmed) else {
-            print("❌ UserDefaults: Failed to encode \(key)")
+            debugLog("❌ UserDefaults: Failed to encode \(key)")
             return
         }
 
@@ -301,7 +301,7 @@ extension UserDefaults {
             let smallerItems = Array(array.prefix(max(1, maxItems / 5)))
             guard let smallerData = try? JSONEncoder().encode(smallerItems) else { return }
             if smallerData.count > UserDefaults.maxEncodedSize {
-                print("⚠️ UserDefaults: \(key) still too large after hard trim, NOT saving")
+                debugLog("⚠️ UserDefaults: \(key) still too large after hard trim, NOT saving")
                 return
             }
             setValue(smallerData, forKey: key)

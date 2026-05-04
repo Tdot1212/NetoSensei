@@ -267,7 +267,7 @@ class AdvancedDiagnosticService: ObservableObject {
         // empty TracerouteResult that flowed into "Unable to trace route" /
         // "Routing Optimization — Check your internet connection" advice.
         guard Self.TRACEROUTE_ENABLED else {
-            print("⚠️ Traceroute DISABLED — causing app freeze")
+            debugLog("⚠️ Traceroute DISABLED — causing app freeze")
             return nil
         }
 

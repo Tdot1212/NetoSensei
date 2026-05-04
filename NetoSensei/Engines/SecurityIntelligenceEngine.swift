@@ -27,17 +27,17 @@ actor SecurityIntelligenceEngine {
 
     // Helper to run scanner with timeout
     private func withScannerTimeout<T>(_ name: String, timeout: Int = 5, operation: @escaping () async -> T) async -> T? {
-        print("🔒 [SecurityIntelligence] Starting \(name)...")
+        debugLog("🔒 [SecurityIntelligence] Starting \(name)...")
         return await withTaskGroup(of: T?.self) { group in
             group.addTask {
                 let result = await operation()
-                print("🔒 [SecurityIntelligence] ✅ \(name) completed")
+                debugLog("🔒 [SecurityIntelligence] ✅ \(name) completed")
                 return result
             }
 
             group.addTask {
                 try? await Task.sleep(nanoseconds: UInt64(timeout) * 1_000_000_000)
-                print("🔒 [SecurityIntelligence] ⏱️ \(name) timed out after \(timeout)s")
+                debugLog("🔒 [SecurityIntelligence] ⏱️ \(name) timed out after \(timeout)s")
                 return nil
             }
 
@@ -50,7 +50,7 @@ actor SecurityIntelligenceEngine {
     // MARK: - Run Full Security Intelligence Scan
 
     func runFullSecurityScan(onProgress: ProgressCallback? = nil) async -> SecurityIntelligenceReport {
-        print("🔒 [SecurityIntelligence] Starting SIMPLIFIED security scan...")
+        debugLog("🔒 [SecurityIntelligence] Starting SIMPLIFIED security scan...")
         var threats: [SecurityThreat] = []
         var warnings: [SecurityWarning] = []
         var recommendations: [SecurityRecommendation] = []

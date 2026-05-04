@@ -71,7 +71,7 @@ actor HistoryStorageService {
                 try FileManager.default.moveItem(at: tempURL, to: fileURL)
             }
         } catch {
-            print("HistoryStorageService: save failed - \(error.localizedDescription)")
+            debugLog("HistoryStorageService: save failed - \(error.localizedDescription)")
         }
     }
 
@@ -104,7 +104,7 @@ actor HistoryStorageService {
             let legacyDecoder = JSONDecoder()
             let entries = try legacyDecoder.decode([NetworkHistoryEntry].self, from: data)
 
-            print("HistoryStorageService: migrating \(entries.count) entries from UserDefaults")
+            debugLog("HistoryStorageService: migrating \(entries.count) entries from UserDefaults")
 
             // Save to new file format
             await save(entries)
@@ -114,7 +114,7 @@ actor HistoryStorageService {
 
             return entries
         } catch {
-            print("HistoryStorageService: migration failed - \(error.localizedDescription)")
+            debugLog("HistoryStorageService: migration failed - \(error.localizedDescription)")
             return []
         }
     }

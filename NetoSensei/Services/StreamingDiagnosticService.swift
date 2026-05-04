@@ -311,11 +311,11 @@ class StreamingDiagnosticService: ObservableObject {
                 let megabits = Double(data.count) * 8 / 1_000_000
                 let mbps = megabits / duration
 
-                print("📊 Streaming throughput: \(String(format: "%.1f", mbps)) Mbps (\(data.count) bytes in \(String(format: "%.2f", duration))s)")
+                debugLog("📊 Streaming throughput: \(String(format: "%.1f", mbps)) Mbps (\(data.count) bytes in \(String(format: "%.2f", duration))s)")
                 return mbps
             }
         } catch {
-            print("⚠️ Streaming throughput measurement failed: \(error)")
+            debugLog("⚠️ Streaming throughput measurement failed: \(error)")
             return 0  // Timeout or error
         }
     }

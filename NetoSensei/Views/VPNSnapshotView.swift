@@ -373,7 +373,7 @@ struct VPNSnapshotView: View {
 
         Task {
             // Step 1: Run full diagnostics to collect all data
-            print("🔵 SNAPSHOT: Running full diagnostics...")
+            debugLog("🔵 SNAPSHOT: Running full diagnostics...")
 
             // Refresh network status
             await vm.refresh()
@@ -383,19 +383,19 @@ struct VPNSnapshotView: View {
             let geoInfo = vm.geoIPInfo
             let publicIP = vm.publicIP
 
-            print("🔵 SNAPSHOT: GeoIP = \(geoInfo.country ?? "Unknown"), \(geoInfo.city ?? "Unknown")")
-            print("🔵 SNAPSHOT: Public IP = \(publicIP)")
+            debugLog("🔵 SNAPSHOT: GeoIP = \(geoInfo.country ?? "Unknown"), \(geoInfo.city ?? "Unknown")")
+            debugLog("🔵 SNAPSHOT: Public IP = \(publicIP)")
 
             // Step 2: Run speed test to get download/upload (using simple HTTP test)
             let (downloadSpeed, uploadSpeed) = await measureSpeed()
 
-            print("🔵 SNAPSHOT: Speed test = \(downloadSpeed) Mbps down, \(uploadSpeed ?? 0) Mbps up")
+            debugLog("🔵 SNAPSHOT: Speed test = \(downloadSpeed) Mbps down, \(uploadSpeed ?? 0) Mbps up")
 
             // Step 2.5: Run detailed router measurement for jitter & packet loss (Option B)
             let networkMonitor = NetworkMonitorService.shared
             let detailedRouterInfo = await networkMonitor.measureRouterDetailed()
 
-            print("🔵 SNAPSHOT: Detailed router metrics = jitter: \(detailedRouterInfo.jitter ?? 0)ms, loss: \(detailedRouterInfo.packetLoss ?? 0)%")
+            debugLog("🔵 SNAPSHOT: Detailed router metrics = jitter: \(detailedRouterInfo.jitter ?? 0)ms, loss: \(detailedRouterInfo.packetLoss ?? 0)%")
 
             // Step 2.6: Run VPN security tests (Option A)
             let vpnSecurityTest = await performSecurityTests(
@@ -404,7 +404,7 @@ struct VPNSnapshotView: View {
                 currentStatus: currentStatus
             )
 
-            print("🔵 SNAPSHOT: Security analysis complete")
+            debugLog("🔵 SNAPSHOT: Security analysis complete")
 
             // Step 3: Create snapshot with all collected data
             var snapshot = VPNSnapshot(
@@ -476,7 +476,7 @@ struct VPNSnapshotView: View {
             // FIXED: Use safe save to prevent UserDefaults crash from large snapshot data
             Task.detached { [snapshots = snapshotManager.snapshots, notes = capturedNotes] in
                 UserDefaults.standard.setSafe(snapshots, forKey: "vpn_snapshots", maxItems: 50)
-                print("✅ SNAPSHOT: Saved to disk with notes: \(notes.isEmpty ? "none" : notes)")
+                debugLog("✅ SNAPSHOT: Saved to disk with notes: \(notes.isEmpty ? "none" : notes)")
             }
 
             // Close sheet and reset
@@ -511,10 +511,10 @@ struct VPNSnapshotView: View {
             let downloadMegabits = (downloadBytes * 8) / 1_000_000
             downloadSpeed = downloadMegabits / downloadDuration
 
-            print("🔵 SNAPSHOT: Downloaded \(Int(downloadBytes)) bytes in \(String(format: "%.1f", downloadDuration))s = \(String(format: "%.1f", downloadSpeed)) Mbps")
+            debugLog("🔵 SNAPSHOT: Downloaded \(Int(downloadBytes)) bytes in \(String(format: "%.1f", downloadDuration))s = \(String(format: "%.1f", downloadSpeed)) Mbps")
 
         } catch {
-            print("❌ SNAPSHOT: Download test failed: \(error)")
+            debugLog("❌ SNAPSHOT: Download test failed: \(error)")
         }
 
         // Upload test - POST 2MB to Cloudflare (same endpoint as SpeedTestEngine)
@@ -543,10 +543,10 @@ struct VPNSnapshotView: View {
             let uploadMegabits = (uploadBytes * 8) / 1_000_000
             uploadSpeed = uploadMegabits / uploadDuration
 
-            print("🔵 SNAPSHOT: Uploaded \(Int(uploadBytes)) bytes in \(String(format: "%.1f", uploadDuration))s = \(String(format: "%.1f", uploadSpeed ?? 0)) Mbps")
+            debugLog("🔵 SNAPSHOT: Uploaded \(Int(uploadBytes)) bytes in \(String(format: "%.1f", uploadDuration))s = \(String(format: "%.1f", uploadSpeed ?? 0)) Mbps")
 
         } catch {
-            print("❌ SNAPSHOT: Upload test failed: \(error)")
+            debugLog("❌ SNAPSHOT: Upload test failed: \(error)")
             // Return download speed even if upload fails
         }
 
@@ -559,11 +559,11 @@ struct VPNSnapshotView: View {
         publicIP: String,
         currentStatus: NetworkStatus
     ) async -> VPNVisibilityTestResult {
-        print("🔐 SECURITY TEST: Starting VPN visibility analysis...")
+        debugLog("🔐 SECURITY TEST: Starting VPN visibility analysis...")
 
         // 1. VPN Detection Signals
         let detectionSignals = analyzeDetectionSignals(geoInfo: geoInfo)
-        print("🔐 SECURITY TEST: Detection risk = \(detectionSignals.overallDetectionRisk.rawValue)")
+        debugLog("🔐 SECURITY TEST: Detection risk = \(detectionSignals.overallDetectionRisk.rawValue)")
 
         // 2. Security Leaks (DNS, WebRTC, IPv6)
         let securityLeaks = await analyzeSecurityLeaks(
@@ -571,18 +571,18 @@ struct VPNSnapshotView: View {
             publicIP: publicIP,
             currentStatus: currentStatus
         )
-        print("🔐 SECURITY TEST: Security rating = \(securityLeaks.securityRating)")
+        debugLog("🔐 SECURITY TEST: Security rating = \(securityLeaks.securityRating)")
 
         // 3. IP Reputation
         let reputation = analyzeIPReputation(geoInfo: geoInfo)
-        print("🔐 SECURITY TEST: Trust rating = \(reputation.trustRating)")
+        debugLog("🔐 SECURITY TEST: Trust rating = \(reputation.trustRating)")
 
         // 4. Service Friendliness
         let serviceFriendliness = analyzeServiceFriendliness(
             detectionSignals: detectionSignals,
             currentStatus: currentStatus
         )
-        print("🔐 SECURITY TEST: AI service risk = \(serviceFriendliness.aiServiceDetectionRisk.rawValue)")
+        debugLog("🔐 SECURITY TEST: AI service risk = \(serviceFriendliness.aiServiceDetectionRisk.rawValue)")
 
         return VPNVisibilityTestResult(
             timestamp: Date(),

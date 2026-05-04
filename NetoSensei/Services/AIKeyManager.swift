@@ -125,7 +125,7 @@ class AIKeyManager: ObservableObject {
             kSecAttrService as String: service,
             kSecAttrAccount as String: provider.rawValue,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
         SecItemAdd(query as CFDictionary, nil)
     }

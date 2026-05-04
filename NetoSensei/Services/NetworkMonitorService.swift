@@ -86,7 +86,7 @@ class NetworkMonitorService: ObservableObject {
             // CNCopy failed — mark unavailable so we never retry
             if Self.cncopyAvailable == nil {
                 Self.cncopyAvailable = false
-                print("[WiFi] CNCopyCurrentNetworkInfo unavailable (missing wifi-info entitlement) — using NEHotspotNetwork only")
+                debugLog("[WiFi] CNCopyCurrentNetworkInfo unavailable (missing wifi-info entitlement) — using NEHotspotNetwork only")
             }
             return (nil, nil)
         case .notDetermined, .restricted, .denied:
@@ -127,7 +127,7 @@ class NetworkMonitorService: ObservableObject {
                 // Only run full update if the path actually changed
                 if desc != self.lastPathDescription {
                     self.lastPathDescription = desc
-                    print("[Network] Path changed — running full update")
+                    debugLog("[Network] Path changed — running full update")
                     await self.performUpdate()
                 }
             }
@@ -309,7 +309,7 @@ class NetworkMonitorService: ObservableObject {
         let previousSSID = await MainActor.run { self.lastSSID }
         if ssid != previousSSID {
             let source = Self.cncopyAvailable == true ? "CNCopy" : "NEHotspotNetwork"
-            print("[WiFi] SSID: \(ssid ?? "none") (via \(source))")
+            debugLog("[WiFi] SSID: \(ssid ?? "none") (via \(source))")
             await MainActor.run { self.lastSSID = ssid }
         }
 

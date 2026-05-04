@@ -358,7 +358,7 @@ class NetworkDeviceDiscovery: ObservableObject {
         scanProgress = 0.75
         let ssdpResults = await ssdpTask.value
         ssdpDevices = ssdpResults
-        print("[Discovery] SSDP found \(ssdpResults.count) device(s)")
+        debugLog("[Discovery] SSDP found \(ssdpResults.count) device(s)")
 
         // NetBIOS: query each TCP-discovered IP that lacks a hostname
         scanProgress = 0.80

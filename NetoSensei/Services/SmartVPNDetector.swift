@@ -187,7 +187,7 @@ class SmartVPNDetector: ObservableObject {
             let result = (false, false, "NEVPNManager unavailable: \(error.localizedDescription)")
             // ISSUE 3 FIX: Cache permanently — only log once
             if !nevpnChecked {
-                print("[VPN] NEVPNManager not available (no entitlement) — using heuristic detection only")
+                debugLog("[VPN] NEVPNManager not available (no entitlement) — using heuristic detection only")
             }
             nevpnChecked = true
             nevpnResult = result
@@ -474,9 +474,9 @@ class SmartVPNDetector: ObservableObject {
         let previousStatus = detectionResult?.detectionStatus
         let previousIP = detectionResult?.publicIP
         if detectionStatus != previousStatus || verifiedIP != previousIP {
-            print("[VPN Detection] \(reasoning)")
+            debugLog("[VPN Detection] \(reasoning)")
         } else {
-            print("[VPN] No change (status=\(detectionStatus.rawValue), confidence=\(String(format: "%.0f%%", confidence * 100)))")
+            debugLog("[VPN] No change (status=\(detectionStatus.rawValue), confidence=\(String(format: "%.0f%%", confidence * 100)))")
         }
 
         detectionResult = result
@@ -573,7 +573,7 @@ class SmartVPNDetector: ObservableObject {
             if let info = await tryGetIPInfo(from: serviceURL) {
                 // If we have a verified IP, make sure this service's IP matches
                 if let verified = verifiedIP, info.ip != verified {
-                    print("[VPN] IP mismatch: service=\(info.ip) vs verified=\(verified), using verified IP")
+                    debugLog("[VPN] IP mismatch: service=\(info.ip) vs verified=\(verified), using verified IP")
                     return PublicIPInfo(ip: verified, country: info.country, countryCode: info.countryCode,
                                        city: info.city, isp: info.isp, asn: info.asn)
                 }

@@ -27,7 +27,7 @@ actor GatewaySecurityScanner {
         // DISABLED: NWConnection tests causing app freeze
         // Creates multiple connections for gateway detection and testing
         guard Self.NWCONNECTION_TESTS_ENABLED else {
-            print("⚠️ Gateway security scan DISABLED — NWConnection causing freeze")
+            debugLog("⚠️ Gateway security scan DISABLED — NWConnection causing freeze")
             // Return cached gateway from UserDefaults or estimate from network
             let cachedGateway = UserDefaults.standard.string(forKey: gatewayIPKey) ?? estimateGatewayIP()
             return GatewaySecurityStatus(

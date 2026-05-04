@@ -45,7 +45,7 @@ class GeoIPService: ObservableObject {
            let cached = cachedResult,
            let timestamp = cacheTimestamp,
            Date().timeIntervalSince(timestamp) < Self.cacheDuration {
-            print("🌍 GeoIP: Using cached result (cache valid for \(Int(Self.cacheDuration - Date().timeIntervalSince(timestamp)))s)")
+            debugLog("🌍 GeoIP: Using cached result (cache valid for \(Int(Self.cacheDuration - Date().timeIntervalSince(timestamp)))s)")
             return cached
         }
 
@@ -56,7 +56,7 @@ class GeoIPService: ObservableObject {
 
         isFetching = true
         isLoading = true
-        print("🌍 GeoIP: Starting fresh fetch...")
+        debugLog("🌍 GeoIP: Starting fresh fetch...")
 
         // Create new fetch task
         let task = Task<GeoIPInfo, Never> { [weak self] in
@@ -110,7 +110,7 @@ class GeoIPService: ObservableObject {
         if result.publicIP != "0.0.0.0" {
             cachedResult = result
             cacheTimestamp = Date()
-            print("🌍 GeoIP: Cached result for \(Int(Self.cacheDuration))s")
+            debugLog("🌍 GeoIP: Cached result for \(Int(Self.cacheDuration))s")
         }
 
         return result
@@ -120,7 +120,7 @@ class GeoIPService: ObservableObject {
     func clearCache() {
         cachedResult = nil
         cacheTimestamp = nil
-        print("🌍 GeoIP: Cache cleared")
+        debugLog("🌍 GeoIP: Cache cleared")
     }
 
     // MARK: - API Implementations
@@ -138,13 +138,13 @@ class GeoIPService: ObservableObject {
             // FIXED: Check HTTP status code before decoding
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 429 {
-                    print("⚠️ IPAPICo rate limited (429)")
+                    debugLog("⚠️ IPAPICo rate limited (429)")
                     return nil
                 }
                 if httpResponse.statusCode != 200 {
-                    print("⚠️ IPAPICo returned status \(httpResponse.statusCode)")
+                    debugLog("⚠️ IPAPICo returned status \(httpResponse.statusCode)")
                     if let body = String(data: data, encoding: .utf8) {
-                        print("⚠️ Response body: \(body.prefix(200))")
+                        debugLog("⚠️ Response body: \(body.prefix(200))")
                     }
                     return nil
                 }
@@ -178,7 +178,7 @@ class GeoIPService: ObservableObject {
         } catch {
             // FIXED: Don't log cancellation errors - they're expected when another provider succeeds first
             if (error as NSError).code != NSURLErrorCancelled {
-                print("⚠️ IPAPICo fetch failed: \(error)")
+                debugLog("⚠️ IPAPICo fetch failed: \(error)")
             }
             return nil
         }
@@ -198,11 +198,11 @@ class GeoIPService: ObservableObject {
             // FIXED: Check HTTP status code before decoding
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 429 {
-                    print("⚠️ ipwho.is rate limited (429)")
+                    debugLog("⚠️ ipwho.is rate limited (429)")
                     return nil
                 }
                 if httpResponse.statusCode != 200 {
-                    print("⚠️ ipwho.is returned status \(httpResponse.statusCode)")
+                    debugLog("⚠️ ipwho.is returned status \(httpResponse.statusCode)")
                     return nil
                 }
             }
@@ -236,7 +236,7 @@ class GeoIPService: ObservableObject {
             let decoded = try JSONDecoder().decode(IPWhoIsResponse.self, from: data)
 
             guard decoded.success == true else {
-                print("⚠️ ipwho.is returned success=false")
+                debugLog("⚠️ ipwho.is returned success=false")
                 return nil
             }
 
@@ -266,7 +266,7 @@ class GeoIPService: ObservableObject {
         } catch {
             // FIXED: Don't log cancellation errors - they're expected when another provider succeeds first
             if (error as NSError).code != NSURLErrorCancelled {
-                print("⚠️ ipwho.is fetch failed: \(error)")
+                debugLog("⚠️ ipwho.is fetch failed: \(error)")
             }
             return nil
         }
@@ -285,11 +285,11 @@ class GeoIPService: ObservableObject {
             // FIXED: Check HTTP status code before decoding
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 429 {
-                    print("⚠️ IPInfo rate limited (429)")
+                    debugLog("⚠️ IPInfo rate limited (429)")
                     return nil
                 }
                 if httpResponse.statusCode != 200 {
-                    print("⚠️ IPInfo returned status \(httpResponse.statusCode)")
+                    debugLog("⚠️ IPInfo returned status \(httpResponse.statusCode)")
                     return nil
                 }
             }
@@ -333,7 +333,7 @@ class GeoIPService: ObservableObject {
         } catch {
             // FIXED: Don't log cancellation errors - they're expected when another provider succeeds first
             if (error as NSError).code != NSURLErrorCancelled {
-                print("⚠️ IPInfo fetch failed: \(error)")
+                debugLog("⚠️ IPInfo fetch failed: \(error)")
             }
             return nil
         }
@@ -371,7 +371,7 @@ class GeoIPService: ObservableObject {
                 return ip
             }
         } catch {
-            print("Failed to get public IP: \(error)")
+            debugLog("Failed to get public IP: \(error)")
         }
 
         return nil

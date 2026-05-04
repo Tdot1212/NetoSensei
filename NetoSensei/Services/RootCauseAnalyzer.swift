@@ -265,7 +265,7 @@ class RootCauseAnalyzer {
             let vpnOverhead = internetLatency - routerLatency
             // If VPN is adding > 100ms overhead, it's the primary problem
             if vpnOverhead > 100 {
-                print("🔍 VPN overhead detected: \(Int(vpnOverhead))ms (external: \(Int(internetLatency))ms - gateway: \(Int(routerLatency))ms)")
+                debugLog("🔍 VPN overhead detected: \(Int(vpnOverhead))ms (external: \(Int(internetLatency))ms - gateway: \(Int(routerLatency))ms)")
                 return .vpnSlow
             }
         }
@@ -689,7 +689,9 @@ class RootCauseAnalyzer {
             return .optimizeVPNForStreaming
 
         case .cdnUnreachable:
-            return .disableVPN
+            // Disable-VPN action removed: app cannot disconnect a VPN it
+            // didn't install. Suggest a different region instead.
+            return .switchVPNRegion(recommended: "Different region")
 
         case .dnsSlow, .dnsFailure:
             return .changeDNS(recommended: "1.1.1.1")
