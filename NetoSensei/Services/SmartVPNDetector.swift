@@ -44,6 +44,15 @@ class SmartVPNDetector: ObservableObject {
     private var nevpnChecked = false
     private var nevpnResult: (authoritative: Bool, vpnActive: Bool, detail: String)?
 
+    // CLEANUP 1: IP-lookup caching to prevent VPN false-disconnect on transient
+    // network failures. Common in mainland China when ipify/ipinfo/ip-api are
+    // throttled. We keep using the last good IP for up to 2 cycles; on the 3rd
+    // consecutive failure we accept the "no IP" verdict and let downstream
+    // consumers see VPN as disconnected.
+    private var lastKnownGoodIP: String?
+    private var consecutiveLookupFailures: Int = 0
+    private static let maxLookupFailuresBeforeFlip = 3
+
     // Debug info for debug panel
     @Published var lastDebugInfo: DebugInfo?
 
@@ -77,6 +86,10 @@ class SmartVPNDetector: ObservableObject {
         let ipVerified: Bool  // True if 2+ IP sources agreed
         let isAuthoritative: Bool  // true = NEVPNManager confirmed, false = ISP/inference
         let inferenceReasons: [String]  // Human-readable reasons for VPN inference
+        /// CLEANUP 1: True when this result reuses cached IP because all 3 IP
+        /// lookups timed out. Consumers can use this to suppress UI churn or
+        /// stability-history events while the network recovers.
+        let isStaleData: Bool
         let timestamp: Date
 
         struct MethodResult {
@@ -251,7 +264,43 @@ class SmartVPNDetector: ObservableObject {
         let (neAuthoritative, neVPNActive, neDetail) = await checkNEVPNManager()
 
         // ===== STEP 1: Get verified public IP from 3 sources =====
-        let (verifiedIP, allIPs, ipVerified) = await getVerifiedPublicIP()
+        let (verifiedIP, allIPs, ipVerified, isStaleIP) = await getVerifiedPublicIP()
+
+        // CLEANUP 1: Freeze on stale IP. When all 3 IP services time out and
+        // we have a recent fresh detection, preserve it. Recomputing the
+        // signal-based verdict with no IP info would flip isVPNActive to
+        // false, NetworkStatus.vpn.isActive would transition, and
+        // ConnectionStabilityMonitor would log a phantom "VPN Disconnected"
+        // event. Skip all of that.
+        if isStaleIP, let previous = detectionResult {
+            debugLog("[VPN Detection] [cached] IP lookup timed out (failure \(consecutiveLookupFailures)/\(Self.maxLookupFailuresBeforeFlip)) — preserving previous result (status=\(previous.detectionStatus.rawValue))")
+            let staleResult = VPNDetectionResult(
+                isVPNActive: previous.isVPNActive,
+                detectionStatus: previous.detectionStatus,
+                vpnState: previous.vpnState,
+                detectionMethod: "[cached] " + previous.detectionMethod,
+                publicIP: verifiedIP,
+                publicCountry: previous.publicCountry,
+                publicCity: previous.publicCity,
+                publicASN: previous.publicASN,
+                publicISP: previous.publicISP,
+                expectedCountry: previous.expectedCountry,
+                confidence: previous.confidence,
+                methodResults: previous.methodResults,
+                vpnProtocol: previous.vpnProtocol,
+                ipType: previous.ipType,
+                displayLabel: previous.displayLabel,
+                isLikelyInChina: previous.isLikelyInChina,
+                ipVerified: false,
+                isAuthoritative: previous.isAuthoritative,
+                inferenceReasons: previous.inferenceReasons + ["[cached] IP lookup timed out, reusing previous detection"],
+                isStaleData: true,
+                timestamp: Date()
+            )
+            detectionResult = staleResult
+            isDetecting = false
+            return staleResult
+        }
 
         // ===== STEP 2: Get detailed IP info (ISP, country, city) =====
         let ipInfo = await getDetailedIPInfo(forIP: verifiedIP)
@@ -456,6 +505,7 @@ class SmartVPNDetector: ObservableObject {
             ipVerified: ipVerified,
             isAuthoritative: isAuthoritative,
             inferenceReasons: inferenceReasons,
+            isStaleData: false,
             timestamp: Date()
         )
 
@@ -487,8 +537,10 @@ class SmartVPNDetector: ObservableObject {
 
     // MARK: - Step 1: Cross-Verified Public IP
 
-    /// Get public IP from 3 independent sources, return consensus IP
-    private func getVerifiedPublicIP() async -> (ip: String?, allIPs: [String], verified: Bool) {
+    /// Get public IP from 3 independent sources, return consensus IP.
+    /// On lookup failure, returns the last-known-good IP for up to
+    /// `maxLookupFailuresBeforeFlip - 1` consecutive failures (isStale=true).
+    private func getVerifiedPublicIP() async -> (ip: String?, allIPs: [String], verified: Bool, isStale: Bool) {
         async let ip1 = fetchPlainIP(from: "https://api.ipify.org")
         async let ip2 = fetchPlainIP(from: "https://ipinfo.io/ip")
         async let ip3 = fetchIPFromJSON(from: "https://ip-api.com/json/?fields=query", key: "query")
@@ -496,22 +548,36 @@ class SmartVPNDetector: ObservableObject {
         let results = await [ip1, ip2, ip3]
         let validIPs = results.compactMap { $0 }
 
-        guard !validIPs.isEmpty else {
-            return (nil, [], false)
+        if !validIPs.isEmpty {
+            // Find consensus: IP that appears 2+ times
+            var counts: [String: Int] = [:]
+            for ip in validIPs {
+                counts[ip, default: 0] += 1
+            }
+
+            let chosenIP: String
+            let verified: Bool
+            if let (consensusIP, count) = counts.max(by: { $0.value < $1.value }), count >= 2 {
+                chosenIP = consensusIP
+                verified = true
+            } else {
+                // No consensus — return first available but mark as unverified
+                chosenIP = validIPs.first ?? ""
+                verified = false
+            }
+
+            lastKnownGoodIP = chosenIP
+            consecutiveLookupFailures = 0
+            return (chosenIP, validIPs, verified, false)
         }
 
-        // Find consensus: IP that appears 2+ times
-        var counts: [String: Int] = [:]
-        for ip in validIPs {
-            counts[ip, default: 0] += 1
+        // All 3 lookups failed.
+        consecutiveLookupFailures += 1
+        if consecutiveLookupFailures < Self.maxLookupFailuresBeforeFlip,
+           let cached = lastKnownGoodIP {
+            return (cached, [], false, true)
         }
-
-        if let (consensusIP, count) = counts.max(by: { $0.value < $1.value }), count >= 2 {
-            return (consensusIP, validIPs, true)
-        }
-
-        // No consensus — return first available but mark as unverified
-        return (validIPs.first, validIPs, false)
+        return (nil, [], false, false)
     }
 
     /// Fetch IP as plain text from a service
@@ -1212,6 +1278,7 @@ class SmartVPNDetector: ObservableObject {
             vpnProtocol: nil, ipType: nil, displayLabel: nil,
             isLikelyInChina: false, ipVerified: false,
             isAuthoritative: false, inferenceReasons: [],
+            isStaleData: false,
             timestamp: Date()
         )
     }
