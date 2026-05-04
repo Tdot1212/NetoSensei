@@ -305,12 +305,16 @@ class NetworkMonitorService: ObservableObject {
             }
         }
 
-        // ISSUE 2 FIX: Only log when SSID changes
+        // ISSUE 2 FIX: Only log when SSID changes.
+        // CLEANUP 3: Snapshot the mutable `var ssid` into an immutable `let`
+        // before any concurrent closure captures it — Swift 6 will reject
+        // direct capture of a mutable local in a sendable closure.
+        let resolvedSSID = ssid
         let previousSSID = await MainActor.run { self.lastSSID }
-        if ssid != previousSSID {
+        if resolvedSSID != previousSSID {
             let source = Self.cncopyAvailable == true ? "CNCopy" : "NEHotspotNetwork"
-            debugLog("[WiFi] SSID: \(ssid ?? "none") (via \(source))")
-            await MainActor.run { self.lastSSID = ssid }
+            debugLog("[WiFi] SSID: \(resolvedSSID ?? "none") (via \(source))")
+            await MainActor.run { self.lastSSID = resolvedSSID }
         }
 
         // FIX (Issue 1): WiFi is connected if ANY of these is true:
