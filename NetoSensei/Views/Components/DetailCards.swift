@@ -503,13 +503,29 @@ struct DiagnosisEvidenceCard: View {
         .padding(.vertical, 4)
     }
 
+    /// Map InterpretationEngine's SCREAMING_SNAKE_CASE probe names to plain-
+    /// English labels for the user-facing Diagnosis Evidence row. Pure
+    /// presentation transform — the underlying probe data is unchanged.
+    private func displayName(for probeName: String) -> String {
+        switch probeName {
+        case "LOCAL_NETWORK":      return "Local Network"
+        case "DOMESTIC_INTERNET":  return "Domestic Internet"
+        case "OVERSEAS_INTERNET":  return "Overseas Internet"
+        case "SYSTEM_DNS":         return "System DNS"
+        case "VPN_STATE":          return "VPN State"
+        case "IP_IDENTITY":        return "IP & Location"
+        case "SPEED_TEST":         return "Speed Test"
+        default:                   return probeName
+        }
+    }
+
     private func probeRow(_ probe: ProbeResult) -> some View {
         HStack(spacing: 6) {
             Image(systemName: probe.passed ? "checkmark.circle.fill" : "xmark.circle")
                 .font(.caption2)
                 .foregroundColor(probe.passed ? .green : .red)
 
-            Text(probe.name)
+            Text(displayName(for: probe.name))
                 .font(.caption)
                 .frame(width: 80, alignment: .leading)
 
