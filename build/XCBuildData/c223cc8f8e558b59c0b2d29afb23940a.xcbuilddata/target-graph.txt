@@ -1,4 +1,0 @@
-Target dependency graph (2 targets)
-Target 'NetoSensei' in project 'NetoSensei'
-➜ Explicit dependency on target 'NetoSenseiWidget' in project 'NetoSensei'
-Target 'NetoSenseiWidget' in project 'NetoSensei' (no dependencies)

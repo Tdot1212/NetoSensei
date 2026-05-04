@@ -1,0 +1,21 @@
+# Xcode build artifacts
+DerivedData/
+build/
+*.xcarchive
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+
+# App secrets (local-only override file)
+Secrets.local.swift
+
+# Claude Code local settings
+.claude/settings.local.json
