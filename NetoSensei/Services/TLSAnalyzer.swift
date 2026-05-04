@@ -422,19 +422,13 @@ class TLSAnalyzer: ObservableObject {
 
     // MARK: - Analyze Issues
 
-    // ISSUE 8 FIX: Known proxy/VPN app CA names that do legitimate MITM for traffic routing
-    private static let knownProxyCAs = [
-        "surge", "shadowrocket", "quantumult", "clash", "loon", "stash",
-        "mitmproxy", "charles", "proxyman", "fiddler",
-        "generated", "proxy", "debug"
-    ]
-
-    /// Check if any cert in the chain is from a known proxy/VPN app
+    /// Check if any cert in the chain is from a known proxy/VPN app.
+    /// CLEANUP 6: needles live in ProxyDetection.knownProxyApps.
     private func isProxyMITMCert(_ chain: [CertificateInfo]) -> Bool {
-        let caNames = Self.knownProxyCAs
+        let needles = ProxyDetection.knownProxyApps.map { $0.needle }
         for cert in chain {
             let combined = (cert.subject + " " + cert.issuer).lowercased()
-            if caNames.contains(where: { combined.contains($0) }) {
+            if needles.contains(where: { combined.contains($0) }) {
                 return true
             }
         }

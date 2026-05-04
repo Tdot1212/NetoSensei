@@ -56,26 +56,14 @@ final class KillSwitchAdvisor {
 
     // MARK: - Detect proxy app
 
-    /// Mirrors the known-proxy-CA list used by TLSAnalyzer. The trust chain
-    /// is the only signal a third-party app gets for "which proxy is the user
-    /// running" — the CA's subject string usually contains the app name.
-    private static let proxyAppSignatures: [(needle: String, app: String)] = [
-        ("surge",         "Surge"),
-        ("shadowrocket",  "Shadowrocket"),
-        ("quantumult",    "Quantumult"),
-        ("clash",         "Clash"),
-        ("loon",          "Loon"),
-        ("stash",         "Stash"),
-        ("mitmproxy",     "mitmproxy"),
-        ("charles",       "Charles"),
-        ("proxyman",      "Proxyman"),
-        ("fiddler",       "Fiddler"),
-    ]
-
     /// Walk the inferenceReasons + method-result detail strings exposed by
     /// SmartVPNDetector (which already reports the proxy CA name when seen).
     /// If nothing matches, we return nil rather than guess — the guidance
     /// downgrades gracefully to "generic" copy.
+    /// CLEANUP 6: signatures live in ProxyDetection.knownProxyApps. We pass
+    /// includeGenericFingerprints: false because the detector's reasoning
+    /// text contains the word "proxy" coincidentally (e.g. "likely VPN/proxy"),
+    /// which would cause a false-positive match against the generic needle.
     private func detectProxyApp() -> String? {
         guard let detection = SmartVPNDetector.shared.detectionResult else { return nil }
         // Build a single haystack string from all the detector's surfaces
@@ -88,10 +76,11 @@ final class KillSwitchAdvisor {
         }
         let lower = haystack.lowercased()
 
-        for entry in Self.proxyAppSignatures {
-            if lower.contains(entry.needle) {
-                return entry.app
-            }
+        if let match = ProxyDetection.detectProxyApp(
+            in: lower,
+            includeGenericFingerprints: false
+        ) {
+            return match.app
         }
 
         // Fallback: identify by tunnel interface family. SmartVPNDetector's

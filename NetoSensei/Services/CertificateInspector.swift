@@ -179,27 +179,13 @@ final class CertificateInspector {
         return knownPublicCANeedles.contains { lower.contains($0) }
     }
 
-    /// Same proxy-app needles TLSAnalyzer.knownProxyCAs uses (kept in sync by
-    /// review, not by import to avoid leaking that list across modules).
-    private nonisolated static let proxyAppNeedles: [(needle: String, app: String)] = [
-        ("surge", "Surge"),
-        ("shadowrocket", "Shadowrocket"),
-        ("quantumult", "Quantumult"),
-        ("clash", "Clash"),
-        ("loon", "Loon"),
-        ("stash", "Stash"),
-        ("mitmproxy", "mitmproxy"),
-        ("charles", "Charles"),
-        ("proxyman", "Proxyman"),
-        ("fiddler", "Fiddler"),
-    ]
-
     /// Walk the chain looking for a proxy-CA name. Returns the first match.
+    /// CLEANUP 6: needles live in ProxyDetection.knownProxyApps.
     private nonisolated static func identifyProxyApp(in chain: [CertificateInfo]) -> String? {
         for cert in chain {
             let combined = (cert.subject + " " + cert.issuer).lowercased()
-            for entry in proxyAppNeedles where combined.contains(entry.needle) {
-                return entry.app
+            if let match = ProxyDetection.detectProxyApp(in: combined) {
+                return match.app
             }
         }
         return nil
