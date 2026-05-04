@@ -623,8 +623,11 @@ private class TLSCertificateDelegate: NSObject, URLSessionDelegate, @unchecked S
         let summary = SecCertificateCopySubjectSummary(cert) as String? ?? "Unknown"
         let certData = SecCertificateCopyData(cert) as Data
 
-        // Extract issuer by searching DER data for known CA names
-        let issuer = extractIssuer(from: certData, fallback: summary)
+        // CLEANUP 7: extract issuer via SecCertificateCopyNormalizedIssuerSequence,
+        // not by searching DER for known CA brand names. Final fallback is
+        // "Unknown issuer" — never the subject CN, which produced nonsense like
+        // "Issuer: apple.com" for proxy-intercepted certs.
+        let issuer = extractIssuer(from: cert, fallback: summary)
 
         // Extract serial number (first 20 bytes after sequence headers, simplified)
         let serialHex = certData.prefix(20).map { String(format: "%02X", $0) }.joined(separator: ":")
@@ -635,7 +638,16 @@ private class TLSCertificateDelegate: NSObject, URLSessionDelegate, @unchecked S
         // Detect key type from DER (look for OID markers)
         let publicKeyInfo = detectPublicKeyInfo(from: certData)
 
-        let isSelfSigned = summary == issuer || index == total - 1
+        // CLEANUP 7: compare normalized subject + issuer DER bytes directly,
+        // not the summary strings (which dropped to subject when issuer parsing
+        // failed, making every cert look self-signed).
+        let isSelfSigned: Bool = {
+            if let subjectSeq = SecCertificateCopyNormalizedSubjectSequence(cert) as Data?,
+               let issuerSeq = SecCertificateCopyNormalizedIssuerSequence(cert) as Data? {
+                return subjectSeq == issuerSeq
+            }
+            return index == total - 1  // fallback: root cert is always self-signed
+        }()
         let isRootCA = index == total - 1
 
         return CertificateInfo(
@@ -651,21 +663,87 @@ private class TLSCertificateDelegate: NSObject, URLSessionDelegate, @unchecked S
         )
     }
 
-    private func extractIssuer(from data: Data, fallback: String) -> String {
-        // Search DER for known CA organization names
-        let dataString = String(data: data, encoding: .ascii) ?? ""
-        let knownCAs = [
-            "Let's Encrypt", "DigiCert", "Cloudflare", "Google Trust Services",
-            "Amazon", "GlobalSign", "Sectigo", "GeoTrust", "Comodo",
-            "Baltimore", "Apple", "Microsoft", "GoDaddy", "Entrust",
-            "Starfield", "VeriSign", "Thawte", "RapidSSL",
-        ]
-        for ca in knownCAs {
-            if dataString.contains(ca) {
+    /// CLEANUP 7: extract Issuer CN via SecCertificateCopyNormalizedIssuerSequence
+    /// + minimal ASN.1 parsing. Falls back to brand-string DER scan when the
+    /// modern API returns nil/malformed data. Final fallback is "Unknown issuer"
+    /// (NOT the subject CN — that was the original bug).
+    /// `fallback` is unused in the success path; retained on the signature so
+    /// call-site shape doesn't change.
+    private func extractIssuer(from cert: SecCertificate, fallback: String) -> String {
+        // 1. Modern API: get the normalized issuer DN sequence and parse out CN.
+        if let issuerData = SecCertificateCopyNormalizedIssuerSequence(cert) as Data?,
+           let cn = parseCommonName(from: issuerData) {
+            return cn
+        }
+
+        // 2. Brand-string DER scan — safety net for cases where the modern
+        //    API returns malformed or empty data (rare but observed for some
+        //    proxy-generated certs).
+        let certData = SecCertificateCopyData(cert) as Data
+        if let dataString = String(data: certData, encoding: .ascii) {
+            let knownCAs = [
+                "Let's Encrypt", "DigiCert", "Cloudflare", "Google Trust Services",
+                "Amazon", "GlobalSign", "Sectigo", "GeoTrust", "Comodo",
+                "Baltimore", "Apple", "Microsoft", "GoDaddy", "Entrust",
+                "Starfield", "VeriSign", "Thawte", "RapidSSL",
+            ]
+            for ca in knownCAs where dataString.contains(ca) {
                 return ca
             }
         }
-        return fallback
+
+        _ = fallback  // intentionally unused — see doc comment above
+        return "Unknown issuer"
+    }
+
+    /// Minimal ASN.1 DER parser for an X.500 Name (issuer/subject sequence).
+    /// Searches for the CommonName OID (2.5.4.3 → DER bytes 06 03 55 04 03)
+    /// and extracts the following AttributeValue string. Handles common
+    /// string types (UTF8/Printable/IA5/T61/BMP) plus short and long-form
+    /// length encoding. Returns nil if no CN is present or parsing fails.
+    private func parseCommonName(from sequenceData: Data) -> String? {
+        let bytes = [UInt8](sequenceData)
+        // CN OID: 2.5.4.3 → DER tag/length/value: 06 03 55 04 03
+        let cnOID: [UInt8] = [0x06, 0x03, 0x55, 0x04, 0x03]
+        guard let oidRange = bytes.firstRange(of: cnOID) else { return nil }
+
+        // The AttributeValue follows the OID: tag + length + content.
+        let tagIndex = oidRange.upperBound
+        guard tagIndex + 1 < bytes.count else { return nil }
+        let tag = bytes[tagIndex]
+        let lengthByte = bytes[tagIndex + 1]
+
+        // ASN.1 length encoding: short form (top bit 0) holds length directly;
+        // long form (top bit 1) means the lower 7 bits give the byte count of
+        // the actual length.
+        var length = Int(lengthByte)
+        var contentStart = tagIndex + 2
+        if lengthByte & 0x80 != 0 {
+            let numLenBytes = Int(lengthByte & 0x7F)
+            guard numLenBytes > 0, numLenBytes <= 4,
+                  contentStart + numLenBytes <= bytes.count else { return nil }
+            length = 0
+            for i in 0..<numLenBytes {
+                length = (length << 8) | Int(bytes[contentStart + i])
+            }
+            contentStart += numLenBytes
+        }
+
+        guard length > 0, contentStart + length <= bytes.count else { return nil }
+        let valueBytes = Array(bytes[contentStart..<(contentStart + length)])
+
+        switch tag {
+        case 0x0C, // UTF8String
+             0x13, // PrintableString
+             0x16, // IA5String
+             0x14: // T61String / TeletexString
+            return String(bytes: valueBytes, encoding: .utf8)
+        case 0x1E: // BMPString — UTF-16 BE
+            return String(bytes: valueBytes, encoding: .utf16BigEndian)
+        default:
+            // Unknown string type — best-effort UTF-8.
+            return String(bytes: valueBytes, encoding: .utf8)
+        }
     }
 
     private func extractValidityDates(from data: Data) -> (Date?, Date?) {
