@@ -18,6 +18,7 @@ extension Bundle {
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
 
     private struct IdentifiedURL: Identifiable {
         let url: URL
@@ -71,6 +72,14 @@ struct SettingsView: View {
                         UIApplication.shared.open(supportEmailURL)
                     } label: {
                         Label("Support Email", systemImage: "envelope.fill")
+                            .foregroundColor(.primary)
+                    }
+
+                    Button {
+                        hasCompletedOnboarding = false
+                        dismiss()
+                    } label: {
+                        Label("Show Welcome Again", systemImage: "sparkles")
                             .foregroundColor(.primary)
                     }
                 } header: {

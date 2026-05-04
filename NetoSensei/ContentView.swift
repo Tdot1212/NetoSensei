@@ -9,6 +9,17 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var isLoaded = false
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+
+    /// Drives the onboarding fullScreenCover. The setter is a no-op:
+    /// OnboardingView flips `hasCompletedOnboarding` directly via @AppStorage,
+    /// which makes the getter return false and the cover dismiss.
+    private var onboardingPresented: Binding<Bool> {
+        Binding(
+            get: { !hasCompletedOnboarding },
+            set: { _ in }
+        )
+    }
 
     var body: some View {
         ZStack {
@@ -41,6 +52,9 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .fullScreenCover(isPresented: onboardingPresented) {
+            OnboardingView()
         }
         .onAppear {
             // Debug: Print to console when view appears
