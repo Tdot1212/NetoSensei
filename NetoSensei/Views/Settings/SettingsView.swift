@@ -30,7 +30,7 @@ struct SettingsView: View {
 
     private let privacyURL = URL(string: "https://tdot1212.github.io/NetoSensei/privacy.html")!
     private let termsURL = URL(string: "https://tdot1212.github.io/NetoSensei/terms.html")!
-    private let supportEmailURL = URL(string: "mailto:[YOUR_SUPPORT_EMAIL]")!
+    private let supportEmailURL = URL(string: "mailto:toshlabs.dev+netosensei@gmail.com")!
 
     var body: some View {
         NavigationView {
