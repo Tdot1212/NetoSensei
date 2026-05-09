@@ -359,13 +359,20 @@ class SpeedTestEngine: ObservableObject {
     private func measurePacketLoss(timeout: TimeInterval) async -> Double {
         do {
             return try await withTimeout(seconds: timeout) {
+                // Race 3 probe targets per iteration so one VPN-blocked host doesn't poison the metric.
+                // Real packet loss affects ALL targets simultaneously; only count loss when all 3 fail.
+                let targets = ["apple.com", "1.1.1.1", "www.baidu.com"]
                 var successCount = 0
                 let totalPings = 10
 
                 for _ in 0..<totalPings {
-                    // CLEANUP 4: apple.com instead of cloudflare-dns.com (China reliability)
-                    let (success, _) = await NetworkMonitorService.shared.pingHost("apple.com", timeout: 1.0)
-                    if success { successCount += 1 }
+                    async let r1 = NetworkMonitorService.shared.pingHost(targets[0], timeout: 1.0)
+                    async let r2 = NetworkMonitorService.shared.pingHost(targets[1], timeout: 1.0)
+                    async let r3 = NetworkMonitorService.shared.pingHost(targets[2], timeout: 1.0)
+                    let results = await [r1, r2, r3]
+                    if results.contains(where: { $0.0 == true }) {
+                        successCount += 1
+                    }
                     try? await Task.sleep(nanoseconds: 50_000_000)
                 }
 
