@@ -211,6 +211,8 @@ struct NetoSenseiApp: App {
     // These services are shared across the entire app to ensure consistency
     // and avoid duplicate network tests
 
+    @Environment(\.scenePhase) private var scenePhase
+
     init() {
         // MINIMAL INIT - just print to console
         debugLog("🚀 App init() called")
@@ -218,10 +220,6 @@ struct NetoSenseiApp: App {
         // Force CrashLogger lazy init so its private init() runs
         // setupCrashHandling() + checkForPreviousCrash().
         _ = CrashLogger.shared
-
-        // IMPORTANT: Reset crash flag so app doesn't think it's perpetually crashing
-        UserDefaults.standard.set(false, forKey: "CrashLogger_DidCrash")
-        UserDefaults.standard.synchronize()
     }
 
     var body: some Scene {
@@ -235,6 +233,11 @@ struct NetoSenseiApp: App {
                     // Heavy initialization runs in background after view is visible
                     await initializeServicesInBackground()
                 }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .background {
+                CrashLogger.shared.markNormalExit()
+            }
         }
     }
 
