@@ -122,12 +122,23 @@ class WiFiQualityEstimator {
         }
 
         let sorted = latencies.sorted()
+        guard let minMs = sorted.first, let maxMs = sorted.last else {
+            return WiFiQualityResult(
+                quality: .critical,
+                medianLatencyMs: 0,
+                stdDevMs: 0,
+                minMs: 0,
+                maxMs: 0,
+                sampleCount: sampleCount,
+                timeoutCount: timeouts,
+                description: "Cannot reach your router. WiFi may be disconnected.",
+                recommendation: "Check your WiFi connection and try again."
+            )
+        }
         let median = sorted[sorted.count / 2]
         let mean = latencies.reduce(0, +) / Double(latencies.count)
         let variance = latencies.map { pow($0 - mean, 2) }.reduce(0, +) / Double(latencies.count)
         let stdDev = sqrt(variance)
-        let minMs = sorted.first!
-        let maxMs = sorted.last!
 
         // Classify based on median and consistency
         let quality: WiFiQualityResult.Quality
