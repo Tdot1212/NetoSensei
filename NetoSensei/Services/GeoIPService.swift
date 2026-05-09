@@ -7,10 +7,12 @@
 
 import Foundation
 
-// FIXED: Removed @MainActor to prevent UI blocking
-// FIXED: Added proper task management to prevent multiple concurrent fetches
-// FIXED: Removed NSLock which is not safe in async contexts (Swift 6)
-// FIXED: Added 5-minute caching to prevent API rate limit issues
+// @MainActor required: SwiftUI views (IPInfoView) and view models (DashboardViewModel)
+// observe this as an @ObservedObject and read @Published properties directly. The
+// service also mutates currentGeoIP / isLoading without explicit MainActor.run
+// dispatches, so the class-level isolation is what keeps those publishes on main.
+// Task management (single-flight via currentFetchTask) prevents concurrent fetches;
+// 5-minute caching prevents API rate-limit issues.
 @MainActor
 class GeoIPService: ObservableObject {
     static let shared = GeoIPService()

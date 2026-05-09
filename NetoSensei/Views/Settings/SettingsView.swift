@@ -28,9 +28,9 @@ struct SettingsView: View {
     @State private var showingAISettings = false
     @State private var browserURL: IdentifiedURL?
 
-    private let privacyURL = URL(string: "https://tdot1212.github.io/NetoSensei/privacy.html")!
-    private let termsURL = URL(string: "https://tdot1212.github.io/NetoSensei/terms.html")!
-    private let supportEmailURL = URL(string: "mailto:toshlabs.dev+netosensei@gmail.com")!
+    private let privacyURL = URL(string: "https://tdot1212.github.io/NetoSensei/privacy.html")
+    private let termsURL = URL(string: "https://tdot1212.github.io/NetoSensei/terms.html")
+    private let supportEmailURL = URL(string: "mailto:toshlabs.dev+netosensei@gmail.com")
 
     var body: some View {
         NavigationView {
@@ -55,21 +55,21 @@ struct SettingsView: View {
                     }
 
                     Button {
-                        browserURL = IdentifiedURL(url: privacyURL)
+                        if let privacyURL { browserURL = IdentifiedURL(url: privacyURL) }
                     } label: {
                         Label("Privacy Policy", systemImage: "hand.raised.fill")
                             .foregroundColor(.primary)
                     }
 
                     Button {
-                        browserURL = IdentifiedURL(url: termsURL)
+                        if let termsURL { browserURL = IdentifiedURL(url: termsURL) }
                     } label: {
                         Label("Terms of Service", systemImage: "doc.text.fill")
                             .foregroundColor(.primary)
                     }
 
                     Button {
-                        UIApplication.shared.open(supportEmailURL)
+                        if let supportEmailURL { UIApplication.shared.open(supportEmailURL) }
                     } label: {
                         Label("Support Email", systemImage: "envelope.fill")
                             .foregroundColor(.primary)

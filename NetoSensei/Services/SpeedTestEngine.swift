@@ -278,13 +278,14 @@ class SpeedTestEngine: ObservableObject {
             try? await Task.sleep(nanoseconds: 300_000_000)
         }
 
-        guard !collectedSpeeds.isEmpty else {
+        // The last entry is the most recent / largest-size test, which is also the
+        // most accurate. .last is also a single element when only one test ran, so
+        // this naturally handles both single- and multi-result cases.
+        guard let bestSpeed = collectedSpeeds.last else {
             debugLog("⚠️ All download tests failed")
             return (0.0, nil)
         }
 
-        // If we have both small and large test results, prefer the large test (more accurate)
-        let bestSpeed = collectedSpeeds.count > 1 ? collectedSpeeds.last! : collectedSpeeds.first!
         let avgSpeed = collectedSpeeds.reduce(0, +) / Double(collectedSpeeds.count)
         let variance = collectedSpeeds.count > 1
             ? collectedSpeeds.map { pow($0 - avgSpeed, 2) }.reduce(0, +) / Double(collectedSpeeds.count)

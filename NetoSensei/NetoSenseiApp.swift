@@ -215,6 +215,10 @@ struct NetoSenseiApp: App {
         // MINIMAL INIT - just print to console
         debugLog("🚀 App init() called")
 
+        // Force CrashLogger lazy init so its private init() runs
+        // setupCrashHandling() + checkForPreviousCrash().
+        _ = CrashLogger.shared
+
         // IMPORTANT: Reset crash flag so app doesn't think it's perpetually crashing
         UserDefaults.standard.set(false, forKey: "CrashLogger_DidCrash")
         UserDefaults.standard.synchronize()
