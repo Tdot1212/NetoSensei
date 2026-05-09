@@ -110,19 +110,12 @@ actor PortProtocolTester {
 
     // MARK: - Run Full Test
 
-    func runFullTest() async -> PortProtocolTestSuite {
+    func runFullTest() async -> PortProtocolTestSuite? {
         // DISABLED: NWConnection tests causing app freeze
         // Creates 12+ connections that flood the main thread
         guard Self.NWCONNECTION_TESTS_ENABLED else {
             debugLog("⚠️ Port test DISABLED — NWConnection causing freeze")
-            return PortProtocolTestSuite(
-                timestamp: Date(),
-                results: [],
-                overallStatus: .unknown,
-                blockedPorts: [],
-                slowPorts: [],
-                recommendations: ["Port testing is temporarily disabled"]
-            )
+            return nil
         }
 
         var results: [PortTestResult] = []

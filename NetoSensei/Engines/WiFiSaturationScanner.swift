@@ -20,20 +20,11 @@ actor WiFiSaturationScanner {
 
     // MARK: - WiFi Saturation Scan
 
-    func performWiFiSaturationScan() async -> WiFiSaturationStatus {
+    func performWiFiSaturationScan() async -> WiFiSaturationStatus? {
         // DISABLED: NWConnection tests causing app freeze
         guard Self.NWCONNECTION_TESTS_ENABLED else {
             debugLog("⚠️ WiFi saturation scan DISABLED — NWConnection causing freeze")
-            return WiFiSaturationStatus(
-                lanJitter: 0,
-                highLANJitter: false,
-                gatewayLatency: 0,
-                latencySpikes: false,
-                poorGatewayResponse: false,
-                slowLocalTransfer: false,
-                saturationLevel: .none,
-                saturationScore: 80
-            )
+            return nil
         }
 
         // 1. Measure high jitter inside LAN

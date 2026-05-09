@@ -165,9 +165,11 @@ actor SecurityIntelligenceEngine {
         await updateProgress(onProgress, 0.84, "Checking WiFi saturation...")
         let wifiSaturationStatus = await WiFiSaturationScanner.shared.performWiFiSaturationScan()
 
-        // Generate WiFi saturation threats
-        let saturationThreats = analyzeWiFiSaturationThreats(saturationStatus: wifiSaturationStatus)
-        threats.append(contentsOf: saturationThreats)
+        // Generate WiFi saturation threats (skipped when scanner is disabled)
+        if let wifiSaturationStatus {
+            let saturationThreats = analyzeWiFiSaturationThreats(saturationStatus: wifiSaturationStatus)
+            threats.append(contentsOf: saturationThreats)
+        }
 
         // 12. NAT Behavior Scan (90%)
         await updateProgress(onProgress, 0.90, "Analyzing NAT behavior...")
@@ -189,9 +191,11 @@ actor SecurityIntelligenceEngine {
         await updateProgress(onProgress, 0.96, "Analyzing latency stability...")
         let latencyStabilityStatus = await LatencyStabilityScanner.shared.performLatencyStabilityScan()
 
-        // Generate latency stability threats
-        let latencyThreats = analyzeLatencyStabilityThreats(latencyStatus: latencyStabilityStatus)
-        threats.append(contentsOf: latencyThreats)
+        // Generate latency stability threats (skipped when scanner is disabled)
+        if let latencyStabilityStatus {
+            let latencyThreats = analyzeLatencyStabilityThreats(latencyStatus: latencyStabilityStatus)
+            threats.append(contentsOf: latencyThreats)
+        }
 
         await updateProgress(onProgress, 0.97, "Analyzing security posture...")
 
@@ -243,7 +247,7 @@ actor SecurityIntelligenceEngine {
             routerScore: routerConfigStatus.configScore,
             wifiScore: wifiSecurityStatus.securityScore,
             ispThrottlingScore: ispThrottlingStatus.throttlingScore,
-            saturationScore: wifiSaturationStatus.saturationScore,
+            saturationScore: wifiSaturationStatus?.saturationScore,
             natScore: natBehaviorStatus.natScore,
             roamingScore: wifiRoamingStatus.roamingScore,
             threatCount: threats.count
@@ -846,7 +850,7 @@ actor SecurityIntelligenceEngine {
         routerConfigStatus: RouterConfigStatus,
         wifiSecurityStatus: WiFiSecurityStatus,
         ispThrottlingStatus: ISPThrottlingStatus,
-        wifiSaturationStatus: WiFiSaturationStatus,
+        wifiSaturationStatus: WiFiSaturationStatus?,
         natBehaviorStatus: NATBehaviorStatus,
         wifiRoamingStatus: WiFiRoamingStatus
     ) async -> [SecurityWarning] {
@@ -914,7 +918,7 @@ actor SecurityIntelligenceEngine {
         routerConfigStatus: RouterConfigStatus,
         wifiSecurityStatus: WiFiSecurityStatus,
         ispThrottlingStatus: ISPThrottlingStatus,
-        wifiSaturationStatus: WiFiSaturationStatus,
+        wifiSaturationStatus: WiFiSaturationStatus?,
         natBehaviorStatus: NATBehaviorStatus,
         wifiRoamingStatus: WiFiRoamingStatus,
         threats: [SecurityThreat]
@@ -1037,16 +1041,19 @@ actor SecurityIntelligenceEngine {
         routerScore: Int,
         wifiScore: Int,
         ispThrottlingScore: Int,
-        saturationScore: Int,
+        saturationScore: Int?,
         natScore: Int,
         roamingScore: Int,
         threatCount: Int
     ) -> SecurityScore {
-        // Weighted average of all 13 security scores
+        // Weighted average of all security scores
         // DNS: 12%, Privacy: 7%, Gateway: 12%, IP: 7%, TLS: 12%
         // NetworkBehavior: 12%, PrivacyLeakage: 7%, Router: 5%, WiFi: 5%
-        // ISP Throttling: 7%, WiFi Saturation: 5%, NAT: 5%, Roaming: 4%
-        let overallScore = (
+        // ISP Throttling: 7%, WiFi Saturation: 5% (optional), NAT: 5%, Roaming: 4%
+        // When WiFi Saturation is unavailable (scanner disabled), drop its 5%
+        // weight and renormalize across the remaining 95% so the score isn't
+        // skewed by a missing component.
+        var weightedSum =
             dnsScore * 12 +
             privacyScore * 7 +
             gatewayScore * 12 +
@@ -1057,10 +1064,14 @@ actor SecurityIntelligenceEngine {
             routerScore * 5 +
             wifiScore * 5 +
             ispThrottlingScore * 7 +
-            saturationScore * 5 +
             natScore * 5 +
             roamingScore * 4
-        ) / 100
+        var totalWeight = 95
+        if let saturationScore {
+            weightedSum += saturationScore * 5
+            totalWeight = 100
+        }
+        let overallScore = weightedSum / totalWeight
 
         // Deduct for threats
         let finalScore = overallScore - (threatCount * 5)

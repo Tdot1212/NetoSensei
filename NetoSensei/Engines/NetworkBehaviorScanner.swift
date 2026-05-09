@@ -294,7 +294,11 @@ actor NetworkBehaviorScanner {
             }
         }
 
-        // If either speed is extremely slow (< 10 KB/s), might be throttling
+        // If either probe takes >10 seconds per KB (effectively < 0.1 KB/s),
+        // the connection is so slow we infer throttling. The 999.0 error
+        // sentinel from measureDownloadSpeed also trips this check, which
+        // is correct — a failed probe is functionally indistinguishable
+        // from extreme throttling for end-user impact.
         if httpsSpeed > 10.0 || httpSpeed > 10.0 {
             return true
         }

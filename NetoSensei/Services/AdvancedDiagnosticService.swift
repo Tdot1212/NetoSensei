@@ -445,18 +445,10 @@ class AdvancedDiagnosticService: ObservableObject {
             detectedProvider = geoIP.isp
         }
 
-        // Test speed without VPN (if possible, guide user to disconnect)
-        // For MVP, we'll estimate based on typical overhead
-        let speedWithoutVPN = speedWithVPN != nil ? speedWithVPN! * 1.3 : nil
-        let latencyWithoutVPN = latencyWithVPN != nil ? latencyWithVPN! * 0.7 : nil
-
-        let vpnOverhead = (speedWithVPN != nil && speedWithoutVPN != nil)
-            ? ((speedWithoutVPN! - speedWithVPN!) / speedWithoutVPN!) * 100
-            : nil
-
-        let latencyIncrease = (latencyWithVPN != nil && latencyWithoutVPN != nil)
-            ? latencyWithVPN! - latencyWithoutVPN!
-            : nil
+        // Without-VPN speed/latency are not measurable while the VPN is up,
+        // and we will not fabricate them from a multiplier. Leave nil; any
+        // consumer that wants a comparison must measure the baseline itself
+        // with the VPN disconnected.
 
         // Benchmark different VPN regions
         let regionalBenchmarks = await benchmarkVPNRegions()
@@ -469,11 +461,11 @@ class AdvancedDiagnosticService: ObservableObject {
             detectedVPNRegion: detectedRegion,
             detectedVPNProvider: detectedProvider,
             speedWithVPN: speedWithVPN,
-            speedWithoutVPN: speedWithoutVPN,
-            vpnOverhead: vpnOverhead,
+            speedWithoutVPN: nil,
+            vpnOverhead: nil,
             latencyWithVPN: latencyWithVPN,
-            latencyWithoutVPN: latencyWithoutVPN,
-            latencyIncrease: latencyIncrease,
+            latencyWithoutVPN: nil,
+            latencyIncrease: nil,
             regionalBenchmarks: regionalBenchmarks,
             suggestedRegion: suggestedRegion
         )

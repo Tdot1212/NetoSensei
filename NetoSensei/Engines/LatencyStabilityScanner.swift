@@ -21,25 +21,12 @@ actor LatencyStabilityScanner {
 
     // MARK: - Latency Stability Scan
 
-    func performLatencyStabilityScan() async -> LatencyStabilityStatus {
+    func performLatencyStabilityScan() async -> LatencyStabilityStatus? {
         // DISABLED: NWConnection tests causing app freeze
         // Creates 60+ connections (30 to gateway + 30 to internet)
         guard Self.NWCONNECTION_TESTS_ENABLED else {
             debugLog("⚠️ Latency stability scan DISABLED — NWConnection causing freeze")
-            return LatencyStabilityStatus(
-                gatewayLatency: 0,
-                gatewayJitter: 0,
-                gatewayPacketLoss: 0,
-                internetLatency: 0,
-                internetJitter: 0,
-                internetPacketLoss: 0,
-                peakHourStable: true,
-                stabilityLevel: .good,
-                stabilityScore: 80,
-                netflixImpact: .none,
-                zoomImpact: .none,
-                gamingImpact: .none
-            )
+            return nil
         }
 
         // 1. Measure gateway latency (local network)
