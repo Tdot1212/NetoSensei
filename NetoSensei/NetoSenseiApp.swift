@@ -16,9 +16,17 @@ class LocationPermissionManager: NSObject, CLLocationManagerDelegate {
     static let shared = LocationPermissionManager()
 
     private let locationManager = CLLocationManager()
+    private let statusLock = NSLock()
 
-    /// Cached authorization status — updated via delegate, safe to read from any thread
-    private(set) var currentStatus: CLAuthorizationStatus = .notDetermined
+    /// Backing store — only access through the computed `currentStatus`
+    private var _currentStatus: CLAuthorizationStatus = .notDetermined
+
+    /// Thread-safe cached authorization status
+    var currentStatus: CLAuthorizationStatus {
+        statusLock.lock()
+        defer { statusLock.unlock() }
+        return _currentStatus
+    }
 
     /// Whether the app has location permission and can therefore read SSID.
     /// Derived from `currentStatus` so we never call the main-thread-warning
@@ -57,10 +65,12 @@ class LocationPermissionManager: NSObject, CLLocationManagerDelegate {
     // MARK: - CLLocationManagerDelegate
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        // Deployment target is iOS 18.5; manager.authorizationStatus is always available.
-        currentStatus = manager.authorizationStatus
+        let newStatus = manager.authorizationStatus
+        statusLock.lock()
+        _currentStatus = newStatus
+        statusLock.unlock()
 
-        switch currentStatus {
+        switch newStatus {
         case .authorizedWhenInUse, .authorizedAlways:
             debugLog("📍 Location permission granted - WiFi SSID access enabled")
         case .denied:

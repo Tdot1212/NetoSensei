@@ -19,6 +19,7 @@ class NetworkMonitorService: ObservableObject {
 
     @Published var currentStatus: NetworkStatus = .empty
     @Published var isMonitoring = false
+    @Published var isInitializing = true
 
     // FIXED: Prevent update accumulation when updates take longer than interval
     private var isUpdating = false
@@ -169,6 +170,7 @@ class NetworkMonitorService: ObservableObject {
         // Run all checks in parallel with individual timeouts
         let status = await buildStatus()
         self.currentStatus = status
+        if isInitializing { isInitializing = false }
     }
 
     nonisolated private func buildStatus() async -> NetworkStatus {
@@ -235,8 +237,9 @@ class NetworkMonitorService: ObservableObject {
             // dashboard ("Not connected to Wi-Fi", "Gateway: Unknown", etc.).
             let localIP = getLocalIP()
             let nwPathSaysWiFi = currentPath?.usesInterfaceType(NWInterface.InterfaceType.wifi) ?? false
+            let wifiAvailable = pathHasWiFiAvailable(currentPath)
             let en0HasIP = hasIPOnInterface(named: "en0")
-            let wifiConnected = nwPathSaysWiFi || en0HasIP
+            let wifiConnected = nwPathSaysWiFi || wifiAvailable || en0HasIP
             let estimatedGateway = estimateGateway()
 
             return NetworkStatus(
@@ -282,12 +285,13 @@ class NetworkMonitorService: ObservableObject {
         }
         let nwPathSaysWiFi = path.status == .satisfied && path.usesInterfaceType(NWInterface.InterfaceType.wifi)
         let en0HasIPEarly = hasIPOnInterface(named: "en0")
+        let wifiAvailable = pathHasWiFiAvailable(path)
 
         // FIX (Issue 1): Don't short-circuit to "WiFi disconnected" just because the
         // primary path is cellular. iPhones can be on cellular AND associated with WiFi
         // at the same time. Only short-circuit when we're SURE there is no WiFi —
         // i.e. NWPath doesn't list WiFi AND en0 has no IP.
-        if !nwPathSaysWiFi && !en0HasIPEarly {
+        if !nwPathSaysWiFi && !wifiAvailable && !en0HasIPEarly {
             return WiFiInfo(isConnected: false)
         }
 
@@ -322,7 +326,7 @@ class NetworkMonitorService: ObservableObject {
         //   - The en0 interface has an IPv4 address assigned
         //   - We were able to read the SSID
         // Reusing en0HasIPEarly from above (recomputing would just re-walk getifaddrs).
-        let isConnected = nwPathSaysWiFi || en0HasIPEarly || ssid != nil
+        let isConnected = nwPathSaysWiFi || wifiAvailable || en0HasIPEarly || ssid != nil
 
         // Record signal strength sample for tracking
         if let strength = signalStrength {
@@ -346,7 +350,7 @@ class NetworkMonitorService: ObservableObject {
         )
     }
 
-    /// Check if a named interface has an IPv4 address assigned
+    /// Check if a named interface has a routable IP (IPv4 or IPv6, excluding link-local)
     nonisolated private func hasIPOnInterface(named targetName: String) -> Bool {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0 else { return false }
@@ -361,20 +365,27 @@ class NetworkMonitorService: ObservableObject {
             let family = addr.pointee.sa_family
             let name = String(cString: interface.ifa_name)
 
-            if name == targetName && family == UInt8(AF_INET) {
+            if name == targetName && (family == UInt8(AF_INET) || family == UInt8(AF_INET6)) {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 let result = getnameinfo(addr, socklen_t(addr.pointee.sa_len),
                                         &hostname, socklen_t(hostname.count),
                                         nil, 0, NI_NUMERICHOST)
                 if result == 0 {
                     let ip = String(cString: hostname)
-                    if !ip.isEmpty && ip != "0.0.0.0" {
-                        return true
+                    if ip.isEmpty || ip == "0.0.0.0" || ip == "::" || ip.hasPrefix("fe80:") {
+                        continue
                     }
+                    return true
                 }
             }
         }
         return false
+    }
+
+    /// WiFi listed in path's available interfaces — true even when VPN is active
+    nonisolated private func pathHasWiFiAvailable(_ path: Network.NWPath?) -> Bool {
+        guard let path else { return false }
+        return path.availableInterfaces.contains { $0.type == .wifi }
     }
 
     // MARK: - Router Check (iOS-safe, median of 5 pings, outlier rejection)
@@ -383,7 +394,10 @@ class NetworkMonitorService: ObservableObject {
         guard let path = currentPath else {
             return RouterInfo(gatewayIP: nil, isReachable: false)
         }
-        if path.usesInterfaceType(NWInterface.InterfaceType.cellular) {
+        if path.usesInterfaceType(NWInterface.InterfaceType.cellular)
+            && !path.usesInterfaceType(NWInterface.InterfaceType.wifi)
+            && !pathHasWiFiAvailable(path)
+            && !hasIPOnInterface(named: "en0") {
             return RouterInfo(gatewayIP: nil, isReachable: false)
         }
 

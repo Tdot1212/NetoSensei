@@ -520,12 +520,12 @@ struct DashboardView: View {
                     StatusRow(
                         title: "Gateway",
                         value: gateway,
-                        color: interpreterRouter?.color ?? routerStatusColor(vpnActive: vpnActive)
+                        color: vm.isInitializing ? .secondary : (interpreterRouter?.color ?? routerStatusColor(vpnActive: vpnActive))
                     )
                 } else {
                     // Use interpreter's value/color if available, otherwise fallback
-                    let value = interpreterRouter?.value ?? (vpnActive && vm.status.vpn.vpnState.isLikelyOn ? "Unreachable (VPN)" : "Unknown")
-                    let color = interpreterRouter?.color ?? (vpnActive ? AppColors.yellow : AppColors.red)
+                    let value = vm.isInitializing ? "Detecting..." : (interpreterRouter?.value ?? (vpnActive && vm.status.vpn.vpnState.isLikelyOn ? "Unreachable (VPN)" : "Unknown"))
+                    let color: Color = vm.isInitializing ? .secondary : (interpreterRouter?.color ?? (vpnActive ? AppColors.yellow : AppColors.red))
                     StatusRow(
                         title: "Gateway",
                         value: value,
@@ -536,8 +536,8 @@ struct DashboardView: View {
                 // Health status - using pre-computed values
                 StatusRow(
                     title: "Status",
-                    value: healthText,
-                    color: healthColor
+                    value: vm.isInitializing ? "Detecting..." : healthText,
+                    color: vm.isInitializing ? .secondary : healthColor
                 )
 
                 // Latency (use smoothed value, but never a sentinel)
@@ -609,7 +609,7 @@ struct DashboardView: View {
                 StatusRow(
                     title: "Status",
                     value: vm.internetStatusText,
-                    color: vm.isConnected ? AppColors.green : AppColors.red
+                    color: vm.isInitializing ? .secondary : (vm.isConnected ? AppColors.green : AppColors.red)
                 )
 
                 // PART 1: Use smoothed latency instead of raw value
@@ -893,6 +893,7 @@ struct DashboardView: View {
 
     /// PART 1: Use stableOverallHealth (with hysteresis) for status color
     private var stableStatusColor: Color {
+        if vm.isInitializing { return .gray }
         switch vm.stableOverallHealth {
         case .excellent: return AppColors.green
         case .fair: return AppColors.yellow
@@ -911,6 +912,7 @@ struct DashboardView: View {
     }
 
     private var wifiStatusColor: Color {
+        if vm.isInitializing { return .secondary }
         // FIX (Issue 1): match wifiStatusText logic — a private LAN IP is also
         // proof of WiFi connectivity even if status.wifi.isConnected is stale.
         let hasPrivateIP: Bool = {

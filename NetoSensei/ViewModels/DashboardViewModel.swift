@@ -21,6 +21,9 @@ class DashboardViewModel: ObservableObject {
     /// Loading state
     @Published var isLoading: Bool = false
 
+    /// True until NetworkMonitorService completes its first real status update
+    @Published var isInitializing: Bool = true
+
     /// Last update timestamp
     @Published var lastUpdated: Date? = nil
 
@@ -176,6 +179,10 @@ class DashboardViewModel: ObservableObject {
         networkMonitor.$isMonitoring
             .receive(on: DispatchQueue.main)
             .assign(to: &$isMonitoring)
+
+        networkMonitor.$isInitializing
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$isInitializing)
 
         // Observe GeoIP changes
         geoIPService.$currentGeoIP
@@ -363,6 +370,11 @@ class DashboardViewModel: ObservableObject {
         isUpdatingUIStatus = true
         defer { isUpdatingUIStatus = false }
 
+        if isInitializing {
+            connectionQuality = "Detecting..."
+            return
+        }
+
         // Priority 0: Use diagnostic root cause if recent
         // This ensures the dashboard shows the same diagnosis as the diagnostic view
         if shouldShowDiagnosticRootCause, let rootCause = lastDiagnosticRootCause {
@@ -512,6 +524,8 @@ class DashboardViewModel: ObservableObject {
     /// definitive proof of WiFi connectivity, even if status.wifi.isConnected
     /// is momentarily false (timeout fallback path).
     var wifiStatusText: String {
+        if isInitializing { return "Detecting..." }
+
         let hasPrivateIP: Bool = {
             guard let ip = status.localIP else { return false }
             return ip.hasPrefix("192.168.") || ip.hasPrefix("10.") || ip.hasPrefix("172.")
@@ -576,6 +590,8 @@ class DashboardViewModel: ObservableObject {
 
     /// Internet status text
     var internetStatusText: String {
+        if isInitializing { return "Detecting..." }
+
         if status.internet.isReachable {
             if let latency = status.internet.latencyToExternal {
                 return "Connected (\(Int(latency))ms)"
