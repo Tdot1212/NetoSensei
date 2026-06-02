@@ -104,6 +104,11 @@ class DashboardViewModel: ObservableObject {
     private var pendingRating: NetworkHealth?
     private var confirmedRating: NetworkHealth = .fair
 
+    /// Identity of the network the smoothing buffers currently describe.
+    /// When this changes (SSID / interface / subnet), the buffers are cleared
+    /// so old samples can't blend into the new network's averages.
+    private var lastNetworkKey: String?
+
     /// Smoothed values for display
     @Published var smoothedInternetLatency: Double?
     @Published var smoothedGatewayLatency: Double?
@@ -162,6 +167,10 @@ class DashboardViewModel: ObservableObject {
         networkMonitor.$currentStatus
             .receive(on: DispatchQueue.main)
             .sink { [weak self] newStatus in
+                // FIX (Phase 2): a network switch is a state change, not noise.
+                // Discard latency samples from the previous network BEFORE
+                // smoothing so the rolling averages can't blend across networks.
+                self?.clearSmoothingIfNetworkChanged(newStatus)
                 self?.status = newStatus
                 self?.updateSmoothedValues()  // Apply smoothing
                 // FIX (Issue 3/6): debounce probe failures so a single timeout
@@ -589,17 +598,14 @@ class DashboardViewModel: ObservableObject {
     }
 
     /// Internet status text
+    /// FIX (Phase 2): The card previously embedded a RAW latency here
+    /// ("Connected (98ms)") while the Latency row below showed the SMOOTHED
+    /// value ("Latency 342ms") — two contradictory numbers on one card.
+    /// The status now states connectivity only; the single, smoothed,
+    /// network-layer latency is shown once in the dedicated "Latency" row.
     var internetStatusText: String {
         if isInitializing { return "Detecting..." }
-
-        if status.internet.isReachable {
-            if let latency = status.internet.latencyToExternal {
-                return "Connected (\(Int(latency))ms)"
-            }
-            return "Connected"
-        }
-
-        return "No Internet"
+        return status.internet.isReachable ? "Connected" : "No Internet"
     }
 
     /// Signal strength description
@@ -835,6 +841,43 @@ class DashboardViewModel: ObservableObject {
             history.removeFirst()
         }
         return history.reduce(0, +) / Double(history.count)
+    }
+
+    /// A stable identity for the currently-connected network. A change in
+    /// interface type, SSID, or /24 subnet means we are on a different network.
+    private func networkIdentityKey(_ status: NetworkStatus) -> String {
+        let type = status.connectionType?.displayName ?? "none"
+        let ssid = status.wifi.ssid ?? "-"
+        let subnet: String = {
+            guard let ip = status.localIP else { return "-" }
+            let parts = ip.split(separator: ".")
+            return parts.count == 4 ? "\(parts[0]).\(parts[1]).\(parts[2])" : ip
+        }()
+        return "\(type)|\(ssid)|\(subnet)"
+    }
+
+    /// Clear the latency/health smoothing buffers when the network changes.
+    /// Network switches are state changes, not measurement noise — blending
+    /// the old network's samples into the new one produced the contradictory
+    /// "Connected (98ms)" / "Latency 342ms" readings the audit flagged.
+    private func clearSmoothingIfNetworkChanged(_ status: NetworkStatus) {
+        let key = networkIdentityKey(status)
+        defer { lastNetworkKey = key }
+        guard let previous = lastNetworkKey, previous != key else { return }
+
+        internetLatencyHistory.removeAll()
+        gatewayLatencyHistory.removeAll()
+        dnsLatencyHistory.removeAll()
+        healthScoreHistory.removeAll()
+        smoothedInternetLatency = nil
+        smoothedGatewayLatency = nil
+        smoothedDNSLatency = nil
+        // Reset hysteresis so the rating can re-converge on the new network
+        // without carrying the old network's pending state.
+        consecutiveRatingCount = 0
+        pendingRating = nil
+
+        debugLog("[Smoothing] Network changed (\(previous) → \(key)) — cleared latency buffers")
     }
 
     /// Update all smoothed values from current status

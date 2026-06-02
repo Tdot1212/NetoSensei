@@ -154,9 +154,17 @@ struct RouterInfo {
 struct InternetInfo {
     var isReachable: Bool
     var externalPingSuccess: Bool
-    var latencyToExternal: Double?  // ms to 1.1.1.1 or 8.8.8.8
+    /// PRIMARY latency (ms): network-layer TCP-handshake RTT to a stable
+    /// resolver, measured by NetworkLatencyProbe. No HTTP/TLS/DNS overhead.
+    /// This is the number shown as "Latency" on the dashboard.
+    var latencyToExternal: Double?
     var httpTestSuccess: Bool
     var cdnReachable: Bool
+    /// SECONDARY latency (ms): full HTTPS HEAD round-trip (includes TLS
+    /// negotiation + server processing). Demoted to "App response time",
+    /// shown only in the Internet card's (i) detail. NEVER mixed into the
+    /// primary latency above.
+    var httpRTT: Double?
 
     /// Latency that is safe to display (no sentinels).
     var displayableLatency: Double? {

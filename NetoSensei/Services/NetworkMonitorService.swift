@@ -406,15 +406,23 @@ class NetworkMonitorService: ObservableObject {
             return RouterInfo(gatewayIP: nil, isReachable: false)
         }
 
-        // FIXED: Measure 5 times, take median, discard outliers (>3x median)
+        // FIXED: Measure 5 times, take median, discard outliers (>3x median).
+        // Gateway latency is measured with the SAME network-layer TCP-handshake
+        // probe as the internet latency (NetworkLatencyProbe) — a non-blocking
+        // poll()-bounded BSD connect. allowUDPFallback covers gateways that
+        // expose no open TCP port. Returns seconds; convert to ms.
         var latencies: [Double] = []
         var successCount = 0
         let pingCount = 5
 
         for _ in 0..<pingCount {
-            let (ok, lat) = await safePing(host: gateway, timeout: 1.0)
-            if ok, let l = lat {
-                latencies.append(l)
+            if let rttSeconds = await NetworkLatencyProbe.shared.measureHandshake(
+                host: gateway,
+                ports: [80, 443, 53],
+                allowUDPFallback: true,
+                timeout: 1.0
+            ) {
+                latencies.append(rttSeconds * 1000.0)
                 successCount += 1
             }
         }
@@ -554,30 +562,32 @@ class NetworkMonitorService: ObservableObject {
             SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
         }
 
-        let pingHost: String
-        if isInChina && !vpnActive {
-            // China without VPN: use domestic server for accurate latency
-            pingHost = "www.baidu.com"
-        } else {
-            // Outside China or VPN active: use apple.com
-            // CLEANUP 4: was cloudflare-dns.com — Cloudflare endpoints are
-            // throttled/blocked in mainland China and produced false-positive
-            // probe failures even on healthy connections.
-            pingHost = "apple.com"
-        }
+        // China-aware: Cloudflare/Google/Quad9 are throttled/blocked in mainland
+        // China, so when in-China-without-VPN we prefer domestic targets for both
+        // the network-layer probe and the HTTP reachability ping.
+        let preferDomestic = isInChina && !vpnActive
+        let pingHost: String = preferDomestic ? "www.baidu.com" : "apple.com"
 
-        // HTTP connectivity check with Apple (works in China)
+        // PRIMARY latency: network-layer TCP-handshake RTT (no HTTP/TLS/DNS),
+        // measured by NetworkLatencyProbe. This is the dashboard "Latency".
+        async let primary = NetworkLatencyProbe.shared.measureExternalLatency(preferDomestic: preferDomestic)
+        // SECONDARY: full HTTPS round-trip — kept as "App response time" + used
+        // for the reachability verdict.
         async let test1 = safeHTTPCheck(url: "https://www.apple.com/library/test/success.html", timeout: timeout)
         async let test2 = safePing(host: pingHost, timeout: timeout)
 
-        let (httpOk, pingResult) = await (test1, test2)
+        let (primaryLatencySec, httpOk, pingResult) = await (primary, test1, test2)
+        let primaryLatencyMs = primaryLatencySec.map { $0 * 1000.0 }
+        let httpRTTms = pingResult.1
 
         return InternetInfo(
-            isReachable: httpOk || pingResult.0,
-            externalPingSuccess: pingResult.0,
-            latencyToExternal: pingResult.1,
+            isReachable: httpOk || pingResult.0 || primaryLatencyMs != nil,
+            externalPingSuccess: pingResult.0 || primaryLatencyMs != nil,
+            // PRIMARY only — never fall back to HTTP RTT here (no silent mixing).
+            latencyToExternal: primaryLatencyMs,
             httpTestSuccess: httpOk,
-            cdnReachable: httpOk
+            cdnReachable: httpOk,
+            httpRTT: httpRTTms
         )
     }
 

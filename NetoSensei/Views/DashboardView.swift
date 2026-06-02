@@ -14,6 +14,7 @@ struct DashboardView: View {
     // PART 3: Removed showingDiagnostic, showingAdvancedDiagnostic, showingVPNTools
     // These buttons are now in DiagnoseTabView and SecurityTabView
     @State private var showingIPInfo = false
+    @State private var showingInternetLatencyInfo = false
     @State private var showingDebugPanel = false
     @State private var showingAIChat = false
     @State private var showingSettings = false
@@ -118,6 +119,9 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $showingIPInfo) {
                 IPInfoView()
+            }
+            .sheet(isPresented: $showingInternetLatencyInfo) {
+                internetLatencyInfoSheet
             }
             #if DEBUG
             .sheet(isPresented: $showingDebugPanel) {
@@ -473,30 +477,30 @@ struct DashboardView: View {
         // SINGLE SOURCE OF TRUTH: Use interpreter's router status when available
         let interpreterRouter = NetworkInterpreter.shared.current?.router
 
-        // Pre-compute health status values outside ViewBuilder
+        // Pre-compute health status values outside ViewBuilder.
         // FIX (Issue 2): a real measured latency to the gateway is proof it's
         // reachable — never label it "Unknown" / "Unreachable" in that case.
-        let routerHasLiveLatency = vm.status.router.displayableLatency != nil ||
-            vm.smoothedGatewayLatency != nil
+        // FIX (Phase 2 / audit A2): when a live latency exists, derive the
+        // Status WORD from that magnitude — the same value shown in the Latency
+        // row and used for the colour — so the word, its colour, and the number
+        // can never contradict (previously this hard-coded "Excellent" for ANY
+        // live latency, producing "Status: Excellent" above "Latency: 95ms").
+        let liveGatewayLatency = vm.smoothedGatewayLatency ?? vm.status.router.displayableLatency
+        let routerHasLiveLatency = liveGatewayLatency != nil
         let healthText: String = {
-            if let router = interpreterRouter {
-                // Override interpreter "Unknown"/"Bad" if we have a fresh measurement.
-                if routerHasLiveLatency && (router.status == .bad || router.status == .inactive) {
-                    return ComponentStatus.StatusLevel.good.rawValue
-                }
-                return router.status.rawValue
-            } else if routerHasLiveLatency {
-                return NetworkHealth.excellent.displayName
-            } else {
-                return vpnActive && !vm.status.router.isReachable && vm.status.vpn.vpnState.isLikelyOn ? "Unreachable (VPN active)" : vm.status.router.health.displayName
+            if let l = liveGatewayLatency {
+                return routerStatusWord(forLatency: l)
             }
+            if let router = interpreterRouter {
+                return router.status.rawValue
+            }
+            return vpnActive && !vm.status.router.isReachable && vm.status.vpn.vpnState.isLikelyOn
+                ? "Unreachable (VPN active)"
+                : vm.status.router.health.displayName
         }()
         let healthColor: Color = {
-            if routerHasLiveLatency {
-                if let l = vm.smoothedGatewayLatency ?? vm.status.router.displayableLatency {
-                    return latencyColor(l)
-                }
-                return AppColors.green
+            if let l = liveGatewayLatency {
+                return latencyColor(l)
             }
             return interpreterRouter?.color ?? routerStatusColor(vpnActive: vpnActive)
         }()
@@ -603,6 +607,18 @@ struct DashboardView: View {
                         .foregroundColor(AppColors.textSecondary)
                     Text("Internet")
                         .font(.headline)
+                    Spacer()
+                    // (i): explains what "Latency" measures and surfaces the
+                    // secondary "App response time" (HTTP RTT) + methodology.
+                    Button {
+                        showingInternetLatencyInfo = true
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .font(.subheadline)
+                            .foregroundColor(AppColors.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("How latency is measured")
                 }
 
                 // Connection status
@@ -612,7 +628,8 @@ struct DashboardView: View {
                     color: vm.isInitializing ? .secondary : (vm.isConnected ? AppColors.green : AppColors.red)
                 )
 
-                // PART 1: Use smoothed latency instead of raw value
+                // PART 1: smoothed network-layer latency (single source of truth).
+                // PHASE 2: this is the TCP-handshake RTT, not the old HTTP timing.
                 if let latency = vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal {
                     StatusRow(
                         title: "Latency",
@@ -636,6 +653,67 @@ struct DashboardView: View {
                             .foregroundColor(AppColors.yellow)
                             .padding(.top, 4)
                     }
+                }
+            }
+        }
+    }
+
+    // MARK: - Internet Latency Info Sheet (PHASE 2)
+    // Honest, technical explanation of the two latency numbers so users
+    // understand what each measures and why they can differ.
+
+    private var internetLatencyInfoSheet: some View {
+        let primary = vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal
+        let appResponse = vm.status.internet.httpRTT
+
+        return NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: UIConstants.spacingL) {
+                    // Primary metric
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Latency")
+                                .font(.headline)
+                            Spacer()
+                            Text(primary.map { "\(Int($0))ms" } ?? "—")
+                                .font(.title3.bold().monospaced())
+                                .foregroundColor(primary.map { latencyColor($0) } ?? .secondary)
+                        }
+                        Text("Network round-trip time. Measured as a TCP handshake to a stable public resolver (Cloudflare 1.1.1.1, or a China-domestic resolver when applicable), dialled by IP. It contains no HTTP request, no TLS negotiation, and no DNS lookup — so it reflects the network path itself. This is the primary number shown on the card.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Divider()
+
+                    // Secondary metric
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("App response time")
+                                .font(.headline)
+                            Spacer()
+                            Text(appResponse.map { "\(Int($0))ms" } ?? "—")
+                                .font(.title3.bold().monospaced())
+                                .foregroundColor(.secondary)
+                        }
+                        Text("A full HTTPS request round-trip (apple.com). It includes the TCP handshake plus TLS negotiation and server processing, so it is normally higher than the network latency above. Shown here for reference only — it is never used as the primary latency.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Divider()
+
+                    Text("Why two numbers? The network latency tells you how fast packets reach the internet; the app response time tells you how long a typical secure web request takes end-to-end. A large gap usually means TLS/server overhead, not a slow network.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+            }
+            .navigationTitle("About Latency")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showingInternetLatencyInfo = false }
                 }
             }
         }
@@ -939,6 +1017,19 @@ struct DashboardView: View {
 
     private func latencyColor(_ latency: Double) -> Color {
         NetworkColors.forLatency(latency)
+    }
+
+    /// Status word for a latency value, using the SAME band edges as
+    /// `latencyColor` (NetworkColors.forLatency) so the verdict word and its
+    /// colour always agree with the latency number on the card.
+    private func routerStatusWord(forLatency ms: Double) -> String {
+        switch ms {
+        case ..<30: return "Excellent"
+        case ..<60: return "Good"
+        case ..<150: return "Fair"
+        case ..<300: return "Poor"
+        default: return "Critical"
+        }
     }
 
     private func dnsLatencyColor(_ latency: Double) -> Color {
