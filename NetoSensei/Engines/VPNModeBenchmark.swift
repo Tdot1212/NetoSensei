@@ -175,14 +175,29 @@ actor VPNModeBenchmark {
     }
 
     private func measureUploadSpeed() async -> Double {
-        // Simplified upload speed test
-        // In production, you'd upload test data to a speed test server
-        // For now, we'll estimate based on connection quality
+        // Real upload measurement against Cloudflare's __up endpoint —
+        // mirrors VPNBenchmarkEngine's measureUploadSpeed(). 5MB POST body.
+        guard let url = URL(string: "https://speed.cloudflare.com/__up") else {
+            return 0
+        }
 
-        // Upload test is limited on iOS without a proper speed test server
-        // Return estimated value based on download speed ratio
-        let downloadSpeed = await measureDownloadSpeed()
-        return downloadSpeed * 0.3  // Typical upload is ~30% of download
+        let testData = Data(repeating: 0, count: 5_000_000)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = testData
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+
+        let startTime = Date()
+
+        do {
+            _ = try await URLSession.shared.data(for: request)
+            let duration = Date().timeIntervalSince(startTime)
+            guard duration > 0 else { return 0 }
+            let megabits = Double(testData.count) * 8 / 1_000_000
+            return megabits / duration  // Mbps
+        } catch {
+            return 0
+        }
     }
 
     // MARK: - Latency Measurement
