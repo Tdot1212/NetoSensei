@@ -702,6 +702,13 @@ class DashboardViewModel: ObservableObject {
         return false
     }
 
+    /// True when a local TUN-mode proxy/VPN intercepted the latency probe, so
+    /// the dashboard must show "Via VPN/proxy" instead of a fabricated number.
+    /// See LatencyInterception / InternetInfo.latencyIntercepted.
+    var latencyIntercepted: Bool {
+        status.internet.latencyIntercepted
+    }
+
     /// ISP slow warning
     /// STEP 4 Requirement: "If ISP slow → downgrade connection quality"
     var hasISPWarning: Bool {

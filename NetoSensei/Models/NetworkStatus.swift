@@ -166,6 +166,13 @@ struct InternetInfo {
     /// primary latency above.
     var httpRTT: Double?
 
+    /// True when a local TUN-mode proxy/VPN intercepted the external handshake
+    /// on-device, so `latencyToExternal` is deliberately nil (the fake ~1-4ms
+    /// stub RTT is never stored). The UI shows "Via VPN/proxy" instead of a
+    /// number; every numeric consumer already excludes nil automatically.
+    /// See LatencyInterception. Defaulted so existing initializers compile.
+    var latencyIntercepted: Bool = false
+
     /// Latency that is safe to display (no sentinels).
     var displayableLatency: Double? {
         LatencyValidation.normalize(latencyToExternal)

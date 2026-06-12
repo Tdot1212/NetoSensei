@@ -571,24 +571,81 @@ class NetworkMonitorService: ObservableObject {
         // PRIMARY latency: network-layer TCP-handshake RTT (no HTTP/TLS/DNS),
         // measured by NetworkLatencyProbe. This is the dashboard "Latency".
         async let primary = NetworkLatencyProbe.shared.measureExternalLatency(preferDomestic: preferDomestic)
+        // INTERCEPTION REFERENCE: a fresh, honest gateway handshake RTT measured
+        // alongside the external probe. TUN-mode proxies fake the external RTT
+        // but leave LAN gateway traffic untouched, so the gateway is our
+        // physical floor (see LatencyInterception). Measured here (not borrowed
+        // from getRouter) so the interception logic stays self-contained and
+        // reusable by the speed-test phase.
+        async let gatewayRef = measureGatewayReferenceRTT()
         // SECONDARY: full HTTPS round-trip — kept as "App response time" + used
         // for the reachability verdict.
         async let test1 = safeHTTPCheck(url: "https://www.apple.com/library/test/success.html", timeout: timeout)
         async let test2 = safePing(host: pingHost, timeout: timeout)
 
-        let (primaryLatencySec, httpOk, pingResult) = await (primary, test1, test2)
-        let primaryLatencyMs = primaryLatencySec.map { $0 * 1000.0 }
+        let (primaryLatencySec, gatewayRefMs, httpOk, pingResult) = await (primary, gatewayRef, test1, test2)
+        let measuredExternalMs = primaryLatencySec.map { $0 * 1000.0 }
         let httpRTTms = pingResult.1
 
+        // INTERCEPTION VERDICT. When a local proxy faked the handshake we store
+        // latencyToExternal = nil (never the fake number) and raise the flag —
+        // every numeric consumer already excludes nil, so the fabricated value
+        // enters no smoothing buffer, health score, quality verdict or trend.
+        // Reachability stays honest: the connection DID succeed (through the
+        // proxy), we just don't trust its timing.
+        var intercepted = false
+        var honestLatencyMs = measuredExternalMs
+        if let ext = measuredExternalMs {
+            let verdict = LatencyInterception.evaluate(
+                externalRTTms: ext,
+                gatewayRTTms: gatewayRefMs,
+                vpnActive: vpnActive
+            )
+            intercepted = verdict.intercepted
+            if intercepted {
+                honestLatencyMs = nil
+                debugLog("[Latency] Probe intercepted by local proxy — \(verdict.reason)")
+            }
+        }
+
         return InternetInfo(
-            isReachable: httpOk || pingResult.0 || primaryLatencyMs != nil,
-            externalPingSuccess: pingResult.0 || primaryLatencyMs != nil,
+            isReachable: httpOk || pingResult.0 || measuredExternalMs != nil,
+            externalPingSuccess: pingResult.0 || measuredExternalMs != nil,
             // PRIMARY only — never fall back to HTTP RTT here (no silent mixing).
-            latencyToExternal: primaryLatencyMs,
+            latencyToExternal: honestLatencyMs,
             httpTestSuccess: httpOk,
             cdnReachable: httpOk,
-            httpRTT: httpRTTms
+            httpRTT: httpRTTms,
+            latencyIntercepted: intercepted
         )
+    }
+
+    /// Fresh gateway handshake RTT (ms) used as the physical reference for
+    /// latency-interception detection (see LatencyInterception). The gateway is
+    /// on the LAN (private IP) and is NOT routed through TUN-mode proxies, so
+    /// this handshake stays honest even when a proxy intercepts external
+    /// connections. Median of 3 keeps a single jittery sample from falsely
+    /// flagging a real external reading. UDP fallback is intentionally OFF: a
+    /// UDP association "succeeds" in ~0ms and would poison the reference toward
+    /// zero, masking real interception — when no TCP port answers we return nil
+    /// and let the absolute-floor authority take over. Returns nil when no
+    /// gateway is estimable (e.g. cellular).
+    nonisolated private func measureGatewayReferenceRTT() async -> Double? {
+        guard let gateway = estimateGateway() else { return nil }
+        var samples: [Double] = []
+        for _ in 0..<3 {
+            if let rttSeconds = await NetworkLatencyProbe.shared.measureHandshake(
+                host: gateway,
+                ports: [80, 443, 53],
+                allowUDPFallback: false,
+                timeout: 1.0
+            ) {
+                samples.append(rttSeconds * 1000.0)
+            }
+        }
+        guard !samples.isEmpty else { return nil }
+        samples.sort()
+        return samples[samples.count / 2]
     }
 
     // MARK: - DNS Check (iOS-safe)

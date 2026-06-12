@@ -630,7 +630,18 @@ struct DashboardView: View {
 
                 // PART 1: smoothed network-layer latency (single source of truth).
                 // PHASE 2: this is the TCP-handshake RTT, not the old HTTP timing.
-                if let latency = vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal {
+                // PHASE 2.1: when a local VPN/proxy intercepted the handshake the
+                // direct network RTT cannot be measured — show that honestly
+                // (neutral yellow, not red: it is not a fault) instead of the
+                // fabricated ~1-4ms stub value. Checked first so a stale smoothed
+                // value can't leak through (the buffer survives a VPN toggle).
+                if vm.latencyIntercepted {
+                    StatusRow(
+                        title: "Latency",
+                        value: "Via VPN/proxy",
+                        color: AppColors.yellow
+                    )
+                } else if let latency = vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal {
                     StatusRow(
                         title: "Latency",
                         value: "\(Int(latency))ms",
@@ -663,7 +674,10 @@ struct DashboardView: View {
     // understand what each measures and why they can differ.
 
     private var internetLatencyInfoSheet: some View {
-        let primary = vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal
+        // PHASE 2.1: when intercepted, the direct network RTT is unmeasurable —
+        // show "Via VPN/proxy" rather than a stale/fake number.
+        let intercepted = vm.latencyIntercepted
+        let primary = intercepted ? nil : (vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal)
         let appResponse = vm.status.internet.httpRTT
 
         return NavigationView {
@@ -675,9 +689,15 @@ struct DashboardView: View {
                             Text("Latency")
                                 .font(.headline)
                             Spacer()
-                            Text(primary.map { "\(Int($0))ms" } ?? "—")
-                                .font(.title3.bold().monospaced())
-                                .foregroundColor(primary.map { latencyColor($0) } ?? .secondary)
+                            if intercepted {
+                                Text("Via VPN/proxy")
+                                    .font(.subheadline.bold())
+                                    .foregroundColor(AppColors.yellow)
+                            } else {
+                                Text(primary.map { "\(Int($0))ms" } ?? "—")
+                                    .font(.title3.bold().monospaced())
+                                    .foregroundColor(primary.map { latencyColor($0) } ?? .secondary)
+                            }
                         }
                         Text("Network round-trip time. Measured as a TCP handshake to a stable public resolver (Cloudflare 1.1.1.1, or a China-domestic resolver when applicable), dialled by IP. It contains no HTTP request, no TLS negotiation, and no DNS lookup — so it reflects the network path itself. This is the primary number shown on the card.")
                             .font(.caption)
@@ -706,6 +726,26 @@ struct DashboardView: View {
                     Text("Why two numbers? The network latency tells you how fast packets reach the internet; the app response time tells you how long a typical secure web request takes end-to-end. A large gap usually means TLS/server overhead, not a slow network.")
                         .font(.caption)
                         .foregroundColor(.secondary)
+
+                    // PHASE 2.1: third section — shown only while a local
+                    // VPN/proxy is intercepting the probe. Explains honestly why
+                    // the network latency is unmeasurable and which number still
+                    // reflects real performance.
+                    if intercepted {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "lock.shield")
+                                    .foregroundColor(AppColors.yellow)
+                                Text("Why \"Via VPN/proxy\"?")
+                                    .font(.headline)
+                            }
+                            Text("A local VPN or proxy (V2BOX, Shadowrocket, Clash, etc.) answers the connection test on your device itself and opens the real connection in the background. Because the handshake never leaves the phone, the direct network latency cannot be measured while it is active — any number here would be the proxy's own ~1-2ms response, not your real network distance, so we don't show it.\n\nThe \"App response time\" above still reflects real end-to-end performance through the tunnel, because it waits for a full request to come back from the server.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
                 .padding()
             }
