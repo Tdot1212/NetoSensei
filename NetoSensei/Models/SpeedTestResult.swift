@@ -19,10 +19,18 @@ struct SpeedTestResult: Codable, Identifiable {
     var uploadSpeed: Double  // Mbps
     var uploadJitter: Double?  // ms
 
-    // Latency metrics
-    var ping: Double  // ms
-    var jitter: Double  // ms
-    var packetLoss: Double  // percentage
+    // Latency metrics.
+    // Phase 3 (accuracy audit): these are OPTIONAL — nil means "unmeasurable",
+    // never a sentinel. A failed/blocked probe must never surface as 999ms ping
+    // or 100% loss (those are self-refuting next to a successful throughput run).
+    var ping: Double?  // ms — nil when probes failed or were intercepted
+    var jitter: Double?  // ms — nil when ping is nil
+    var packetLoss: Double?  // percentage — nil when no probe round-trip succeeded
+
+    /// True when a local TUN-mode proxy/VPN answered the ping handshake
+    /// on-device (implausibly low vs the gateway). Same contract as
+    /// InternetInfo.latencyIntercepted. See LatencyInterception.
+    var latencyIntercepted: Bool = false
 
     // Test details
     var serverUsed: String?
@@ -43,29 +51,34 @@ struct SpeedTestResult: Codable, Identifiable {
         case fair = "Fair"
         case poor = "Poor"
 
-        // VPN-aware quality rating
-        static func from(downloadSpeed: Double, ping: Double, packetLoss: Double, vpnActive: Bool = false) -> QualityRating {
-            // Packet loss is critical regardless of VPN
-            if packetLoss > 5 { return .poor }
+        // VPN-aware quality rating.
+        // Phase 3: ping/packetLoss are optional. A nil (unmeasurable) metric is
+        // treated as "unknown" — it never disqualifies a rating and never
+        // fabricates a value; quality then derives from the throughput we do
+        // have. `metric.map { $0 < x } ?? true` = "passes the gate unless we
+        // measured otherwise".
+        static func from(downloadSpeed: Double, ping: Double?, packetLoss: Double?, vpnActive: Bool = false) -> QualityRating {
+            // Packet loss is critical regardless of VPN — but only when measured.
+            if let loss = packetLoss, loss > 5 { return .poor }
 
             if vpnActive {
                 // VPN-adjusted thresholds — VPN always adds latency
                 // These are realistic for international VPN connections
-                if downloadSpeed >= 20 && ping < 500 && packetLoss < 2 {
+                if downloadSpeed >= 20 && (ping.map { $0 < 500 } ?? true) && (packetLoss.map { $0 < 2 } ?? true) {
                     return .excellent  // Great for VPN
-                } else if downloadSpeed >= 10 && ping < 600 && packetLoss < 3 {
+                } else if downloadSpeed >= 10 && (ping.map { $0 < 600 } ?? true) && (packetLoss.map { $0 < 3 } ?? true) {
                     return .good  // Good for VPN
-                } else if downloadSpeed >= 5 && ping < 800 {
+                } else if downloadSpeed >= 5 && (ping.map { $0 < 800 } ?? true) {
                     return .fair  // Okay for VPN
                 } else {
                     return .poor  // Slow even for VPN
                 }
             } else {
-                // Direct connection thresholds
-                if ping > 100 { return .poor }
+                // Direct connection thresholds — only penalize a MEASURED high ping.
+                if let p = ping, p > 100 { return .poor }
 
-                if downloadSpeed >= 100 && ping < 30 && packetLoss < 1 { return .excellent }
-                if downloadSpeed >= 25 && ping < 50 && packetLoss < 2 { return .good }
+                if downloadSpeed >= 100 && (ping.map { $0 < 30 } ?? true) && (packetLoss.map { $0 < 1 } ?? true) { return .excellent }
+                if downloadSpeed >= 25 && (ping.map { $0 < 50 } ?? true) && (packetLoss.map { $0 < 2 } ?? true) { return .good }
                 if downloadSpeed >= 10 { return .fair }
 
                 return .poor
@@ -91,9 +104,9 @@ struct SpeedTestResult: Codable, Identifiable {
         }
     }
 
-    init(downloadSpeed: Double, uploadSpeed: Double, ping: Double, jitter: Double, packetLoss: Double,
+    init(downloadSpeed: Double, uploadSpeed: Double, ping: Double?, jitter: Double?, packetLoss: Double?,
          serverUsed: String? = nil, serverLocation: String? = nil, testDuration: TimeInterval,
-         connectionType: String, vpnActive: Bool, ipAddress: String? = nil) {
+         connectionType: String, vpnActive: Bool, ipAddress: String? = nil, latencyIntercepted: Bool = false) {
         self.id = UUID()
         self.timestamp = Date()
         self.downloadSpeed = downloadSpeed
@@ -107,20 +120,22 @@ struct SpeedTestResult: Codable, Identifiable {
         self.connectionType = connectionType
         self.vpnActive = vpnActive
         self.ipAddress = ipAddress
+        self.latencyIntercepted = latencyIntercepted
         self.quality = QualityRating.from(downloadSpeed: downloadSpeed, ping: ping, packetLoss: packetLoss, vpnActive: vpnActive)
     }
 
     var summary: String {
         let download = String(format: "%.1f", downloadSpeed)
         let upload = String(format: "%.1f", uploadSpeed)
-        let latency = String(format: "%.0f", ping)
+        let latency = ping.map { String(format: "%.0f", $0) } ?? "—"
 
         return "\(download) Mbps ↓ / \(upload) Mbps ↑ | \(latency)ms ping | \(quality.rawValue)"
     }
 
     var isStreamingCapable: Bool {
-        // Can handle 4K streaming?
-        downloadSpeed >= 25 && packetLoss < 2 && ping < 100
+        // Can handle 4K streaming? Unknown ping/loss don't disqualify — base on
+        // throughput unless we measured a blocking value.
+        downloadSpeed >= 25 && (packetLoss.map { $0 < 2 } ?? true) && (ping.map { $0 < 100 } ?? true)
     }
 
     var recommendedVideoQuality: String {
@@ -227,7 +242,15 @@ struct StreamingCapability {
 
     // MARK: - Analysis Factory
 
-    static func analyze(downloadSpeed: Double, uploadSpeed: Double, latency: Double, jitter: Double, packetLoss: Double) -> StreamingCapability {
+    static func analyze(downloadSpeed: Double, uploadSpeed: Double, latency: Double?, jitter: Double?, packetLoss: Double?) -> StreamingCapability {
+        // Phase 3: unmeasured latency/jitter/loss must not fabricate a fault.
+        // For this ADVISORY (bandwidth-driven) estimate, treat unknown as
+        // no-penalty so the result reflects measured throughput rather than
+        // inventing a problem. The rest of the function is unchanged.
+        let latency = latency ?? 0
+        let jitter = jitter ?? 0
+        let packetLoss = packetLoss ?? 0
+
         // Determine max video quality based on download speed
         let maxQuality: VideoQuality
         if downloadSpeed >= 25 && packetLoss < 1 && jitter < 30 {

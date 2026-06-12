@@ -162,10 +162,11 @@ class InterpretationEngine: ObservableObject {
             }
             guard facts.overseasReachable else { return 0 }
             // Use speed test ping as overseas latency proxy if available
-            if let speed = speedResult {
-                if speed.ping < 50 { return 100 }
-                if speed.ping < 100 { return 80 }
-                if speed.ping < 200 { return 60 }
+            // Phase 3: ping is optional — only score on a measured value.
+            if let ping = speedResult?.ping {
+                if ping < 50 { return 100 }
+                if ping < 100 { return 80 }
+                if ping < 200 { return 60 }
                 return 40
             }
             return 75  // Reachable but no latency data
@@ -188,7 +189,7 @@ class InterpretationEngine: ObservableObject {
             if jitter > 50 { score -= 30 }
             else if jitter > 20 { score -= 15 }
             else if jitter > 10 { score -= 5 }
-            if let speed = speedResult, speed.packetLoss > 3 {
+            if let loss = speedResult?.packetLoss, loss > 3 {
                 score -= 20
             }
             return max(0, score)
@@ -708,12 +709,13 @@ class InterpretationEngine: ObservableObject {
 
         let dl = speed.downloadSpeed
         let ul = speed.uploadSpeed
-        let ping = speed.ping
+        let ping = speed.ping  // Phase 3: optional — nil means unmeasurable
 
         let result: CardResult
         let nextSteps: String
 
-        if dl >= 25 && ul >= 5 && ping < 50 {
+        // Unknown ping does not disqualify a fast link (it never fabricates a fault).
+        if dl >= 25 && ul >= 5 && (ping.map { $0 < 50 } ?? true) {
             result = .good
             nextSteps = "No action needed — speeds are good for streaming and video calls"
         } else if dl >= 5 && ul >= 1 {
@@ -735,9 +737,9 @@ class InterpretationEngine: ObservableObject {
         }
 
         var measured = "Download: \(String(format: "%.1f", dl)) Mbps, Upload: \(String(format: "%.1f", ul)) Mbps"
-        measured += ", Ping: \(String(format: "%.0f", ping))ms"
-        if speed.packetLoss > 0 {
-            measured += ", Loss: \(String(format: "%.0f", speed.packetLoss))%"
+        measured += ", Ping: \(ping.map { String(format: "%.0f", $0) + "ms" } ?? "unavailable")"
+        if let loss = speed.packetLoss, loss > 0 {
+            measured += ", Loss: \(String(format: "%.0f", loss))%"
         }
 
         var limitation: String? = nil

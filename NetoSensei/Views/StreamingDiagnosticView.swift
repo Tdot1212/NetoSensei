@@ -267,7 +267,7 @@ struct StreamingDiagnosticContentView: View {
                     }
 
                     // Source info
-                    Text("Based on speed test: \(String(format: "%.1f", lastSpeed.downloadSpeed)) Mbps down, \(String(format: "%.1f", lastSpeed.uploadSpeed)) Mbps up, \(Int(lastSpeed.ping))ms")
+                    Text("Based on speed test: \(String(format: "%.1f", lastSpeed.downloadSpeed)) Mbps down, \(String(format: "%.1f", lastSpeed.uploadSpeed)) Mbps up, \(lastSpeed.ping.map { "\(Int($0))ms" } ?? "ping unavailable")")
                         .font(.caption2)
                         .foregroundColor(AppColors.textSecondary)
                         .padding(.top, 4)

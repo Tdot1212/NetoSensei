@@ -98,9 +98,12 @@ class HistoryManager: ObservableObject {
     }
 
     func getAveragePing() -> Double? {
-        guard !speedTestHistory.isEmpty else { return nil }
-        let total = speedTestHistory.reduce(0.0) { $0 + $1.ping }
-        return total / Double(speedTestHistory.count)
+        // Phase 3: ping is optional; average only the records that actually
+        // measured it (skip nil/unmeasurable). Old polluted 999 records are a
+        // Trends-phase cleanup concern, surfaced separately.
+        let pings = speedTestHistory.compactMap { $0.ping }
+        guard !pings.isEmpty else { return nil }
+        return pings.reduce(0, +) / Double(pings.count)
     }
 
     func getRecentIssues(days: Int = 7) -> [DiagnosticHistoryEntry] {
@@ -131,7 +134,12 @@ class HistoryManager: ObservableObject {
 
         for test in speedTestHistory {
             let timestamp = ISO8601DateFormatter().string(from: test.timestamp)
-            csv += "\(timestamp),\(test.downloadSpeed),\(test.uploadSpeed),\(test.ping),\(test.jitter),\(test.packetLoss),\(test.connectionType),\(test.vpnActive)\n"
+            // Phase 3: ping/jitter/packetLoss are optional — emit an empty cell
+            // for unmeasurable, never "Optional(...)" or a 999/100 sentinel.
+            let ping = test.ping.map { String($0) } ?? ""
+            let jitter = test.jitter.map { String($0) } ?? ""
+            let loss = test.packetLoss.map { String($0) } ?? ""
+            csv += "\(timestamp),\(test.downloadSpeed),\(test.uploadSpeed),\(ping),\(jitter),\(loss),\(test.connectionType),\(test.vpnActive)\n"
         }
 
         return csv

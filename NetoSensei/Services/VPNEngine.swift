@@ -148,6 +148,15 @@ class VPNEngine: ObservableObject {
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
 
+        // Phase 3 consistency rule: loss is only measurable on a path at least
+        // one probe reached. Zero successes = "probes blocked" (the tunnel is up
+        // and passing traffic — testTunnelReachability covers that), NOT 100%
+        // loss. Return nil rather than a self-refuting 100%.
+        guard successCount > 0 else {
+            debugLog("[VPNEngine] Packet loss unmeasurable — 0/\(totalPings) probe rounds got through → probes blocked, not 100% loss")
+            return nil
+        }
+
         return Double(totalPings - successCount) / Double(totalPings) * 100
     }
 

@@ -157,11 +157,18 @@ class SpeedTestViewModel: ObservableObject {
                 let vpnResult = SmartVPNDetector.shared.detectionResult
                 let vpnServerLocation = vpnResult?.publicCity ?? vpnResult?.publicCountry
 
+                // NOTE (Phase 3): NetworkHistoryEntry.latency is non-optional and
+                // this timeline already uses the `?? 0` convention (gateway/dns
+                // below). Unmeasurable ping therefore lands as 0 in the TRENDS
+                // timeline — pre-existing pollution surfaced for the Trends phase
+                // to make NHE.latency optional. The primary SpeedTestResult record
+                // (HistoryManager) correctly stores nil. jitter/packetLoss are
+                // already optional here, so they pass through honestly.
                 let historyEntry = NetworkHistoryEntry(
                     healthScore: healthScore,
                     downloadSpeed: final.downloadSpeed,
                     uploadSpeed: final.uploadSpeed,
-                    latency: final.ping,
+                    latency: final.ping ?? 0,
                     gatewayLatency: networkStatus.router.latency ?? 0,
                     dnsLatency: networkStatus.dns.latency ?? 0,
                     jitter: final.jitter,
@@ -230,18 +237,37 @@ class SpeedTestViewModel: ObservableObject {
     }
 
     var pingFormatted: String {
-        guard let result = result else { return "0 ms" }
-        return String(format: "%.0f ms", result.ping)
+        guard let ping = result?.ping else { return "—" }
+        return String(format: "%.0f ms", ping)
     }
 
     var jitterFormatted: String {
-        guard let result = result else { return "0 ms" }
-        return String(format: "%.0f ms", result.jitter)
+        guard let jitter = result?.jitter else { return "—" }
+        return String(format: "%.0f ms", jitter)
     }
 
     var packetLossFormatted: String {
-        guard let result = result else { return "0.0%" }
-        return String(format: "%.1f%%", result.packetLoss)
+        guard let loss = result?.packetLoss else { return "—" }
+        return String(format: "%.1f%%", loss)
+    }
+
+    /// Short, honest caption for why ping/jitter is unavailable (nil), or nil
+    /// when ping is present. Wording mirrors the Phase 2.1 dashboard.
+    var pingUnavailableReason: String? {
+        guard let result = result, result.ping == nil else { return nil }
+        if result.latencyIntercepted || result.vpnActive {
+            return "Unavailable — VPN/proxy answers test probes on-device"
+        }
+        return "Unavailable — test probes were blocked"
+    }
+
+    /// Short, honest caption for why packet loss is unavailable (nil).
+    var packetLossUnavailableReason: String? {
+        guard let result = result, result.packetLoss == nil else { return nil }
+        if result.vpnActive {
+            return "Unavailable — VPN/proxy blocks test probes (a working download proves the path is up)"
+        }
+        return "Unavailable — test probes were blocked"
     }
 
     var qualityRating: SpeedTestResult.QualityRating {

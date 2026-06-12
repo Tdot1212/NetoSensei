@@ -289,8 +289,16 @@ struct SpeedTestContentView: View {
                         Text("Ping")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
-                        Text(String(format: "%.0f ms", result.ping))
-                            .font(.headline)
+                        // Phase 3: nil ping = unmeasurable (proxy/blocked), shown
+                        // as "—" in neutral yellow — never a 999ms sentinel.
+                        if let ping = result.ping {
+                            Text(String(format: "%.0f ms", ping))
+                                .font(.headline)
+                        } else {
+                            Text("—")
+                                .font(.headline)
+                                .foregroundColor(AppColors.yellow)
+                        }
                     }
                 }
             }
@@ -302,21 +310,32 @@ struct SpeedTestContentView: View {
     private func metricsRow(result: SpeedTestResult) -> some View {
         VStack(spacing: UIConstants.spacingM) {
             HStack(spacing: UIConstants.spacingM) {
+                // Phase 3: nil jitter/loss render "—" in neutral yellow — never a
+                // 0.0ms-paired-with-999 or 100% sentinel.
                 MetricBox(
                     title: "Jitter",
-                    value: String(format: "%.0f", result.jitter),
-                    unit: "ms",
-                    color: jitterColor(result.jitter, vpnActive: result.vpnActive),
+                    value: result.jitter.map { String(format: "%.0f", $0) } ?? "—",
+                    unit: result.jitter == nil ? "" : "ms",
+                    color: result.jitter.map { jitterColor($0, vpnActive: result.vpnActive) } ?? AppColors.yellow,
                     icon: "waveform.path.ecg"
                 )
 
                 MetricBox(
                     title: "Packet Loss",
-                    value: String(format: "%.1f", result.packetLoss),
-                    unit: "%",
-                    color: packetLossColor(result.packetLoss),
+                    value: result.packetLoss.map { String(format: "%.1f", $0) } ?? "—",
+                    unit: result.packetLoss == nil ? "" : "%",
+                    color: result.packetLoss.map { packetLossColor($0) } ?? AppColors.yellow,
                     icon: "antenna.radiowaves.left.and.right.slash"
                 )
+            }
+
+            // Packet-loss unavailable caption (honest, neutral — not a fault).
+            if let lossReason = vm.packetLossUnavailableReason {
+                Text(lossReason)
+                    .font(.caption)
+                    .foregroundColor(AppColors.yellow)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
             }
 
             // Jitter explanation
@@ -352,9 +371,15 @@ struct SpeedTestContentView: View {
                         .font(.caption)
                         .foregroundColor(AppColors.textSecondary)
 
-                    Text("The \(Int(result.ping))ms ping is VPN round-trip time, not your local network latency.")
-                        .font(.caption)
-                        .foregroundColor(AppColors.textSecondary)
+                    if let ping = result.ping {
+                        Text("The \(Int(ping))ms ping is VPN round-trip time, not your local network latency.")
+                            .font(.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                    } else {
+                        Text("Direct ping couldn't be measured through the VPN/proxy — it answers the probe locally. Throughput above is real.")
+                            .font(.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
                 }
             }
         }
@@ -596,8 +621,8 @@ struct SpeedTestContentView: View {
                     // FIXED: Check quality rating, not just download speed
                     // Prevents saying "Your speed is good" when quality is "Poor" due to latency
                     if result.quality == .poor || result.quality == .fair {
-                        if result.ping > 100 {
-                            tipRow(number: 1, tip: "High latency detected (\(Int(result.ping))ms)", detail: "This makes browsing feel sluggish. Try restarting your router or check your ISP connection.")
+                        if let ping = result.ping, ping > 100 {
+                            tipRow(number: 1, tip: "High latency detected (\(Int(ping))ms)", detail: "This makes browsing feel sluggish. Try restarting your router or check your ISP connection.")
                         }
                         if result.downloadSpeed < 10 {
                             tipRow(number: 2, tip: "Move closer to your WiFi router", detail: "WiFi signal weakens with distance and walls.")
@@ -676,7 +701,10 @@ struct SpeedTestContentView: View {
         // Previously 42ms got the green "Low jitter" label, which is wrong
         // (42ms is moderate). Same scale used regardless of VPN — VPN doesn't
         // make 42ms of jitter "stable", it just makes it more common.
-        let jitter = result.jitter
+        // Phase 3: jitter is optional — explain honestly when unmeasurable.
+        guard let jitter = result.jitter else {
+            return "Jitter unavailable — latency probes couldn't complete\(result.vpnActive ? " through the VPN/proxy" : ""). A working download still confirms the connection is up."
+        }
         let vpnNote = result.vpnActive ? " — typical for international VPN connections" : ""
 
         if jitter > 100 {
@@ -693,7 +721,13 @@ struct SpeedTestContentView: View {
     }
 
     private func pingExplanation(result: SpeedTestResult) -> String {
-        let ping = result.ping
+        // Phase 3: ping is optional — explain honestly when unmeasurable.
+        guard let ping = result.ping else {
+            if result.latencyIntercepted || result.vpnActive {
+                return "Ping unavailable — a local VPN/proxy answers the latency probe on-device, so direct network ping can't be measured while it's active. Download/upload above still reflect real throughput through the tunnel."
+            }
+            return "Ping unavailable — the latency probes were blocked. A successful download still proves the connection works."
+        }
 
         if result.vpnActive {
             return "\(Int(ping))ms is the round-trip time through your VPN. Your local network latency is much lower — this delay is mostly the VPN tunnel."

@@ -93,3 +93,81 @@ struct LatencyInterceptionTests {
         #expect(r.intercepted == false)
     }
 }
+
+// MARK: - Speed Test Honesty (Accuracy audit Phase 3)
+//
+// Pins the two pure decision functions extracted from SpeedTestEngine: the
+// packet-loss consistency rule and the interception-aware ping verdict.
+// Reproduces the live device bug (Ping 999 / Loss 100% next to 71 Mbps) and
+// proves it can no longer be produced.
+
+struct SpeedTestHonestyTests {
+
+    // ---- Packet loss: self-refuting 100% is eliminated ----
+
+    @Test func totalProbeFailure_yieldsNilNotHundredPercent() {
+        // The live bug: 10 rounds, 0 succeeded. Old code -> 100%. Now -> nil.
+        #expect(SpeedTestEngine.packetLossPercent(roundsRun: 10, successCount: 0) == nil)
+    }
+
+    @Test func zeroRounds_isNil() {
+        #expect(SpeedTestEngine.packetLossPercent(roundsRun: 0, successCount: 0) == nil)
+    }
+
+    @Test func honestLoss_twoOfTenFailed_isTwentyPercent() {
+        // 8 of 10 rounds reached the network -> 20% loss, a real measurement.
+        #expect(SpeedTestEngine.packetLossPercent(roundsRun: 10, successCount: 8) == 20.0)
+    }
+
+    @Test func zeroLoss_allRoundsSucceeded_isZeroNotNil() {
+        // A reachable path with no loss reports 0% (a real measurement), not nil.
+        #expect(SpeedTestEngine.packetLossPercent(roundsRun: 10, successCount: 10) == 0.0)
+    }
+
+    @Test func packetLoss_neverProducesSentinel() {
+        // Sweep all (rounds, success) combinations — no output is ever 999, and
+        // 100 only never appears because total failure maps to nil.
+        for rounds in 0...12 {
+            for success in 0...rounds {
+                let loss = SpeedTestEngine.packetLossPercent(roundsRun: rounds, successCount: success)
+                #expect(loss != 999)
+                if success == 0 { #expect(loss == nil) }       // never a self-refuting 100
+                else { #expect(loss != nil && loss! < 100) }    // a reached path is < 100% loss
+            }
+        }
+    }
+
+    // ---- Ping: sentinel elimination + interception exclusion ----
+
+    @Test func noSamples_pingIsNilNotNineNineNine() {
+        // The live bug: all latency samples failed. Old code -> 999.0. Now -> nil.
+        let v = SpeedTestEngine.pingVerdict(samplesMs: [], gatewayRTTms: 8.0, vpnActive: true)
+        #expect(v.ping == nil)
+        #expect(v.jitter == nil)
+        #expect(v.intercepted == false)
+    }
+
+    @Test func interceptedSamples_excludedFromPing() {
+        // V2BOX-style local stub: ~1ms median vs ~8ms gateway -> intercepted,
+        // ping/jitter nil (never the fabricated 1ms), flag raised.
+        let v = SpeedTestEngine.pingVerdict(samplesMs: [1.2, 1.5, 1.1, 1.7], gatewayRTTms: 8.0, vpnActive: true)
+        #expect(v.ping == nil)
+        #expect(v.jitter == nil)
+        #expect(v.intercepted == true)
+    }
+
+    @Test func honestSamples_realMedianAndJitter() {
+        // Real readings above the gateway -> median ping + computed jitter.
+        let v = SpeedTestEngine.pingVerdict(samplesMs: [14.0, 16.0, 15.0, 18.0, 15.0], gatewayRTTms: 8.0, vpnActive: false)
+        #expect(v.intercepted == false)
+        #expect(v.ping == 15.0)          // median of the sorted samples
+        #expect((v.jitter ?? 0) > 0)     // real variance present
+    }
+
+    @Test func honestSamples_noGatewayRef_stillMeasured() {
+        // No gateway reference, plausible RTT (> 2ms floor) -> measured.
+        let v = SpeedTestEngine.pingVerdict(samplesMs: [22.0, 25.0, 24.0], gatewayRTTms: nil, vpnActive: false)
+        #expect(v.intercepted == false)
+        #expect(v.ping == 24.0)
+    }
+}

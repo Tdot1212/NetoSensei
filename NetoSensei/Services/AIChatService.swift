@@ -49,7 +49,7 @@ struct SpeedHistorySummary: Codable {
     var timestamp: String
     var downloadMbps: Double
     var uploadMbps: Double
-    var pingMs: Double
+    var pingMs: Double?  // Phase 3: nil = unmeasurable; never a 999 sentinel
     var vpnActive: Bool
 }
 
@@ -317,7 +317,7 @@ struct AIDataCollector {
                     timestamp: formatter.string(from: entry.timestamp),
                     downloadMbps: entry.downloadSpeed,
                     uploadMbps: entry.uploadSpeed,
-                    pingMs: entry.ping,
+                    pingMs: entry.ping.flatMap { $0 < 999 ? $0 : nil },  // strip legacy 999
                     vpnActive: entry.vpnActive
                 )
             }

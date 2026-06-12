@@ -173,13 +173,17 @@ enum ConnectionCapabilityAnalyzer {
     }
 
     /// Convenience: analyze from a SpeedTestResult.
+    /// Phase 3: ping/jitter/loss are optional. This analyzer already documents a
+    /// bandwidth-first fallback, so an unmeasurable latency/jitter/loss maps to 0
+    /// (no penalty) — the judgment then rests on throughput, never on a fabricated
+    /// number.
     static func analyze(from result: SpeedTestResult) -> ConnectionCapability {
         analyze(
             downloadMbps: result.downloadSpeed,
             uploadMbps: result.uploadSpeed,
-            pingMs: result.ping,
-            jitterMs: result.jitter,
-            packetLossPercent: result.packetLoss
+            pingMs: result.ping ?? 0,
+            jitterMs: result.jitter ?? 0,
+            packetLossPercent: result.packetLoss ?? 0
         )
     }
 }

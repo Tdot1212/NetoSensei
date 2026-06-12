@@ -83,9 +83,9 @@ class DiagnosticReportGenerator {
             ─── SPEED TEST ───
             Download Speed:     \(String(format: "%.1f", speed.downloadSpeed)) Mbps
             Upload Speed:       \(String(format: "%.1f", speed.uploadSpeed)) Mbps
-            Ping:               \(String(format: "%.0f", speed.ping))ms
-            Jitter:             \(String(format: "%.0f", speed.jitter))ms
-            Packet Loss:        \(String(format: "%.1f", speed.packetLoss))%
+            Ping:               \(speed.ping.map { String(format: "%.0f", $0) + "ms" } ?? "unavailable")
+            Jitter:             \(speed.jitter.map { String(format: "%.0f", $0) + "ms" } ?? "unavailable")
+            Packet Loss:        \(speed.packetLoss.map { String(format: "%.1f", $0) + "%" } ?? "unavailable")
             Quality:            \(speed.quality.rawValue)
             4K Capable:         \(speed.isStreamingCapable ? "Yes" : "No")
 
@@ -207,9 +207,9 @@ class DiagnosticReportGenerator {
 
         ⬇️ Download: \(String(format: "%.1f", speedTest.downloadSpeed)) Mbps
         ⬆️ Upload:   \(String(format: "%.1f", speedTest.uploadSpeed)) Mbps
-        📍 Ping:     \(String(format: "%.0f", speedTest.ping))ms
-        📊 Jitter:   \(String(format: "%.0f", speedTest.jitter))ms
-        📉 Loss:     \(String(format: "%.1f", speedTest.packetLoss))%
+        📍 Ping:     \(speedTest.ping.map { String(format: "%.0f", $0) + "ms" } ?? "unavailable")
+        📊 Jitter:   \(speedTest.jitter.map { String(format: "%.0f", $0) + "ms" } ?? "unavailable")
+        📉 Loss:     \(speedTest.packetLoss.map { String(format: "%.1f", $0) + "%" } ?? "unavailable")
 
         Quality: \(speedTest.quality.rawValue)
         \(speedTest.isStreamingCapable ? "✅ 4K streaming capable" : "❌ Not 4K capable")

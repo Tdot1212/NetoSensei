@@ -157,13 +157,13 @@ struct SpeedTabView: View {
                                 .foregroundColor(.secondary)
                         }
 
-                        // Ping
+                        // Ping (Phase 3: nil = unmeasurable → "—", never 999)
                         VStack {
                             Image(systemName: "clock.fill")
                                 .foregroundColor(.orange)
-                            Text("\(Int(result.ping))")
+                            Text(result.ping.map { "\(Int($0))" } ?? "—")
                                 .font(.title2.bold())
-                                .foregroundColor(NetworkColors.forLatency(result.ping))
+                                .foregroundColor(result.ping.map { NetworkColors.forLatency($0) } ?? AppColors.yellow)
                             Text("ms")
                                 .font(.caption)
                                 .foregroundColor(.secondary)

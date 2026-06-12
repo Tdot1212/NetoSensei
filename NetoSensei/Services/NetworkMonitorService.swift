@@ -630,7 +630,9 @@ class NetworkMonitorService: ObservableObject {
     /// zero, masking real interception — when no TCP port answers we return nil
     /// and let the absolute-floor authority take over. Returns nil when no
     /// gateway is estimable (e.g. cellular).
-    nonisolated private func measureGatewayReferenceRTT() async -> Double? {
+    /// Phase 3: promoted from private to internal so SpeedTestEngine reuses the
+    /// same honest gateway reference for its ping-interception check.
+    nonisolated func measureGatewayReferenceRTT() async -> Double? {
         guard let gateway = estimateGateway() else { return nil }
         var samples: [Double] = []
         for _ in 0..<3 {

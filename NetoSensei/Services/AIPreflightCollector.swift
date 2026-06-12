@@ -214,7 +214,7 @@ final class AIPreflightCollector: ObservableObject {
             let date: String
             let downloadMbps: Double
             let uploadMbps: Double
-            let pingMs: Double
+            let pingMs: Double?  // Phase 3: nil = unmeasurable; never a 999 sentinel
             let vpnActive: Bool
         }
 
@@ -635,7 +635,7 @@ final class AIPreflightCollector: ObservableObject {
                     date: isoFormatter.string(from: entry.timestamp),
                     downloadMbps: entry.downloadSpeed,
                     uploadMbps: entry.uploadSpeed,
-                    pingMs: entry.ping,
+                    pingMs: entry.ping.flatMap { $0 < 999 ? $0 : nil },  // strip legacy 999
                     vpnActive: entry.vpnActive
                 )
             }
@@ -716,9 +716,12 @@ final class AIPreflightCollector: ObservableObject {
     private func applySpeedTestResult(_ speed: SpeedTestResult, to snapshot: inout AINetworkSnapshot) {
         snapshot.downloadMbps        = speed.downloadSpeed > 0 ? speed.downloadSpeed : nil
         snapshot.uploadMbps          = speed.uploadSpeed   > 0 ? speed.uploadSpeed   : nil
-        snapshot.pingMs              = speed.ping   < 999 ? speed.ping   : nil
-        snapshot.jitterMs            = speed.jitter > 0   ? speed.jitter : nil
-        snapshot.packetLossPercent   = speed.packetLoss >= 0 && speed.packetLoss < 100 ? speed.packetLoss : nil
+        // Phase 3: ping/jitter/packetLoss are optional (nil = unmeasurable). The
+        // flatMap guards also strip legacy 999/100 sentinels from OLD decoded
+        // records, so the AI snapshot never sees a fabricated value.
+        snapshot.pingMs              = speed.ping.flatMap       { $0 < 999 ? $0 : nil }
+        snapshot.jitterMs            = speed.jitter.flatMap     { $0 > 0   ? $0 : nil }
+        snapshot.packetLossPercent   = speed.packetLoss.flatMap { ($0 >= 0 && $0 < 100) ? $0 : nil }
         snapshot.speedTestServer     = speed.serverUsed
         snapshot.speedTestQuality    = speed.downloadSpeed > 0 ? speed.quality.rawValue : nil
     }

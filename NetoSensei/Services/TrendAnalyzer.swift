@@ -60,11 +60,16 @@ struct TrendAnalyzer {
                 }
             }
 
-            // Latency trend
-            let recentPing = recent.map(\.ping).reduce(0, +) / 3.0
-            let earlierPing = earlier.map(\.ping).reduce(0, +) / 3.0
+            // Latency trend. Phase 3: ping is optional — average only measured
+            // values (compactMap drops unmeasurable/nil samples), don't divide by
+            // a fixed 3 that may include missing readings. (Trends segmentation is
+            // a later phase; this is a mechanical adaptation to the optional type.)
+            let recentPings = recent.compactMap(\.ping)
+            let earlierPings = earlier.compactMap(\.ping)
+            let recentPing = recentPings.isEmpty ? 0 : recentPings.reduce(0, +) / Double(recentPings.count)
+            let earlierPing = earlierPings.isEmpty ? 0 : earlierPings.reduce(0, +) / Double(earlierPings.count)
 
-            if earlierPing > 0 {
+            if earlierPing > 0 && !recentPings.isEmpty {
                 let latencyChange = ((recentPing - earlierPing) / earlierPing) * 100
 
                 if latencyChange > 30 {
@@ -89,7 +94,7 @@ struct TrendAnalyzer {
 
         // Check for consistent packet loss
         let recentTests = Array(sorted.prefix(5))
-        let lossyTests = recentTests.filter { $0.packetLoss > 1.0 }
+        let lossyTests = recentTests.filter { ($0.packetLoss ?? 0) > 1.0 }  // nil = unmeasurable, not lossy
         if lossyTests.count >= 3 {
             insights.append(TrendInsight(
                 title: "Frequent packet loss",
@@ -176,7 +181,10 @@ struct TrendAnalyzer {
             let sorted = speedHistory.sorted { $0.timestamp > $1.timestamp }
             guard sorted.count >= 6 else { return true }
             let recent = Array(sorted.prefix(3))
-            let recentPing = recent.map(\.ping).reduce(0, +) / 3.0
+            // Phase 3: average only measured pings; if none, keep the insight.
+            let recentPings = recent.compactMap(\.ping)
+            guard !recentPings.isEmpty else { return true }
+            let recentPing = recentPings.reduce(0, +) / Double(recentPings.count)
             // Drop insights whose recent value disagrees with the live reference
             // by more than 50% — they will only confuse the user.
             let diffRatio = abs(recentPing - ref) / max(ref, 1)
