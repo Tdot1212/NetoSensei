@@ -206,33 +206,36 @@ struct DiagnoseTabView: View {
             }
 
             // Last result summary
-            if let analysis = diagnosticVM.analysis, !diagnosticVM.isRunning {
+            // Diagnosis v2: rendered from the ONE verdict — number ("—" below the
+            // coverage floor), its band word, the primary finding, and coverage.
+            if let verdict = diagnosticVM.verdict, !diagnosticVM.isRunning {
                 CardView {
-                    HStack(spacing: 20) {
-                        // Health Score
-                        VStack {
-                            Text("\(analysis.healthScore)")
-                                .font(.title.bold())
-                                .foregroundColor(NetworkColors.forHealthScore(analysis.healthScore))
-                            Text("Health")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 20) {
+                            VStack {
+                                Text(verdict.scoreText)
+                                    .font(.title.bold())
+                                    .foregroundColor(verdict.score?.band.color ?? .gray)
+                                Text(verdict.score?.band.word ?? verdict.state.word)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Divider()
+                                .frame(height: 40)
+
+                            VStack(alignment: .leading) {
+                                Text(verdict.primary?.headline ?? verdict.headline)
+                                    .font(.subheadline.bold())
+                                Text(verdict.primary?.cause ?? verdict.headline)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(2)
+                            }
+
+                            Spacer()
                         }
-
-                        Divider()
-                            .frame(height: 40)
-
-                        // Primary Issue
-                        VStack(alignment: .leading) {
-                            Text(analysis.primaryProblem.rawValue)
-                                .font(.subheadline.bold())
-                            Text(analysis.beginnerExplanation)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .lineLimit(2)
-                        }
-
-                        Spacer()
+                        CoverageLine(coverage: verdict.coverage)
                     }
                 }
             }
@@ -355,7 +358,7 @@ struct DiagnoseTabView: View {
             diagnostic: diagnosticVM.result,
             speedTest: HistoryManager.shared.speedTestHistory.first,
             vpnInfo: SmartVPNDetector.shared.detectionResult,
-            analysis: diagnosticVM.analysis,
+            verdict: diagnosticVM.verdict,
             networkStatus: NetworkMonitorService.shared.currentStatus
         )
     }

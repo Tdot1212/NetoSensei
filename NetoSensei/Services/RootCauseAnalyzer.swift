@@ -5,6 +5,12 @@
 //  Root-Cause Analysis Engine - The Brain
 //  Transforms raw diagnostics into intelligent explanations and fixes
 //
+//
+//  DEPRECATED (Diagnosis v2, 2026-09-20): no longer consulted by the Quick
+//  Check. Its calibrated penalties now live in VerdictComposer.computeScore;
+//  everything else (priority order, explanations) is superseded by Findings.
+//  Kept for reference until the post-trip cleanup deletes it. Do not add callers.
+//
 
 import Foundation
 

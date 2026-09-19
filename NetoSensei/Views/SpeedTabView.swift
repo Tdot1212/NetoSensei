@@ -253,7 +253,7 @@ struct SpeedTabView: View {
                         return ConnectionCapabilityAnalyzer.analyze(
                             downloadMbps: result.cdnThroughput,
                             uploadMbps: 0,
-                            pingMs: result.cdnPing,
+                            pingMs: result.cdnPing ?? 0,   // nil = unmeasured → analyzer's documented no-penalty fallback (Phase 3 convention)
                             jitterMs: 0
                         )
                     }()

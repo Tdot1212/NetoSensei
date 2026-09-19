@@ -384,7 +384,7 @@ class StreamingDiagnosticService: ObservableObject {
         return StreamingDiagnosticResult(
             timestamp: Date(),
             platform: platform,
-            cdnPing: cdnResult.latency ?? 0,
+            cdnPing: cdnResult.latency,   // nil = unmeasured, never 0
             cdnThroughput: cdnResult.throughput ?? -1.0,  // Use -1.0 for blocked/failed test, never 0.0
             cdnReachable: cdnResult.isReachable,
             cdnRegion: cdnResult.regionDetected,

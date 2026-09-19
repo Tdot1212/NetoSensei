@@ -18,12 +18,14 @@ class DiagnosticViewModel: ObservableObject {
     @Published var progress: Double = 0.0
     @Published var currentTest: String = ""
     @Published var errorMessage: String?
-    @Published var analysis: RootCauseAnalyzer.Analysis?
+    /// Diagnosis v2: the ONE verdict for this Quick Check (score, state,
+    /// findings, coverage). RootCauseAnalyzer and NetworkInterpreter are no
+    /// longer consulted — see docs/DIAGNOSIS_V2_DESIGN_2026_09_19.md.
+    @Published var verdict: NetworkVerdict?
 
     // FIXED: Removed nonisolated - NetworkMonitorService is @MainActor
     private let networkMonitor: NetworkMonitorService
     private let historyManager: HistoryManager
-    private let rootCauseAnalyzer = RootCauseAnalyzer()
     // Using nonisolated(unsafe) to allow cleanup in deinit
     nonisolated(unsafe) private var diagnosticTask: Task<Void, Never>?
 
@@ -165,78 +167,41 @@ class DiagnosticViewModel: ObservableObject {
 
                 debugLog("✅ Diagnostic result created")
 
-                // Analyze root cause (on MainActor since rootCauseAnalyzer is MainActor-isolated)
-                debugLog("🧠 Analyzing root cause...")
-                let rootCauseAnalysis = await MainActor.run {
-                    self.rootCauseAnalyzer.analyze(diagnostic: diagnosticResult)
-                }
-                debugLog("✅ Root cause identified: \(rootCauseAnalysis.primaryProblem.rawValue)")
-
-                // Update UI and save to history
+                // Diagnosis v2: ONE verdict, composed on the MainActor from the
+                // Quick Check's reachability results layered over the monitor's
+                // interception-aware latencies (VerdictInputs). No second engine.
                 debugLog("📱 Updating UI on MainActor...")
 
                 // FIXED: Use re-entry guard to prevent cascading updates
-                await MainActor.run {
+                let composed: NetworkVerdict = await MainActor.run {
+                    let v = VerdictInputs.verdict(forQuickCheck: diagnosticResult, status: self.networkMonitor.currentStatus)
                     guard !self.isUpdatingUI else {
                         debugLog("⚠️ Skipping re-entrant UI update")
-                        return
+                        return v
                     }
                     self.isUpdatingUI = true
                     defer { self.isUpdatingUI = false }
 
                     // Update core UI properties first
                     self.result = diagnosticResult
-                    self.analysis = rootCauseAnalysis
+                    self.verdict = v
                     self.progress = 1.0
                     self.currentTest = "Diagnostic complete"
                     self.isRunning = false
 
-                    // STEP 2: Call NetworkInterpreter - single source of truth for ALL status messages
-                    // This ensures consistent messages across Dashboard, Diagnose, and all other screens
-                    let vpnResult = SmartVPNDetector.shared.detectionResult
-                    let vpnActive = vpn.details.contains("active") || (vpnResult?.isVPNActive ?? false)
-
-                    // Diagnosis v2, Commit 1: ISP inputs are the Internet check
-                    // (one measurement, not a duplicate ping); a not-applicable
-                    // router check and a cellular path are passed explicitly so
-                    // the interpreter neither penalises nor blames them.
-                    _ = NetworkInterpreter.shared.interpret(
-                        gatewayLatency: gateway.latency,
-                        gatewayReachable: gateway.result == .pass,
-                        externalLatency: external.latency,
-                        externalReachable: external.result == .pass,
-                        dnsLatency: dns.latency,
-                        dnsReachable: dns.result != .fail,
-                        httpSuccess: http.result == .pass,
-                        vpnActive: vpnActive,
-                        vpnServerLocation: vpnResult?.publicCity ?? vpnResult?.publicCountry,
-                        vpnIP: vpnResult?.publicIP,
-                        ispLatency: external.latency,
-                        ispReachable: external.result == .pass,
-                        wifiConnected: networkSnapshot.wifi.isConnected,
-                        ssid: networkSnapshot.wifi.ssid,
-                        publicIP: networkSnapshot.publicIP,
-                        isp: vpnResult?.publicISP,
-                        // .warning = an assumed address didn't answer: undetermined, not a router fault
-                        gatewayApplicable: gateway.result != .notApplicable && gateway.result != .warning,
-                        onCellular: networkSnapshot.connectionType == .cellular && !networkSnapshot.wifi.isConnected
-                    )
-                    debugLog("🧠 NetworkInterpreter updated after diagnostic")
-
-                    // Haptic feedback based on health score
-                    if rootCauseAnalysis.healthScore >= 80 {
-                        HapticFeedback.success()
-                    } else if rootCauseAnalysis.healthScore >= 50 {
-                        HapticFeedback.warning()
-                    } else {
-                        HapticFeedback.error()
+                    // Haptic feedback follows the verdict state
+                    switch v.state {
+                    case .working: HapticFeedback.success()
+                    case .degraded, .unknown: HapticFeedback.warning()
+                    case .broken: HapticFeedback.error()
                     }
 
                     // Re-enable idle timer
                     UIApplication.shared.isIdleTimerDisabled = false
 
                     debugLog("✅ Diagnostic UI update finished")
-                    debugLog("📊 Health Score: \(rootCauseAnalysis.healthScore)/100")
+                    debugLog("🧭 Verdict: \(v.state.rawValue) score=\(v.scoreText) — \(v.headline) [\(v.coverage.line)]")
+                    return v
                 }
 
                 // FIXED: Save history AFTER UI update completes, in background task
@@ -246,8 +211,10 @@ class DiagnosticViewModel: ObservableObject {
                 let externalLatency = external.latency  // Phase 4: nil stays nil (unmeasured), never 0
                 let vpnActive = vpn.details.contains("active")
                 let connectionType = networkSnapshot.connectionType?.displayName ?? "Unknown"
-                let healthScore = rootCauseAnalysis.healthScore
-                let rootCause = rootCauseAnalysis.primaryProblem.rawValue
+                // History keeps a 0–100 number; an unscored verdict (coverage floor unmet) is stored as 0
+                // only because NetworkHistoryEntry.healthScore is non-optional (post-trip cleanup).
+                let healthScore = composed.score?.value ?? 0
+                let rootCause = composed.primary?.headline ?? (composed.state == .working ? "No Issues" : composed.headline)
 
                 // NEW: Capture WiFi and VPN context for history
                 let wifiSSID = networkSnapshot.wifi.ssid

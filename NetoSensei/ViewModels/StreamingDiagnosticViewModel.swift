@@ -161,7 +161,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
     // MARK: - Individual Test Functions (STEP 4 Required)
 
     /// Test CDN ping for selected platform
-    private func testCDNPing() async -> Double {
+    private func testCDNPing() async -> Double? {
         // Get CDN endpoints for platform
         let endpoints = getCDNEndpoints(for: selectedPlatform)
 
@@ -176,7 +176,8 @@ class StreamingDiagnosticViewModel: ObservableObject {
             }
         }
 
-        return successCount > 0 ? totalPing / Double(successCount) : 999.0
+        // Diagnosis v2 also-fix: no CDN answered → nil (unmeasurable), never a 999 sentinel.
+        return successCount > 0 ? totalPing / Double(successCount) : nil
     }
 
     /// Test streaming throughput
@@ -250,7 +251,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
 
     /// Evaluate streaming diagnostic results
     private func evaluate(
-        cdnPing: Double,
+        cdnPing: Double?,
         throughput: Double,
         wifiStrength: Int,
         dnsLatency: Double,
@@ -271,7 +272,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
 
         if wifiStrength < -75 {
             bottleneck = .wifi
-        } else if cdnPing > 150 {
+        } else if let ping = cdnPing, ping > 150 {
             bottleneck = vpnActive ? .vpn : .cdn
         } else if let impact = vpnImpact, impact > 30 {
             bottleneck = .vpn
@@ -313,9 +314,9 @@ class StreamingDiagnosticViewModel: ObservableObject {
             platform: selectedPlatform,
             cdnPing: cdnPing,
             cdnThroughput: throughput,
-            cdnReachable: cdnPing < 500,
+            cdnReachable: cdnPing != nil,                    // an unmeasured ping is not "reachable"
             cdnRegion: nil,
-            cdnRoutingIssue: cdnPing > 200,
+            cdnRoutingIssue: cdnPing.map { $0 > 200 } ?? false,
             wifiStrength: wifiStrength,
             routerLatency: nil,
             jitter: nil,
@@ -553,8 +554,8 @@ class StreamingDiagnosticViewModel: ObservableObject {
 
     /// CDN ping text formatted
     var cdnPingText: String {
-        guard let result = result else { return "-- ms" }
-        return "\(Int(result.cdnPing)) ms"
+        guard let result = result, let ping = result.cdnPing else { return "— ms" }
+        return "\(Int(ping)) ms"
     }
 
     /// WiFi strength text formatted

@@ -73,13 +73,11 @@ struct DashboardView: View {
                         // Connection Stability Card
                         StabilityCard(stabilityMonitor: ConnectionStabilityMonitor.shared)
 
-                        // Smart Recommendations (data-driven)
-                        smartRecommendationsSection
-
-                        // Problem Solutions (actionable fixes)
-                        ProblemSolutionsCard(
-                            solutions: SolutionEngine.solutions(for: vm.status)
-                        )
+                        // Diagnosis v2: findings from the ONE verdict replace the
+                        // Smart Recommendations and Issues & Solutions engines.
+                        if let v = vm.verdict {
+                            FindingsCard(verdict: v)
+                        }
 
                         // Version label with hidden debug tap
                         versionLabel
@@ -197,26 +195,32 @@ struct DashboardView: View {
                         .stroke(stableStatusColor.opacity(0.3), lineWidth: 8)
                         .frame(width: 60, height: 60)
 
+                    // Diagnosis v2: the ring is the verdict's score — "—" and an
+                    // empty ring below the coverage floor, never a default number.
                     Circle()
-                        .trim(from: 0, to: CGFloat(vm.smoothedHealthScore) / 100)
+                        .trim(from: 0, to: CGFloat(vm.verdict?.score?.value ?? 0) / 100)
                         .stroke(stableStatusColor, style: StrokeStyle(lineWidth: 8, lineCap: .round))
                         .frame(width: 60, height: 60)
                         .rotationEffect(.degrees(-90))
 
-                    Text("\(vm.smoothedHealthScore)")
+                    Text(vm.verdict?.scoreText ?? "—")
                         .font(.title3.bold())
                         .foregroundColor(stableStatusColor)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    // PART 1: Use stableOverallHealth (with hysteresis) instead of raw overallHealth
-                    Text("\(vm.stableOverallHealth.displayName)")
+                    // ONE vocabulary: the score's band word; the state word when unscored.
+                    Text(vm.verdict?.score?.band.word ?? vm.verdict?.state.word ?? "Detecting…")
                         .font(.title2.bold())
                         .foregroundColor(AppColors.textPrimary)
 
                     Text(vm.connectionQuality)
                         .font(.subheadline)
                         .foregroundColor(AppColors.textSecondary)
+
+                    if let coverage = vm.verdict?.coverage {
+                        CoverageLine(coverage: coverage)
+                    }
 
                     // Connection type indicator
                     HStack(spacing: 4) {
@@ -469,13 +473,10 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Router Card (STEP 3: Uses NetworkInterpreter for consistent messages)
+    // MARK: - Router Card (Diagnosis v2: no interpreter; live latency + MetricBands)
 
     private var routerCard: some View {
         let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-
-        // SINGLE SOURCE OF TRUTH: Use interpreter's router status when available
-        let interpreterRouter = NetworkInterpreter.shared.current?.router
 
         // Pre-compute health status values outside ViewBuilder.
         // FIX (Issue 2): a real measured latency to the gateway is proof it's
@@ -491,18 +492,18 @@ struct DashboardView: View {
             if let l = liveGatewayLatency {
                 return routerStatusWord(forLatency: l)
             }
-            if let router = interpreterRouter {
-                return router.status.rawValue
+            if vm.status.router.gatewayIP == nil {
+                return "Not applicable"
             }
             return vpnActive && !vm.status.router.isReachable && vm.status.vpn.vpnState.isLikelyOn
-                ? "Unreachable (VPN active)"
+                ? "Hidden by VPN"
                 : vm.status.router.health.displayName
         }()
         let healthColor: Color = {
             if let l = liveGatewayLatency {
                 return latencyColor(l)
             }
-            return interpreterRouter?.color ?? routerStatusColor(vpnActive: vpnActive)
+            return routerStatusColor(vpnActive: vpnActive)
         }()
 
         return CardView {
@@ -524,12 +525,11 @@ struct DashboardView: View {
                     StatusRow(
                         title: "Gateway",
                         value: gateway,
-                        color: vm.isInitializing ? .secondary : (interpreterRouter?.color ?? routerStatusColor(vpnActive: vpnActive))
+                        color: vm.isInitializing ? .secondary : routerStatusColor(vpnActive: vpnActive)
                     )
                 } else {
-                    // Use interpreter's value/color if available, otherwise fallback
-                    let value = vm.isInitializing ? "Detecting..." : (interpreterRouter?.value ?? (vpnActive && vm.status.vpn.vpnState.isLikelyOn ? "Unreachable (VPN)" : "Unknown"))
-                    let color: Color = vm.isInitializing ? .secondary : (interpreterRouter?.color ?? (vpnActive ? AppColors.yellow : AppColors.red))
+                    let value = vm.isInitializing ? "Detecting..." : (vpnActive && vm.status.vpn.vpnState.isLikelyOn ? "Hidden by VPN" : "Not applicable")
+                    let color: Color = vm.isInitializing ? .secondary : (vpnActive ? AppColors.yellow : .gray)
                     StatusRow(
                         title: "Gateway",
                         value: value,
@@ -558,13 +558,7 @@ struct DashboardView: View {
                 // FIX (Issue 2/6): suppress "Router may be unreachable" when we
                 // just measured a working latency to it, OR when the failure
                 // tracker hasn't seen a hard run of consecutive misses.
-                if let router = interpreterRouter, router.status == .hidden {
-                    // VPN tunnel hides router - show interpreter's explanation
-                    Text("ℹ️ \(router.detail)")
-                        .font(.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                        .padding(.top, 4)
-                } else if vm.hasRouterProblem && !routerHasLiveLatency {
+                if vm.hasRouterProblem && !routerHasLiveLatency {
                     if vpnActive && vm.status.vpn.vpnState.isLikelyOn {
                         Text("ℹ️ Gateway unreachable while VPN active — this is normal")
                             .font(.caption)
@@ -837,12 +831,9 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - DNS Card (STEP 3: Uses NetworkInterpreter for consistent messages)
+    // MARK: - DNS Card (Diagnosis v2: no interpreter)
 
     private var dnsCard: some View {
-        // SINGLE SOURCE OF TRUTH: Use interpreter's DNS status when available
-        let interpreterDNS = NetworkInterpreter.shared.current?.dns
-
         return CardView {
             VStack(alignment: .leading, spacing: UIConstants.spacingM) {
                 // Title
@@ -858,13 +849,14 @@ struct DashboardView: View {
                     StatusRow(
                         title: "Server",
                         value: dns,
-                        color: interpreterDNS?.color ?? vm.status.dns.health.uiColor
+                        color: vm.status.dns.health.uiColor
                     )
                 }
 
-                // Latency - use interpreter's value or smoothed fallback
-                let latencyValue = interpreterDNS?.value ?? (vm.smoothedDNSLatency ?? vm.status.dns.latency).map { "\(Int($0))ms" }
-                let latencyColor = interpreterDNS?.color ?? dnsLatencyColor(vm.smoothedDNSLatency ?? vm.status.dns.latency ?? 0)
+                // Latency — smoothed, never a sentinel
+                let dnsLatencyMs = vm.smoothedDNSLatency ?? vm.status.dns.displayableLatency
+                let latencyValue = dnsLatencyMs.map { "\(Int($0))ms" }
+                let latencyColor = dnsLatencyMs.map(dnsLatencyColor) ?? .secondary
 
                 if let value = latencyValue {
                     StatusRow(
@@ -874,13 +866,7 @@ struct DashboardView: View {
                     )
                 }
 
-                // Warning - use interpreter's detail for consistency
-                if let dns = interpreterDNS, dns.hasIssue {
-                    Text("⚠️ \(dns.detail)")
-                        .font(.caption)
-                        .foregroundColor(AppColors.yellow)
-                        .padding(.top, 4)
-                } else if vm.hasDNSWarning {
+                if vm.hasDNSWarning {
                     Text("⚠️ Slow DNS - consider switching to 1.1.1.1 or 8.8.8.8")
                         .font(.caption)
                         .foregroundColor(AppColors.yellow)
@@ -967,64 +953,21 @@ struct DashboardView: View {
 
     // MARK: - Smart Recommendations Section
 
-    private var smartRecommendationsSection: some View {
-        let recommendations = SmartRecommendationEngine.shared.generateRecommendations(
-            from: vm.status,
-            speedTest: HistoryManager.shared.speedTestHistory.first
-        )
-
-        // Only show if there are actionable recommendations (not just "All Good")
-        return Group {
-            if recommendations.count > 1 || (recommendations.first?.priority ?? 10) < 10 {
-                CardView {
-                    VStack(alignment: .leading, spacing: UIConstants.spacingM) {
-                        HStack {
-                            Image(systemName: "brain.head.profile")
-                                .foregroundColor(AppColors.accent)
-                            Text("Smart Recommendations")
-                                .font(.headline)
-                        }
-
-                        // Show top 2 recommendations
-                        ForEach(Array(recommendations.prefix(2).enumerated()), id: \.element.id) { index, rec in
-                            if index > 0 {
-                                Divider()
-                            }
-                            CompactRecommendationRow(recommendation: rec)
-                        }
-
-                        if recommendations.count > 2 {
-                            Text("+ \(recommendations.count - 2) more recommendations")
-                                .font(.caption)
-                                .foregroundColor(AppColors.textSecondary)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     // PART 3: Action buttons (Quick Check, Deep Scan, VPN Tools) removed from home screen
     // These are now accessible via the Diagnose and Security tabs
 
     // MARK: - Helper Computed Properties
 
     /// PART 1: Use stableOverallHealth (with hysteresis) for status color
+    /// Ring colour from the verdict: the score's band when scored, else the state.
     private var stableStatusColor: Color {
         if vm.isInitializing { return .gray }
-        switch vm.stableOverallHealth {
-        case .excellent: return AppColors.green
-        case .fair: return AppColors.yellow
-        case .poor: return AppColors.red
-        case .unknown: return .gray
-        }
-    }
-
-    private var statusColor: Color {
-        switch vm.overallHealth {
-        case .excellent: return AppColors.green
-        case .fair: return AppColors.yellow
-        case .poor: return AppColors.red
+        guard let v = vm.verdict else { return .gray }
+        if let s = v.score { return s.band.color }
+        switch v.state {
+        case .broken: return AppColors.red
+        case .degraded: return AppColors.yellow
+        case .working: return AppColors.green
         case .unknown: return .gray
         }
     }
@@ -1063,13 +1006,8 @@ struct DashboardView: View {
     /// `latencyColor` (NetworkColors.forLatency) so the verdict word and its
     /// colour always agree with the latency number on the card.
     private func routerStatusWord(forLatency ms: Double) -> String {
-        switch ms {
-        case ..<30: return "Excellent"
-        case ..<60: return "Good"
-        case ..<150: return "Fair"
-        case ..<300: return "Poor"
-        default: return "Critical"
-        }
+        // Diagnosis v2: ONE vocabulary — the router-delay band from MetricBands.
+        MetricBands.gatewayDelay(ms: ms).word
     }
 
     private func dnsLatencyColor(_ latency: Double) -> Color {

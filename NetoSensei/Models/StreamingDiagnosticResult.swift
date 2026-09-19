@@ -50,7 +50,7 @@ struct StreamingDiagnosticResult {
     var platform: StreamingPlatform
 
     // CDN Testing
-    var cdnPing: Double  // ms
+    var cdnPing: Double?  // ms — nil when no CDN answered (Diagnosis v2: never a 999 sentinel)
     var cdnThroughput: Double  // Mbps
     var cdnReachable: Bool
     var cdnRegion: String?
@@ -106,7 +106,7 @@ struct StreamingDiagnosticResult {
     /// Distance" over the generic "VPN Server" — the user is seeing the cost
     /// of routing through a distant exit, not a problem with the VPN itself.
     var primaryBottleneckDisplay: String {
-        if vpnActive && primaryBottleneck == .vpn && cdnPing > 150 {
+        if vpnActive && primaryBottleneck == .vpn, let ping = cdnPing, ping > 150 {
             return "VPN Server Distance"
         }
         return primaryBottleneck.rawValue
@@ -199,8 +199,8 @@ struct StreamingDiagnosticResult {
             if let region = cdnRegion {
                 summary += "Connected to: \(region). "
             }
-            if cdnPing > 0 {
-                summary += "Latency: \(Int(cdnPing))ms. "
+            if let ping = cdnPing, ping > 0 {
+                summary += "Latency: \(Int(ping))ms. "
             }
 
         case .dns:

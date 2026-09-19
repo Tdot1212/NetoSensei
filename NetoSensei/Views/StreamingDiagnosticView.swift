@@ -331,9 +331,9 @@ struct StreamingDiagnosticContentView: View {
                         Text("CDN Ping")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
-                        Text("\(Int(result.cdnPing))ms")
+                        Text(result.cdnPing.map { "\(Int($0))ms" } ?? "—")
                             .font(.title3.bold())
-                            .foregroundColor(cdnPingColor(result.cdnPing))
+                            .foregroundColor(result.cdnPing.map(cdnPingColor) ?? AppColors.yellow)
                     }
 
                     VStack {

@@ -44,44 +44,6 @@ class DashboardViewModel: ObservableObject {
     @Published var geoIPInfo: GeoIPInfo = .empty
     @Published var isMonitoring = false
 
-    // MARK: - Diagnostic Root Cause Integration
-
-    /// Last diagnostic's root cause (synced from HistoryManager)
-    @Published var lastDiagnosticRootCause: String?
-
-    /// Last diagnostic summary text
-    @Published var lastDiagnosticSummary: String?
-
-    /// Last diagnostic timestamp
-    @Published var lastDiagnosticTimestamp: Date?
-
-    /// Whether to show diagnostic root cause vs calculated status
-    /// Show diagnostic root cause if it's less than 10 minutes old
-    var shouldShowDiagnosticRootCause: Bool {
-        guard let timestamp = lastDiagnosticTimestamp else { return false }
-        let tenMinutesAgo = Date().addingTimeInterval(-600)
-        return timestamp > tenMinutesAgo && lastDiagnosticRootCause != nil && lastDiagnosticRootCause != "None"
-    }
-
-    /// Human-readable time since last diagnostic
-    var timeSinceLastDiagnostic: String? {
-        guard let timestamp = lastDiagnosticTimestamp else { return nil }
-        let interval = Date().timeIntervalSince(timestamp)
-
-        if interval < 60 {
-            return "Just now"
-        } else if interval < 3600 {
-            let minutes = Int(interval / 60)
-            return "\(minutes)m ago"
-        } else if interval < 86400 {
-            let hours = Int(interval / 3600)
-            return "\(hours)h ago"
-        } else {
-            let days = Int(interval / 86400)
-            return "\(days)d ago"
-        }
-    }
-
     // MARK: - Connection Stability Properties
 
     /// Connection stability summary text
@@ -96,13 +58,8 @@ class DashboardViewModel: ObservableObject {
     private var internetLatencyHistory: [Double] = []
     private var gatewayLatencyHistory: [Double] = []
     private var dnsLatencyHistory: [Double] = []
-    private var healthScoreHistory: [Int] = []
     private let smoothingWindow = 5  // Average of last 5 readings
 
-    /// Hysteresis for health ratings (require 3 consecutive same readings to change)
-    private var consecutiveRatingCount = 0
-    private var pendingRating: NetworkHealth?
-    private var confirmedRating: NetworkHealth = .fair
 
     /// Identity of the network the smoothing buffers currently describe.
     /// When this changes (SSID / interface / subnet), the buffers are cleared
@@ -113,8 +70,8 @@ class DashboardViewModel: ObservableObject {
     @Published var smoothedInternetLatency: Double?
     @Published var smoothedGatewayLatency: Double?
     @Published var smoothedDNSLatency: Double?
-    @Published var smoothedHealthScore: Int = 50
-    @Published var stableOverallHealth: NetworkHealth = .fair
+    /// Diagnosis v2: the ONE verdict every Home surface renders from.
+    @Published var verdict: NetworkVerdict?
 
     // MARK: - Layer 3: Interpretation Engine Output
     @Published var currentDiagnosis: NetworkDiagnosis?
@@ -203,13 +160,6 @@ class DashboardViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe diagnostic history changes to sync root cause
-        historyManager.$diagnosticHistory
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] history in
-                self?.syncDiagnosticRootCause(from: history)
-            }
-            .store(in: &cancellables)
 
         // Observe connection stability metrics
         stabilityMonitor.$currentMetrics
@@ -219,33 +169,6 @@ class DashboardViewModel: ObservableObject {
                 self?.stabilitySummary = self?.stabilityMonitor.stabilitySummary ?? "Monitoring..."
             }
             .store(in: &cancellables)
-    }
-
-    /// Sync the last diagnostic's root cause to the dashboard
-    private func syncDiagnosticRootCause(from history: [DiagnosticHistoryEntry]) {
-        // FIXED: Re-entry guard to prevent cascading updates
-        guard !isSyncingDiagnostic else {
-            debugLog("🔄 syncDiagnosticRootCause skipped - already in progress")
-            return
-        }
-        isSyncingDiagnostic = true
-        defer { isSyncingDiagnostic = false }
-
-        guard let lastDiagnostic = history.first else {
-            lastDiagnosticRootCause = nil
-            lastDiagnosticSummary = nil
-            lastDiagnosticTimestamp = nil
-            return
-        }
-
-        lastDiagnosticTimestamp = lastDiagnostic.timestamp
-        lastDiagnosticRootCause = lastDiagnostic.primaryIssueCategory
-        lastDiagnosticSummary = lastDiagnostic.summary
-
-        debugLog("📊 Dashboard synced diagnostic: \(lastDiagnostic.primaryIssueCategory) - \(lastDiagnostic.summary)")
-
-        // Update UI to reflect the diagnostic result
-        updateUIStatus()
     }
 
     // MARK: - Public Methods (STEP 4 Required)
@@ -367,11 +290,13 @@ class DashboardViewModel: ObservableObject {
         ispName = geoIP.ispDisplay
     }
 
-    /// Update UI status labels
-    /// FIXED: Based ONLY on measurable metrics - no fake WiFi signal references
-    /// ENHANCED: Prefers diagnostic root cause when available (within 10 minutes)
+    // MARK: - Diagnosis v2: the ONE verdict
+
+    /// Compose the verdict from the monitor's status, the probe failure
+    /// streaks and the latest same-network speed test, then derive the status
+    /// line from it. This replaces the dashboard's own health rubric, the
+    /// diagnostic-root-cause string logic and the interpreter summary.
     func updateUIStatus() {
-        // FIXED: Re-entry guard to prevent cascading updates
         guard !isUpdatingUIStatus else {
             debugLog("🔄 updateUIStatus skipped - already in progress")
             return
@@ -384,135 +309,46 @@ class DashboardViewModel: ObservableObject {
             return
         }
 
-        // Priority 0: Use diagnostic root cause if recent
-        // This ensures the dashboard shows the same diagnosis as the diagnostic view
-        if shouldShowDiagnosticRootCause, let rootCause = lastDiagnosticRootCause {
-            connectionQuality = formatDiagnosticRootCause(rootCause)
-            return
-        }
-
-        // Priority 1: No connection
-        // FIX (Issue 1/4): a private LAN IP means WiFi IS up — don't fall to
-        // "Not Connected", which feeds the score calculation a false signal.
-        let hasPrivateIP: Bool = {
-            guard let ip = status.localIP else { return false }
-            return ip.hasPrefix("192.168.") || ip.hasPrefix("10.") || ip.hasPrefix("172.")
-        }()
-        if !status.wifi.isConnected && !hasPrivateIP {
-            connectionQuality = "Not Connected"
-            return
-        }
-
-        // FIXED: Use MEASURABLE metrics to determine the primary issue
-        // Priority order: VPN overhead > External latency > Gateway latency > DNS
-
-        // FIXED: Check BOTH NetworkMonitor AND SmartVPNDetector for VPN status
-        // This prevents false negatives where one detector is slower
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-
-        // Check VPN overhead first (if VPN active)
-        if vpnActive,
-           let externalLatency = status.internet.latencyToExternal,
-           let gatewayLatency = status.router.latency {
-            let overhead = externalLatency - gatewayLatency
-            if overhead > 150 {
-                connectionQuality = "High VPN latency (\(Int(overhead))ms overhead)"
-                return
-            } else if overhead > 50 {
-                connectionQuality = "Moderate VPN overhead (\(Int(overhead))ms)"
-                return
-            }
-        }
-
-        // Check external latency
-        if let externalLatency = status.internet.latencyToExternal {
-            if externalLatency > 200 {
-                if vpnActive {
-                    connectionQuality = "High latency — VPN routing"
-                } else {
-                    connectionQuality = "High latency — possible ISP issue"
-                }
-                return
-            } else if externalLatency > 100 {
-                connectionQuality = "Elevated latency (\(Int(externalLatency))ms)"
-                return
-            }
-        }
-
-        // Check gateway latency (local network)
-        // FIXED: Recalibrated thresholds per Apple HIG
-        // < 10ms: Excellent, 10-30ms: Good, 30-50ms: Fair, 50-100ms: Poor, >100ms: Critical
-        if let gatewayLatency = status.router.latency {
-            if gatewayLatency > 100 {
-                connectionQuality = "Critical gateway latency (\(Int(gatewayLatency))ms)"
-                return
-            } else if gatewayLatency > 50 {
-                connectionQuality = "Poor gateway latency (\(Int(gatewayLatency))ms)"
-                return
-            }
-            // 30-50ms is "Fair" - not worth alarming the user about
-            // 10-30ms is "Good" - no action needed
-            // < 10ms is "Excellent" - no action needed
-        }
-
-        // Check packet loss
-        if let packetLoss = status.router.packetLoss, packetLoss > 5 {
-            connectionQuality = "Packet loss detected (\(Int(packetLoss))%)"
-            return
-        }
-
-        // Check DNS
-        if let dnsLatency = status.dns.latency, dnsLatency > 100 {
-            connectionQuality = "Slow DNS (\(Int(dnsLatency))ms)"
-            return
-        }
-
-        // All good
-        if status.internet.isReachable {
-            connectionQuality = "Good"
-        } else {
-            connectionQuality = "No Internet"
-        }
+        let v = VerdictInputs.currentVerdict(status: status)
+        verdict = v
+        connectionQuality = v.headline
     }
 
-    /// Format the diagnostic root cause for dashboard display
-    /// ENHANCED: Includes specific metrics when available
-    private func formatDiagnosticRootCause(_ category: String) -> String {
-        switch category {
-        case "VPN":
-            // Include VPN overhead if available
-            if let overhead = vpnOverhead {
-                return "VPN Slow (\(Int(overhead))ms overhead) — Try closer server"
-            }
-            return "VPN Slow — Try a closer server"
-        case "ISP":
-            return "ISP Congestion — Not a local network issue"
-        case "Router":
-            // Include gateway latency if available
-            if let gatewayLatency = status.router.latency {
-                return "Router Slow (\(Int(gatewayLatency))ms) — Try restarting"
-            }
-            return "Router Issue — Try restarting"
-        case "Wi-Fi":
-            return "Wi-Fi Issue — Move closer to router"
-        case "DNS":
-            // Include DNS latency if available
-            if let dnsLatency = status.dns.latency {
-                return "DNS Slow (\(Int(dnsLatency))ms) — Switch to 1.1.1.1"
-            }
-            return "DNS Slow — Switch to 1.1.1.1 or 8.8.8.8"
-        case "Streaming":
-            return "Streaming Issue — CDN routing problem"
-        case "CDN":
-            return "CDN Issue — Server distance"
-        case "Device":
-            return "Device Issue — Check settings"
-        case "None":
-            return "Good"
-        default:
-            return "Issue Detected"
-        }
+    struct SimpleSummaryItem: Hashable, Identifiable {
+        let id = UUID()
+        let emoji: String
+        let title: String
+        let explanation: String
     }
+
+    /// "What's happening": the verdict headline with its coverage line, then
+    /// the top findings — what's wrong, and which action category applies.
+    func generateSimpleSummary() -> [SimpleSummaryItem] {
+        guard let v = verdict else {
+            return [SimpleSummaryItem(emoji: "⏳", title: "Checking your connection…", explanation: "Results appear after the first checks complete.")]
+        }
+        var items: [SimpleSummaryItem] = []
+        let stateEmoji: String
+        switch v.state {
+        case .working: stateEmoji = "✅"
+        case .degraded: stateEmoji = "⚠️"
+        case .broken: stateEmoji = "🔴"
+        case .unknown: stateEmoji = "❔"
+        }
+        items.append(SimpleSummaryItem(emoji: stateEmoji, title: v.headline, explanation: v.coverage.line))
+        for f in v.findings.prefix(3) {
+            let emoji: String
+            switch f.action {
+            case .userFixable: emoji = "🔧"
+            case .fixableElsewhere: emoji = "🏢"
+            case .notFixable: emoji = "ℹ️"
+            case .none: emoji = "💬"
+            }
+            items.append(SimpleSummaryItem(emoji: emoji, title: f.headline, explanation: "\(f.action.categoryWord). \(f.cause)"))
+        }
+        return items
+    }
+
 
     /// Start monitoring network status
     func startMonitoring() {
@@ -627,11 +463,6 @@ class DashboardViewModel: ObservableObject {
     }
 
     // MARK: - Additional Computed Properties
-
-    /// Overall network health status
-    var overallHealth: NetworkHealth {
-        status.overallHealth
-    }
 
     /// Is network connected
     var isConnected: Bool {
@@ -875,14 +706,9 @@ class DashboardViewModel: ObservableObject {
         internetLatencyHistory.removeAll()
         gatewayLatencyHistory.removeAll()
         dnsLatencyHistory.removeAll()
-        healthScoreHistory.removeAll()
         smoothedInternetLatency = nil
         smoothedGatewayLatency = nil
         smoothedDNSLatency = nil
-        // Reset hysteresis so the rating can re-converge on the new network
-        // without carrying the old network's pending state.
-        consecutiveRatingCount = 0
-        pendingRating = nil
 
         debugLog("[Smoothing] Network changed (\(previous) → \(key)) — cleared latency buffers")
     }
@@ -904,298 +730,10 @@ class DashboardViewModel: ObservableObject {
             smoothedDNSLatency = smoothLatency(rawLatency, history: &dnsLatencyHistory)
         }
 
-        // Smooth health score
-        let rawScore = calculateRawHealthScore()
-        healthScoreHistory.append(rawScore)
-        if healthScoreHistory.count > smoothingWindow {
-            healthScoreHistory.removeFirst()
-        }
-        smoothedHealthScore = healthScoreHistory.reduce(0, +) / healthScoreHistory.count
-
-        // Apply hysteresis to health rating
-        stableOverallHealth = updateHealthRating(from: smoothedHealthScore)
-    }
-
-    /// Calculate raw health score (0-100) from current metrics.
-    /// FIX (Phase 5): kept in lockstep with RootCauseAnalyzer.calculateHealthScore()
-    /// so Quick Check and the Dashboard report the same number for the same inputs.
-    /// See RootCauseAnalyzer for the rubric and worked examples.
-    private func calculateRawHealthScore() -> Int {
-        var score = 100
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-
-        // Router latency (-15 max)
-        if let latency = status.router.displayableLatency {
-            if latency > 100 { score -= 15 }
-            else if latency > 60 { score -= 10 }
-            else if latency > 30 { score -= 5 }
-            else if latency > 10 { score -= 2 }
-        }
-
-        // Internet latency — VPN-aware (matches RootCauseAnalyzer).
-        if let latency = status.internet.displayableLatency {
-            if vpnActive {
-                if latency > 800 { score -= 45 }
-                else if latency > 600 { score -= 35 }
-                else if latency > 400 { score -= 28 }
-                else if latency > 250 { score -= 18 }
-                else if latency > 100 { score -= 10 }
-            } else {
-                if latency > 400 { score -= 50 }
-                else if latency > 300 { score -= 45 }
-                else if latency > 200 { score -= 40 }
-                else if latency > 150 { score -= 30 }
-                else if latency > 100 { score -= 20 }
-                else if latency > 80 { score -= 12 }
-                else if latency > 50 { score -= 5 }
-            }
-        }
-
-        // VPN overhead — counted ONCE. <150ms = normal, no penalty.
-        if vpnActive,
-           let internetLatency = status.internet.displayableLatency,
-           let routerLatency = status.router.displayableLatency {
-            let overhead = internetLatency - routerLatency
-            if overhead > 450 { score -= 20 }
-            else if overhead > 300 { score -= 10 }
-            else if overhead > 150 { score -= 5 }
-        }
-
-        // Packet loss
-        if let loss = status.router.packetLoss, loss > 0 {
-            score -= Int(loss * 5)
-        }
-
-        // DNS latency (-10 max)
-        if let latency = status.dns.displayableLatency {
-            if latency > 300 { score -= 10 }
-            else if latency > 200 { score -= 7 }
-            else if latency > 100 { score -= 5 }
-            else if latency > 50 { score -= 3 }
-            else if latency > 20 { score -= 1 }
-        }
-
-        // Critical failures only count after confirmed hard failures.
-        let validity = MeasurementValidityTracker.shared
-        if validity.gatewayHasHardFailure { score -= 40 }
-        if validity.externalHasHardFailure && !status.internet.isReachable { score -= 40 }
-        if validity.dnsHasHardFailure { score -= 20 }
-
-        return max(0, min(100, score))
-    }
-
-    /// Apply hysteresis to health rating (require 3 consecutive same readings)
-    private func updateHealthRating(from score: Int) -> NetworkHealth {
-        let newRating: NetworkHealth
-        if score >= 70 {
-            newRating = .excellent
-        } else if score >= 40 {
-            newRating = .fair
-        } else {
-            newRating = .poor
-        }
-
-        // Check if rating is same as pending
-        if newRating == pendingRating {
-            consecutiveRatingCount += 1
-        } else {
-            pendingRating = newRating
-            consecutiveRatingCount = 1
-        }
-
-        // Only change displayed rating after 3 consecutive same readings
-        if consecutiveRatingCount >= 3 {
-            confirmedRating = newRating
-        }
-
-        return confirmedRating
     }
 
     // MARK: - Simple Summary Generation (PART 2: Plain-English summary)
 
-    struct SimpleSummaryItem: Hashable, Identifiable {
-        let id = UUID()
-        let emoji: String
-        let title: String
-        let explanation: String
-    }
-
-    /// Generate plain-English summary for the home screen
-    /// STEP 3: Prefer NetworkInterpreter's summary when available (single source of truth)
-    func generateSimpleSummary() -> [SimpleSummaryItem] {
-        // SINGLE SOURCE OF TRUTH: If NetworkInterpreter has recent data, use it
-        if let interpretation = NetworkInterpreter.shared.current,
-           let lastInterpretedAt = NetworkInterpreter.shared.lastInterpretedAt,
-           Date().timeIntervalSince(lastInterpretedAt) < 300 {  // < 5 minutes old
-            // Convert interpreter's SummaryItem to our SimpleSummaryItem
-            return interpretation.summaryItems.map { item in
-                SimpleSummaryItem(
-                    emoji: item.emoji,
-                    title: item.title,
-                    explanation: item.explanation
-                )
-            }
-        }
-
-        // Fallback: Generate our own summary if no interpreter data
-        var items: [SimpleSummaryItem] = []
-
-        // 1. Overall status - always show
-        let score = smoothedHealthScore
-        if score >= 70 {
-            items.append(SimpleSummaryItem(
-                emoji: "✅",
-                title: "Your internet is working well",
-                explanation: "Everything looks good. Browsing, streaming, and video calls should work fine."
-            ))
-        } else if score >= 40 {
-            items.append(SimpleSummaryItem(
-                emoji: "⚠️",
-                title: "Your internet is okay but slow",
-                explanation: "Basic browsing works, but videos might buffer and video calls could be choppy."
-            ))
-        } else {
-            items.append(SimpleSummaryItem(
-                emoji: "🔴",
-                title: "Your internet has problems",
-                explanation: "You'll likely notice slow loading, buffering, and dropped connections."
-            ))
-        }
-
-        // 2. VPN status - explain what it means (authoritative vs inferred)
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-        let vpnAuthoritative = SmartVPNDetector.shared.detectionResult?.isAuthoritative ?? false
-
-        if vpnActive {
-            let overhead = vpnOverhead ?? 0
-            let authLabel = vpnAuthoritative ? "" : " (inferred)"
-            if overhead > 200 {
-                items.append(SimpleSummaryItem(
-                    emoji: "🐢",
-                    title: "VPN is slowing you down a lot\(authLabel)",
-                    explanation: "Your VPN adds \(Int(overhead))ms delay. Try switching to a closer server in your VPN app."
-                ))
-            } else if overhead > 100 {
-                let location = status.vpn.serverLocation ?? geoIPInfo.displayLocation
-                items.append(SimpleSummaryItem(
-                    emoji: "🔒",
-                    title: vpnAuthoritative ? "VPN is on with some slowdown" : "VPN/Proxy detected (inferred)",
-                    explanation: vpnAuthoritative
-                        ? "Your VPN adds \(Int(overhead))ms delay. This is normal — your traffic is being routed through \(location)."
-                        : "We detected a VPN/proxy based on your IP provider. Adds \(Int(overhead))ms delay."
-                ))
-            } else {
-                items.append(SimpleSummaryItem(
-                    emoji: "🔒",
-                    title: vpnAuthoritative ? "VPN is working great" : "VPN/Proxy detected (inferred)",
-                    explanation: vpnAuthoritative
-                        ? "Your VPN is connected with minimal slowdown. Nice setup!"
-                        : "We detected a VPN/proxy based on your IP provider (\(status.vpn.ispName ?? "unknown")). Connection looks good."
-                ))
-            }
-        } else if let result = SmartVPNDetector.shared.detectionResult,
-                  result.detectionStatus == .possiblyActive {
-            // Possibly active but not confirmed
-            let reasons = result.inferenceReasons.joined(separator: "; ")
-            items.append(SimpleSummaryItem(
-                emoji: "🔍",
-                title: "Possible VPN/Proxy detected",
-                explanation: reasons.isEmpty
-                    ? "Some network signals suggest a VPN or proxy may be active."
-                    : reasons
-            ))
-        }
-
-        // 3. WiFi quality (only when VPN is NOT active)
-        if !vpnActive {
-            if let gatewayLatency = smoothedGatewayLatency ?? status.router.latency {
-                if gatewayLatency > 100 {
-                    items.append(SimpleSummaryItem(
-                        emoji: "📶",
-                        title: "Weak WiFi signal",
-                        explanation: "Your router responds in \(Int(gatewayLatency))ms (should be under 10ms). Move closer to your router or reduce devices on this network."
-                    ))
-                } else if gatewayLatency > 30 {
-                    items.append(SimpleSummaryItem(
-                        emoji: "📶",
-                        title: "WiFi could be better",
-                        explanation: "Your router responds in \(Int(gatewayLatency))ms. Try moving closer to your router."
-                    ))
-                }
-            } else if !status.router.isReachable {
-                items.append(SimpleSummaryItem(
-                    emoji: "📶",
-                    title: "Can't reach your router",
-                    explanation: "Your WiFi connection to the router seems unstable. Try restarting your router."
-                ))
-            }
-        }
-
-        // 4. DNS warning
-        if let dnsLatency = smoothedDNSLatency ?? status.dns.latency, dnsLatency > 150 {
-            items.append(SimpleSummaryItem(
-                emoji: "🔍",
-                title: "Slow DNS (website lookup)",
-                explanation: "Finding websites takes \(Int(dnsLatency))ms. Changing your DNS to 1.1.1.1 or 8.8.8.8 in your device settings could speed things up."
-            ))
-        }
-
-        // 5. What you can do about it
-        if score < 70 {
-            let topAction = getTopAction()
-            items.append(SimpleSummaryItem(
-                emoji: "💡",
-                title: topAction.title,
-                explanation: topAction.explanation
-            ))
-        }
-
-        return items
-    }
-
-    struct ActionItem {
-        let title: String
-        let explanation: String
-    }
-
-    private func getTopAction() -> ActionItem {
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-
-        // Prioritize the most impactful fix
-        if vpnActive {
-            let overhead = vpnOverhead ?? 0
-            if overhead > 200 {
-                return ActionItem(
-                    title: "Try a faster VPN server",
-                    explanation: "Open your VPN app and switch to a server closer to you. This is the #1 thing that will speed up your internet right now."
-                )
-            }
-        }
-
-        if let gatewayLatency = status.router.latency, gatewayLatency > 50, !vpnActive {
-            return ActionItem(
-                title: "Move closer to your WiFi router",
-                explanation: "Your WiFi signal is weak. Moving closer to the router or removing obstacles between you and the router will help."
-            )
-        }
-
-        if let dnsLatency = status.dns.latency, dnsLatency > 150 {
-            return ActionItem(
-                title: "Switch to a faster DNS",
-                explanation: "Go to Settings → WiFi → tap your network → Configure DNS → Manual → add 1.1.1.1 as the first server."
-            )
-        }
-
-        return ActionItem(
-            title: "Your internet is a bit slow today",
-            explanation: "This might be temporary. Try again in a few minutes, or restart your router if it continues."
-        )
-    }
-
     // MARK: - VPN Overhead Helper for Summary
 
-    /// Calculate VPN overhead for simple summary
-    func calculateVPNOverhead() -> Double {
-        return vpnOverhead ?? 0
-    }
 }

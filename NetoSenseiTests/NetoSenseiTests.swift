@@ -858,3 +858,94 @@ struct VerdictPatternTests {
         }
     }
 }
+
+// MARK: - Verdict inputs + Trends ordering (Diagnosis v2, Commit 4)
+
+struct VerdictInputsTests {
+
+    static func status(cellular: Bool = false, wifi: Bool = true, gatewayIP: String? = "192.168.1.1",
+                       gatewayMs: Double? = 5, externalMs: Double? = 20, intercepted: Bool = false,
+                       reachable: Bool = true, dnsMs: Double? = 12, dnsOK: Bool = true, vpn: Bool = false) -> NetworkStatus {
+        var s = NetworkStatus.empty
+        s.connectionType = cellular ? .cellular : .wifi
+        s.wifi.isConnected = wifi
+        s.router.gatewayIP = gatewayIP
+        s.router.latency = gatewayMs
+        s.router.isReachable = gatewayMs != nil
+        s.internet.latencyToExternal = externalMs
+        s.internet.latencyIntercepted = intercepted
+        s.internet.isReachable = reachable
+        s.internet.httpTestSuccess = reachable
+        s.dns.latency = dnsMs
+        s.dns.lookupSuccess = dnsOK
+        s.vpn.isActive = vpn
+        return s
+    }
+
+    @Test func cellularOnly_routerIsNotApplicable_neverFailed() {
+        let recs = VerdictInputs.records(from: Self.status(cellular: true, wifi: false, gatewayIP: nil, gatewayMs: nil), streaks: .init())
+        let gw = recs.first { $0.id == .gatewayLatency }
+        if case .notApplicable = gw?.status {} else { Issue.record("gateway on cellular must be not applicable") }
+        #expect(!recs.contains { $0.id == .gatewayReach })
+    }
+
+    @Test func interceptedProbe_isASingleExplainedFailure() {
+        let recs = VerdictInputs.records(from: Self.status(externalMs: nil, intercepted: true), streaks: .init(external: 3))
+        let ext = recs.first { $0.id == .externalLatency }
+        #expect(ext?.status == .failed(.intercepted))
+        #expect(ext?.consecutiveFailures == 1)              // never promoted to "no internet" by the streak
+    }
+
+    @Test func failureStreaks_flowThroughToRecords() {
+        let recs = VerdictInputs.records(from: Self.status(gatewayMs: nil, externalMs: nil, reachable: false, dnsMs: nil, dnsOK: false),
+                                         streaks: .init(gateway: 2, external: 3, dns: 2))
+        #expect(recs.first { $0.id == .gatewayReach }?.consecutiveFailures == 2)
+        #expect(recs.first { $0.id == .externalLatency }?.consecutiveFailures == 3)
+        #expect(recs.first { $0.id == .dnsResolve }?.consecutiveFailures == 2)
+        let v = VerdictComposer.compose(records: recs, context: VerdictContext(connectionType: "WiFi", vpn: .off))
+        #expect(v.state == .broken && v.score == nil)
+    }
+
+    @Test func vpnHidesRouter_isNotApplicable_notAFailure() {
+        let recs = VerdictInputs.records(from: Self.status(gatewayMs: nil, vpn: true), streaks: .init(gateway: 5))
+        if case .notApplicable(let why) = recs.first(where: { $0.id == .gatewayLatency })?.status { #expect(why.contains("VPN")) }
+        else { Issue.record("router hidden by VPN must be not applicable") }
+    }
+
+    @Test func staleOrOtherNetworkSpeedTest_isNotEvidence() {
+        var stale = SpeedTestResult(downloadSpeed: 50, uploadSpeed: 10, ping: 20, jitter: 40, packetLoss: 0, testDuration: 0,
+                                    connectionType: "WiFi", vpnActive: false, networkSSID: nil, localSubnet: nil)
+        stale.timestamp = Date().addingTimeInterval(-3600)
+        let recs = VerdictInputs.records(from: Self.status(), streaks: .init(), recentSpeedTest: stale)
+        #expect(!recs.contains { $0.id == .throughput })
+        // Same segment and fresh → used.
+        var fresh = stale
+        fresh.timestamp = Date()
+        let s = Self.status()
+        fresh.networkSSID = s.wifi.ssid
+        fresh.localSubnet = NetworkSegment.subnet(of: s.localIP)
+        let recs2 = VerdictInputs.records(from: s, streaks: .init(), recentSpeedTest: fresh)
+        #expect(recs2.contains { $0.id == .throughput } && recs2.contains { $0.id == .jitter })
+    }
+
+    @Test func context_vpnOn_isAuthoritativeAware_andCellularKeepsRadio() {
+        let s = Self.status(cellular: true, wifi: false, gatewayIP: nil, gatewayMs: nil)
+        let ctx = VerdictInputs.context(status: s, vpnResult: nil, geoCountryCode: "CN", radioTechnology: "5G")
+        #expect(ctx.isCellular && ctx.radioTechnology == "5G" && ctx.publicCountry == "CN")
+        #expect(ctx.vpn == .unknown)                        // no detector result, no VPN flag → unknown, not "off"
+        let wifi = VerdictInputs.context(status: Self.status(), vpnResult: nil, geoCountryCode: nil, radioTechnology: "LTE")
+        #expect(wifi.radioTechnology == nil)                // radio tech is a cellular fact only
+    }
+}
+
+struct TrendsOrderingTests {
+    @Test func neutralNetworkChangedLine_neverDisplacesARealFinding() {
+        func insight(_ sev: TrendAnalyzer.TrendInsight.Severity, _ metric: String) -> TrendAnalyzer.TrendInsight {
+            TrendAnalyzer.TrendInsight(title: metric, description: "", severity: sev, metric: metric, changePercent: nil)
+        }
+        let ordered = TrendAnalyzer.ordered([insight(.neutral, TrendAnalyzer.networkChangedMetric), insight(.positive, "latency"), insight(.negative, "download")])
+        #expect(ordered.map(\.metric) == ["download", "latency", TrendAnalyzer.networkChangedMetric])
+        // The card shows prefix(2): the neutral line is the one left out.
+        #expect(!ordered.prefix(2).contains { $0.metric == TrendAnalyzer.networkChangedMetric })
+    }
+}

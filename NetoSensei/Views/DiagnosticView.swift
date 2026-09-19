@@ -212,286 +212,105 @@ struct DiagnosticContentView: View {
     @ViewBuilder
     private func diagnosticResultsView(result: DiagnosticResult) -> some View {
         VStack(spacing: 20) {
-            // Health Score Circle
-            if let analysis = vm.analysis {
+            if let verdict = vm.verdict {
+                // Diagnosis v2: number ("—" below the coverage floor) and its
+                // band word, from the ONE verdict.
                 ZStack {
                     Circle()
-                        .stroke(colorForScore(analysis.healthScore), lineWidth: 10)
+                        .stroke(verdict.score?.band.color ?? .gray, lineWidth: 10)
                         .frame(width: 140, height: 140)
                     VStack(spacing: 4) {
-                        Text("\(analysis.healthScore)")
+                        Text(verdict.scoreText)
                             .font(.system(size: 48, weight: .bold))
-                            .foregroundColor(colorForScore(analysis.healthScore))
-                        Text("Health")
+                            .foregroundColor(verdict.score?.band.color ?? .gray)
+                        Text(verdict.score?.band.word ?? verdict.state.word)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
                 }
                 .padding(.top, 20)
 
-                // Health Label
-                Text(analysis.healthScore >= 70 ? "Good" : analysis.healthScore >= 40 ? "Fair" : "Poor")
-                    .font(.title3.bold())
-                    .foregroundColor(colorForScore(analysis.healthScore))
+                // Headline + coverage line
+                VStack(spacing: 8) {
+                    Text(verdict.headline)
+                        .font(.headline)
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.primary)
+                    CoverageLine(coverage: verdict.coverage)
+                        .multilineTextAlignment(.center)
+                }
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(Color(.systemGray6))
+                .cornerRadius(12)
+
+                // Findings: what's wrong, evidence, cause, one action
+                if verdict.findings.isEmpty {
+                    Text(verdict.coverage.failed.isEmpty
+                         ? "No issues found in the checks that ran."
+                         : "No issues found in the checks that completed. Some checks couldn't run — see the coverage line above.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                } else {
+                    FindingsCard(verdict: verdict, title: "What's wrong and what to do", maxFindings: 6)
+                }
             }
 
-            // Summary Card
-            VStack(spacing: 12) {
-                // Status icon
-                Image(systemName: statusIcon(for: result.overallStatus))
-                    .font(.system(size: 40))
-                    .foregroundColor(vm.severityColor)
-
-                // Summary text
-                Text(result.summary)
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(.primary)
-
-                // Issue count
-                Text("\(result.issues.count) issue\(result.issues.count == 1 ? "" : "s") found")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-            .frame(maxWidth: .infinity)
-            .background(Color(.systemGray6))
-            .cornerRadius(12)
-
-            // Test Results Section
-            // STEP 3: Use NetworkInterpreter's test results for consistent display
+            // The checks as they ran (pass / warning / fail / not applicable / not run)
             VStack(alignment: .leading, spacing: 0) {
-                Text("Test Results")
+                Text("Checks")
                     .font(.headline)
                     .padding(.bottom, 12)
 
-                // Prefer interpreter's test results (shows "Hidden by VPN" instead of "Fail")
-                if let interpreterResults = NetworkInterpreter.shared.current?.testResults {
-                    ForEach(Array(interpreterResults.enumerated()), id: \.offset) { index, testResult in
-                        HStack {
-                            Image(systemName: testResult.icon)
-                                .foregroundColor(testResult.statusColor)
-                                .frame(width: 24)
+                ForEach(Array(result.testsPerformed.enumerated()), id: \.offset) { index, test in
+                    HStack(alignment: .top) {
+                        Image(systemName: testResultIcon(test.result))
+                            .foregroundColor(testResultColor(test.result))
+                            .frame(width: 24)
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(testResult.name)
-                                    .font(.subheadline)
-                                Text(testResult.detail)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Spacer()
-
-                            Text(testResult.value)
-                                .font(.caption.monospaced())
-                                .foregroundColor(.secondary)
-
-                            Circle()
-                                .fill(testResult.statusColor)
-                                .frame(width: 10, height: 10)
-                        }
-                        .padding(.vertical, 8)
-
-                        if index < interpreterResults.count - 1 {
-                            Divider()
-                        }
-                    }
-                } else {
-                    // Fallback to original diagnostic test results
-                    ForEach(Array(result.testsPerformed.enumerated()), id: \.offset) { index, test in
-                        HStack {
-                            Image(systemName: testResultIcon(test.result))
-                                .foregroundColor(testResultColor(test.result))
-                                .frame(width: 24)
-
+                        VStack(alignment: .leading, spacing: 2) {
                             Text(test.name)
                                 .font(.subheadline)
-
-                            Spacer()
-
-                            if let latency = test.latency {
-                                Text("\(Int(latency))ms")
-                                    .font(.caption.monospaced())
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Circle()
-                                .fill(testResultColor(test.result))
-                                .frame(width: 10, height: 10)
+                            Text(test.details)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
-                        .padding(.vertical, 8)
 
-                        if index < result.testsPerformed.count - 1 {
-                            Divider()
+                        Spacer()
+
+                        if let latency = test.latency, LatencyValidation.normalize(latency) != nil {
+                            Text("\(Int(latency))ms")
+                                .font(.caption.monospaced())
+                                .foregroundColor(.secondary)
                         }
+
+                        Circle()
+                            .fill(testResultColor(test.result))
+                            .frame(width: 10, height: 10)
+                    }
+                    .padding(.vertical, 8)
+
+                    if index < result.testsPerformed.count - 1 {
+                        Divider()
                     }
                 }
             }
             .padding()
             .background(Color(.systemGray6))
             .cornerRadius(12)
-
-            // Issues Section (if any)
-            if !result.issues.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Issues Found")
-                        .font(.headline)
-
-                    ForEach(Array(result.issues.enumerated()), id: \.offset) { _, issue in
-                        HStack(alignment: .top, spacing: 12) {
-                            Circle()
-                                .fill(severityColor(issue.severity))
-                                .frame(width: 10, height: 10)
-                                .padding(.top, 5)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(issue.title)
-                                    .font(.subheadline.bold())
-                                Text(issue.description)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.systemGray6))
-                .cornerRadius(12)
-            }
-
-            // Root Cause - STEP 3: Prefer interpreter's root cause for consistency
-            if let interpreterRootCause = NetworkInterpreter.shared.current?.rootCause {
-                // Use single source of truth from interpreter
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: interpreterRootCause.icon)
-                            .foregroundColor(interpreterRootCause.severity.color)
-                        Text("Root Cause")
-                            .font(.headline)
-                    }
-
-                    Text(interpreterRootCause.title)
-                        .font(.subheadline.bold())
-                        .foregroundColor(interpreterRootCause.severity.color)
-
-                    Text(interpreterRootCause.description)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.systemGray6))
-                .cornerRadius(12)
-            } else if let analysis = vm.analysis {
-                // Fallback to original analysis
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: "lightbulb.fill")
-                            .foregroundColor(.yellow)
-                        Text("Root Cause")
-                            .font(.headline)
-                    }
-
-                    Text(analysis.beginnerExplanation)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.systemGray6))
-                .cornerRadius(12)
-            }
 
             Spacer(minLength: 40)
         }
     }
 
-    private func colorForScore(_ score: Int) -> Color {
-        if score >= 70 { return .green }
-        if score >= 40 { return .orange }
-        return .red
-    }
 
     // MARK: - Smart Recommendations Card
 
-    private var smartRecommendationsCard: some View {
-        let recommendations = SmartRecommendationEngine.shared.generateRecommendations(
-            from: NetworkMonitorService.shared.currentStatus,
-            speedTest: HistoryManager.shared.speedTestHistory.first
-        )
-        return SmartRecommendationsCard(recommendations: recommendations)
-    }
-
     // MARK: - Summary Card
 
-    private func summaryCard(result: DiagnosticResult) -> some View {
-        CardView {
-            VStack(spacing: UIConstants.spacingM) {
-                // Status circle
-                ZStack {
-                    Circle()
-                        .fill(vm.severityColor)
-                        .frame(width: 80, height: 80)
-
-                    Image(systemName: statusIcon(for: result.overallStatus))
-                        .font(.system(size: 40))
-                        .foregroundColor(.white)
-                }
-
-                // Summary
-                Text(result.summary)
-                    .font(.title3.bold())
-                    .multilineTextAlignment(.center)
-
-                // Critical warning
-                if result.hasCriticalIssues {
-                    Text("⚠️ Critical issues require immediate attention")
-                        .font(.caption)
-                        .foregroundColor(AppColors.red)
-                        .padding(.top, 4)
-                }
-
-                // Completion time
-                Text("Test completed • \(result.issues.count) issue\(result.issues.count == 1 ? "" : "s") found")
-                    .font(.caption)
-                    .foregroundColor(AppColors.textSecondary)
-            }
-        }
-    }
-
     // MARK: - Cause and Explanation Card
-
-    private var causeExplanationCard: some View {
-        CardView {
-            VStack(alignment: .leading, spacing: UIConstants.spacingM) {
-                // Cause
-                VStack(alignment: .leading, spacing: UIConstants.spacingS) {
-                    Text("Cause")
-                        .font(.caption)
-                        .foregroundColor(AppColors.textSecondary)
-
-                    Text(vm.causeText)
-                        .font(.headline)
-                        .foregroundColor(vm.severityColor)
-                }
-
-                Divider()
-
-                // Explanation
-                VStack(alignment: .leading, spacing: UIConstants.spacingS) {
-                    Text("Explanation")
-                        .font(.caption)
-                        .foregroundColor(AppColors.textSecondary)
-
-                    Text(vm.explanationText)
-                        .font(.body)
-                        .foregroundColor(AppColors.textPrimary)
-                }
-            }
-        }
-    }
 
     // MARK: - Recommendation Card
 

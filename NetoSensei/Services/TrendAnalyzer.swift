@@ -227,7 +227,20 @@ struct TrendAnalyzer {
     static func allInsights(speedHistory: [SpeedTestResult], diagnosticHistory: [DiagnosticHistoryEntry]) -> [TrendInsight] {
         let speedInsights = analyzeSpeedTrends(history: speedHistory)
         let diagInsights = analyzeDiagnosticTrends(history: diagnosticHistory)
-        return speedInsights + diagInsights
+        return ordered(speedInsights + diagInsights)
+    }
+
+    /// Diagnosis v2 also-fix: the Trends card shows at most two insights, so
+    /// order by what matters — real problems first, then improvements, then
+    /// the neutral "Network changed" line. A stable sort keeps the original
+    /// order within a severity.
+    static func ordered(_ insights: [TrendInsight]) -> [TrendInsight] {
+        func rank(_ s: TrendInsight.Severity) -> Int {
+            switch s { case .negative: return 0; case .positive: return 1; case .neutral: return 2 }
+        }
+        return insights.enumerated()
+            .sorted { (rank($0.element.severity), $0.offset) < (rank($1.element.severity), $1.offset) }
+            .map { $0.element }
     }
 
     /// FIX (Issue 7): Combined insights filtered against a live reference latency

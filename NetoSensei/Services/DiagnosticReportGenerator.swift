@@ -19,7 +19,7 @@ class DiagnosticReportGenerator {
         diagnostic: DiagnosticResult?,
         speedTest: SpeedTestResult?,
         vpnInfo: SmartVPNDetector.VPNDetectionResult?,
-        analysis: RootCauseAnalyzer.Analysis?,
+        verdict: NetworkVerdict?,   // Diagnosis v2: the ONE verdict replaces RootCauseAnalyzer.Analysis
         networkStatus: NetworkStatus
     ) -> String {
         let dateFormatter = DateFormatter()
@@ -34,12 +34,13 @@ class DiagnosticReportGenerator {
 
         """
 
-        // Health Score Section
-        if let analysis = analysis {
+        // Verdict Section (score is "—" below the coverage floor, never a default)
+        if let verdict = verdict {
             report += """
-            HEALTH SCORE: \(analysis.healthScore)/100
-            ROOT CAUSE: \(analysis.primaryProblem.rawValue)
-            SEVERITY: \(severityLabel(analysis.severity))
+            HEALTH SCORE: \(verdict.scoreText)\(verdict.score != nil ? "/100" : "")\(verdict.score.map { " (\($0.band.word))" } ?? "")
+            STATE: \(verdict.state.word)
+            VERDICT: \(verdict.headline)
+            COVERAGE: \(verdict.coverage.line)
 
             """
         }
@@ -151,17 +152,27 @@ class DiagnosticReportGenerator {
             }
         }
 
-        // Recommendations
-        if let analysis = analysis {
-            report += """
-
-            ─── RECOMMENDATIONS ───
-            \(analysis.beginnerExplanation)
-
-            What to do:
-            \(analysis.whatToDoNext)
-
-            """
+        // Findings (what's wrong / evidence / cause / one action category)
+        if let verdict = verdict, !verdict.findings.isEmpty {
+            report += "\n─── FINDINGS ───\n"
+            for f in verdict.findings {
+                report += "\n• \(f.headline) [\(f.severity.word)\(f.byDesign ? ", by design" : "")]\n"
+                for e in f.evidence { report += "    \(e.text)\n" }
+                report += "  Why: \(f.cause)\n"
+                switch f.action {
+                case .userFixable(let steps):
+                    report += "  You can fix this:\n" + steps.enumerated().map { "    \($0.offset + 1). \($0.element)" }.joined(separator: "\n") + "\n"
+                case .fixableElsewhere(let who, let what, let meanwhile):
+                    report += "  Who has to fix it: \(who) — \(what)\n"
+                    if !meanwhile.isEmpty { report += "  Meanwhile: " + meanwhile.joined(separator: "; ") + "\n" }
+                case .notFixable(let why, let expect, let workarounds):
+                    report += "  Not fixable right now: \(why)\n  What to expect: \(expect)\n"
+                    if !workarounds.isEmpty { report += "  Workarounds: " + workarounds.joined(separator: "; ") + "\n" }
+                case .none:
+                    break
+                }
+            }
+            report += "\n"
         }
 
         // Smart Recommendations
@@ -219,16 +230,6 @@ class DiagnosticReportGenerator {
     }
 
     // MARK: - Helpers
-
-    private func severityLabel(_ severity: RootCauseAnalyzer.Analysis.Severity) -> String {
-        switch severity {
-        case .none: return "No Issues"
-        case .minor: return "Minor"
-        case .moderate: return "Moderate"
-        case .severe: return "Severe"
-        case .critical: return "Critical"
-        }
-    }
 
     private func calculateVPNOverhead(networkStatus: NetworkStatus) -> Double? {
         guard let externalLatency = networkStatus.internet.latencyToExternal,

@@ -7,6 +7,13 @@
 //  FIXES: "Router Unreachable" vs "359ms green checkmark" contradiction
 //  FIXES: "WiFi disconnected" when WiFi is connected
 //
+//
+//  DEPRECATED (Diagnosis v2, 2026-09-20): no longer consulted by Home or the
+//  Diagnose tab. All verdicts come from VerdictComposer over VerdictInputs.
+//  Kept for reference until the post-trip cleanup deletes it. Do not add
+//  callers — its `external − 30` VPN-overhead estimate violates the accuracy
+//  principle and its score/root-cause priority disagrees with the verdict.
+//
 
 import Foundation
 import SwiftUI

@@ -91,6 +91,12 @@ final class MeasurementValidityTracker: ObservableObject {
         hardFailure(external)
     }
 
+    // Diagnosis v2: raw streaks for VerdictInputs (the composer applies its
+    // own 2-in-a-row rule, so a single miss stays coverage, not diagnosis).
+    var dnsConsecutiveFailures: Int { dns.consecutiveFailures }
+    var gatewayConsecutiveFailures: Int { gateway.consecutiveFailures }
+    var externalConsecutiveFailures: Int { external.consecutiveFailures }
+
     private func hardFailure(_ state: ProbeState) -> Bool {
         guard state.consecutiveFailures >= failureThreshold else { return false }
         // If we successfully measured within the window, don't alarm.

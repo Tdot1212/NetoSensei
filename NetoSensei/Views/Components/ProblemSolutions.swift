@@ -4,6 +4,11 @@
 //
 //  Actionable solutions for common network problems
 //
+//
+//  DEPRECATED (Diagnosis v2, 2026-09-20): Home renders FindingsCard from the
+//  verdict instead. The "VPN adds ~40%" text below was a fixed multiplier, not
+//  a measurement. Kept for reference until the post-trip cleanup deletes it.
+//
 
 import SwiftUI
 
