@@ -566,7 +566,7 @@ class NetworkMonitorService: ObservableObject {
         // China, so when in-China-without-VPN we prefer domestic targets for both
         // the network-layer probe and the HTTP reachability ping.
         let preferDomestic = isInChina && !vpnActive
-        let pingHost: String = preferDomestic ? "www.baidu.com" : "apple.com"
+        let pingHost = Self.externalPingHost(preferDomestic: preferDomestic)
 
         // PRIMARY latency: network-layer TCP-handshake RTT (no HTTP/TLS/DNS),
         // measured by NetworkLatencyProbe. This is the dashboard "Latency".
@@ -632,6 +632,25 @@ class NetworkMonitorService: ObservableObject {
     /// gateway is estimable (e.g. cellular).
     /// Phase 3: promoted from private to internal so SpeedTestEngine reuses the
     /// same honest gateway reference for its ping-interception check.
+    // MARK: - China-aware external target (single source of the rule)
+
+    /// The ONE rule for the external reachability ping host. Cloudflare /
+    /// Google / Quad9 are throttled or blocked in mainland China without a
+    /// VPN, so in-China-without-VPN prefers a domestic target. Used by
+    /// getInternet() and the Quick Check's external test (Commit 6) so both
+    /// judge the same path; SpeedTestEngine applies the same preferDomestic
+    /// rule to NetworkLatencyProbe's target list.
+    nonisolated static func externalPingHost(preferDomestic: Bool) -> String {
+        preferDomestic ? "www.baidu.com" : "apple.com"
+    }
+
+    /// `isLikelyInChina && !isVPNActive` from the VPN detector — the condition
+    /// getInternet() evaluates before choosing the external target.
+    static func preferDomesticTargets() -> Bool {
+        let r = SmartVPNDetector.shared.detectionResult
+        return (r?.isLikelyInChina ?? false) && !(r?.isVPNActive ?? false)
+    }
+
     nonisolated func measureGatewayReferenceRTT() async -> Double? {
         guard let gateway = estimateGateway() else { return nil }
         var samples: [Double] = []

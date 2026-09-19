@@ -375,28 +375,35 @@ class DiagnosticViewModel: ObservableObject {
         )
     }
 
+    /// Commit 6: the target follows the SAME China-aware rule as
+    /// NetworkMonitorService.getInternet() (1.1.1.1 is throttled/blocked in
+    /// mainland China without a VPN, which read as "no internet" next to a
+    /// passing web check on the real device), and a failed probe carries nil
+    /// latency — never 0.
     private func testExternal() async -> DiagnosticTest {
         debugLog("🔍 testExternal() started")
 
-        let (success, latency) = await networkMonitor.pingHost("1.1.1.1", timeout: 2.0)
-        let latencyMs = latency ?? 0
+        let preferDomestic = await MainActor.run { NetworkMonitorService.preferDomesticTargets() }
+        let host = NetworkMonitorService.externalPingHost(preferDomestic: preferDomestic)
+        let (success, latency) = await networkMonitor.pingHost(host, timeout: 2.0)
+        let measured = success ? LatencyValidation.normalize(latency) : nil
 
-        debugLog("🔍 testExternal() - success: \(success), latency: \(latencyMs)")
+        debugLog("🔍 testExternal() - target: \(host)\(preferDomestic ? " (domestic, in China without VPN)" : ""), success: \(success), latency: \(measured.map { String(Int($0)) } ?? "nil")")
 
         if !success {
             return DiagnosticTest(
                 name: "External Connectivity",
                 result: .fail,
-                latency: latencyMs,
-                details: "Cannot reach internet - ISP problem or firewall blocking",
+                latency: nil,
+                details: "\(host) didn't answer within 2 s — no internet, or this network blocks it",
                 timestamp: Date()
             )
         } else {
             return DiagnosticTest(
                 name: "External Connectivity",
                 result: .pass,
-                latency: latencyMs,
-                details: "Internet reachable",
+                latency: measured,
+                details: "Internet reachable (\(host))",
                 timestamp: Date()
             )
         }
@@ -409,13 +416,15 @@ class DiagnosticViewModel: ObservableObject {
         let success = await safeDNSLookup(hostname: "www.apple.com", timeout: 2.0)
         let latency = Date().timeIntervalSince(start) * 1000
 
-        debugLog("🔍 testDNS() - success: \(success), latency: \(latency)")
+        debugLog("🔍 testDNS() - success: \(success), latency: \(success ? String(format: "%.1f", latency) : "nil")")
 
         if !success {
+            // Commit 6: the elapsed time of a FAILED lookup is the timeout, not a
+            // resolution time — it must not be stored as latency.
             return DiagnosticTest(
                 name: "DNS Resolution",
                 result: .fail,
-                latency: latency,
+                latency: nil,
                 details: "DNS lookup failed - DNS servers not responding",
                 timestamp: Date()
             )

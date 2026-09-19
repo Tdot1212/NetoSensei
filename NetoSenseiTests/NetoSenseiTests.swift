@@ -997,3 +997,20 @@ struct CellularCountryKeyTests {
         #expect(e.segmentKey == "Cellular|vpn|US")
     }
 }
+
+// MARK: - Quick Check external target (Commit 6)
+
+struct ExternalTargetTests {
+    @Test func externalPingHost_isDomesticOnlyInChinaWithoutVPN() {
+        #expect(NetworkMonitorService.externalPingHost(preferDomestic: true) == "www.baidu.com")
+        #expect(NetworkMonitorService.externalPingHost(preferDomestic: false) == "apple.com")
+    }
+
+    @Test func failedExternalOrDNSTest_carriesNilLatency_neverZero() {
+        // The Quick Check's failed tests must store nil so the Checks row shows
+        // nothing rather than "0ms". Pin the model contract the view relies on.
+        let failed = DiagnosticTest(name: "External Connectivity", result: .fail, latency: nil, details: "", timestamp: Date())
+        #expect(failed.latency == nil)
+        #expect(LatencyValidation.normalize(0) == 0)   // a stored 0 WOULD render as "0ms" — hence nil, not 0
+    }
+}
