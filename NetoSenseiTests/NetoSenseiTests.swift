@@ -499,3 +499,178 @@ struct DefaultRouteResolverTests {
         // No LAN default route (e.g. a host with only a tunnel) is a valid nil, not a guess.
     }
 }
+
+// MARK: - Verdict composer (Diagnosis v2, Commit 2)
+//
+// Pins the composer rules from the design (§B): a failed check is never a
+// pass; the score is nil below the coverage floor; state derives from findings
+// so the number and the word cannot disagree; not-applicable is excluded from
+// counts; nothing is estimated (VPN overhead only when both delays ran).
+
+struct VerdictComposerTests {
+
+    static let wifiDirect = VerdictContext(connectionType: "WiFi", vpn: .off)
+    static let wifiVPN = VerdictContext(connectionType: "WiFi", vpn: .on(authoritative: true, exitCountry: "US"))
+    static let cellular = VerdictContext(connectionType: "Cellular", vpn: .off)
+
+    // ---- Vocabulary edges are pinned (§D) ----
+
+    @Test func bands_edgesArePinned() {
+        #expect(MetricBands.score(80) == .excellent && MetricBands.score(79) == .good)
+        #expect(MetricBands.score(60) == .good && MetricBands.score(40) == .fair && MetricBands.score(20) == .poor && MetricBands.score(19) == .critical)
+        #expect(MetricBands.gatewayDelay(ms: 9.9) == .excellent && MetricBands.gatewayDelay(ms: 100) == .critical)
+        #expect(MetricBands.internetDelay(ms: 300, viaVPN: false) == .critical)
+        #expect(MetricBands.internetDelay(ms: 300, viaVPN: true) == .fair)     // a working tunnel is not "critical"
+        #expect(MetricBands.dnsDelay(ms: 299) == .poor && MetricBands.dnsDelay(ms: 300) == .critical)
+        #expect(MetricBands.packetLoss(percent: 0.4) == .excellent && MetricBands.packetLoss(percent: 10) == .critical)
+        #expect(MetricBands.downloadSpeed(mbps: 50) == .excellent && MetricBands.downloadSpeed(mbps: 4.9) == .critical)
+        #expect(Band.excellent.word == "Excellent" && Band.critical.word == "Critical")
+    }
+
+    // ---- B1: a failed check is never a pass ----
+
+    @Test func singleFailure_isCoverageNotDiagnosis() {
+        let v = VerdictComposer.compose(records: [
+            .ran(.gatewayLatency, 4, unit: "ms"),
+            .ran(.externalLatency, 20, unit: "ms"),
+            .failed(.dnsResolve, .timeout, streak: 1)
+        ], context: Self.wifiDirect)
+        #expect(v.score?.value == 100)                                   // no penalty for one timeout
+        #expect(!v.findings.contains { $0.kind == .dnsFailing })          // not a diagnosis either
+        #expect(v.coverage.line.contains("2 of 3 checks completed"))
+        #expect(v.coverage.line.contains("address lookup timed out"))
+        #expect(v.state == .working)
+        #expect(v.headline == "Working normally in the checks that completed")  // never "all checks passed"
+    }
+
+    @Test func repeatedFailure_becomesAFinding_neverAPass() {
+        let v = VerdictComposer.compose(records: [
+            .ran(.gatewayLatency, 4, unit: "ms"),
+            .ran(.externalLatency, 20, unit: "ms"),
+            .failed(.dnsResolve, .timeout, streak: 2)
+        ], context: Self.wifiDirect)
+        #expect(v.score?.value == 80)
+        let f = v.findings.first { $0.kind == .dnsFailing }
+        #expect(f != nil && f?.severity == .critical)
+        #expect(v.state == .broken)
+        if case .userFixable(let steps) = f?.action { #expect(!steps.isEmpty) } else { Issue.record("DNS failure must be user-fixable with steps") }
+    }
+
+    // ---- B2: score is nil below the coverage floor ----
+
+    @Test func scoreIsNil_whenInternetDelayNeverRan() {
+        let v = VerdictComposer.compose(records: [
+            .ran(.gatewayLatency, 4, unit: "ms"),
+            .failed(.externalLatency, .timeout, streak: 1)
+        ], context: Self.wifiDirect)
+        #expect(v.score == nil)
+        #expect(v.scoreText == "—")
+        #expect(v.state == .unknown)
+        #expect(v.headline == "Not enough checks completed to judge this connection")
+    }
+
+    @Test func notApplicableGateway_satisfiesTheFloor_andIsExcludedFromCounts() {
+        let v = VerdictComposer.compose(records: [
+            .notApplicable(.gatewayLatency, "no router on cellular"),
+            .ran(.externalLatency, 45, unit: "ms"),
+            .notApplicable(.vpnState, "no VPN in use")
+        ], context: Self.cellular)
+        #expect(v.score != nil)
+        #expect(v.coverage.attempted.count == 1)
+        #expect(v.coverage.line.hasPrefix("1 check completed"))
+        #expect(v.coverage.line.contains("not applicable — router delay: no router on cellular"))
+        #expect(v.state == .working)
+    }
+
+    @Test func noInternet_isBroken_withNoNumber() {
+        let v = VerdictComposer.compose(records: [
+            .ran(.gatewayLatency, 5, unit: "ms"),
+            .failed(.externalLatency, .timeout, streak: 2),
+            .failed(.httpReach, .timeout, streak: 2)
+        ], context: Self.wifiDirect)
+        #expect(v.score == nil)
+        #expect(v.state == .broken)
+        #expect(v.primary?.kind == .noInternet)
+        #expect(v.headline == "No internet connection")
+    }
+
+    // ---- B3: state derives from findings, never from arithmetic ----
+
+    @Test func state_followsFindings_notTheNumber() {
+        func f(_ sev: Band, byDesign: Bool = false) -> Finding {
+            Finding(kind: .internetSlow, severity: sev, confidence: Confidence(level: .high, reason: ""),
+                    headline: "", evidence: [], cause: "", action: .none, basedOn: [], byDesign: byDesign)
+        }
+        let cov = Coverage(records: [])
+        let excellent = Score(value: 90, band: .excellent, basedOn: [])
+        let fair = Score(value: 55, band: .fair, basedOn: [])
+        #expect(VerdictComposer.deriveState(findings: [f(.poor)], score: excellent, coverage: cov) == .degraded)  // 90 + a poor finding = degraded
+        #expect(VerdictComposer.deriveState(findings: [], score: fair, coverage: cov) == .degraded)              // fair number, no finding = still degraded
+        #expect(VerdictComposer.deriveState(findings: [f(.critical)], score: excellent, coverage: cov) == .broken)
+        #expect(VerdictComposer.deriveState(findings: [], score: nil, coverage: cov) == .unknown)
+        #expect(VerdictComposer.deriveState(findings: [], score: excellent, coverage: cov) == .working)
+        // By-design findings (roaming backhaul, proxy interception) never make the network "broken".
+        #expect(VerdictComposer.deriveState(findings: [f(.critical, byDesign: true)], score: excellent, coverage: cov) == .degraded)
+    }
+
+    @Test func healthyNetwork_isWorking_withNoFindings() {
+        let v = VerdictComposer.compose(records: [
+            .ran(.gatewayLatency, 4, unit: "ms"), .ran(.externalLatency, 18, unit: "ms"),
+            .ran(.dnsLatency, 12, unit: "ms"), .ran(.dnsResolve, 1, unit: ""), .ran(.httpReach, 1, unit: "")
+        ], context: Self.wifiDirect)
+        #expect(v.score?.value == 100 && v.score?.band == .excellent)
+        #expect(v.findings.isEmpty && v.primary == nil)
+        #expect(v.state == .working)
+        #expect(v.headline == "Your connection is working normally")
+        #expect(v.coverage.line == "All 5 checks completed")
+    }
+
+    @Test func slowInternet_direct_isADegradedFindingWithEvidenceCauseAndAction() {
+        let v = VerdictComposer.compose(records: [
+            .ran(.gatewayLatency, 4, unit: "ms"), .ran(.externalLatency, 220, unit: "ms")
+        ], context: Self.wifiDirect)
+        #expect(v.state == .degraded)
+        let f = v.primary
+        #expect(f?.kind == .internetSlow && f?.severity == .poor)
+        #expect(f?.evidence.first?.text.hasPrefix("Internet delay: 220 ms (poor)") == true)
+        #expect(f?.cause.isEmpty == false)
+        #expect(f?.action != .none)
+        // Headline rule: no jargon tokens.
+        for banned in ["latency", "jitter", "DNS", "gateway", "packet", "RTT", "ms", "ISP"] {
+            #expect(!(f?.headline.contains(banned) ?? false), "headline contains jargon: \(banned)")
+        }
+    }
+
+    // ---- B5: nothing is estimated ----
+
+    @Test func vpnOverhead_isOnlyChargedWhenBothDelaysRan() {
+        // Gateway not applicable (hidden by VPN): no `ext − 30` guess, no overhead term.
+        let noGateway = VerdictComposer.compose(records: [
+            .notApplicable(.gatewayLatency, "hidden by VPN"), .ran(.externalLatency, 400, unit: "ms")
+        ], context: Self.wifiVPN)
+        #expect(noGateway.score?.value == 82)   // 100 − 18 (VPN scale, > 250) and nothing else
+        // Gateway ran: overhead 396 ms is measured and charged once.
+        let withGateway = VerdictComposer.compose(records: [
+            .ran(.gatewayLatency, 4, unit: "ms"), .ran(.externalLatency, 400, unit: "ms")
+        ], context: Self.wifiVPN)
+        #expect(withGateway.score?.value == 72) // 100 − 18 − 10
+    }
+
+    @Test func viaVPN_400ms_isFairNotCritical() {
+        let v = VerdictComposer.compose(records: [
+            .notApplicable(.gatewayLatency, "hidden by VPN"), .ran(.externalLatency, 380, unit: "ms")
+        ], context: Self.wifiVPN)
+        // On the direct scale 380 ms would be "critical"; via VPN it is fair → no finding, still working.
+        #expect(!v.findings.contains { $0.kind == .internetSlow })
+        #expect(v.state == .working)
+    }
+
+    @Test func coverageLine_neverClaimsUnrunChecks() {
+        let cov = Coverage(records: [
+            .ran(.externalLatency, 30, unit: "ms"),
+            .failed(.dnsHijack, .timeout),
+            .notRun(.vpnLeak, "Deep Scan only")
+        ])
+        #expect(cov.line == "1 of 2 checks completed · 1 couldn't run — DNS hijack test timed out")
+    }
+}
