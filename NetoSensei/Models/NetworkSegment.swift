@@ -37,17 +37,22 @@ enum NetworkSegment {
     ///   location permission or the simulator).
     /// - Cellular: SSID does not exist and the carrier-assigned /24 changes
     ///   per session, so it is NOT a network identity. The key is
-    ///   type + VPN state only. Known gap: two different SIMs on cellular
-    ///   are indistinguishable (documented for the next phase).
+    ///   type + VPN state + the PUBLIC IP COUNTRY (Diagnosis v2, design §G):
+    ///   China cellular and a US roaming SIM must not be compared as a trend.
+    ///   Honest limits: with a VPN on the country is the VPN exit, not the
+    ///   SIM; a home-routed roaming SIM keeps its home country abroad — which
+    ///   is correct, it IS the same backhaul path. Carrier name is not used
+    ///   (CoreTelephony returns "--" on iOS 16+).
     ///
-    /// Records that predate the identity fields have nil SSID/subnet and
-    /// therefore form their own coarse segment ("WiFi|direct|-|-"). They are
-    /// never merged with identified records — we do not invent identity for
-    /// old data; they simply age out of the comparison window.
-    static func key(connectionType: String, vpnActive: Bool, ssid: String?, subnet: String?) -> String {
+    /// Records that predate the identity fields have nil SSID/subnet/country
+    /// and therefore form their own coarse segment ("WiFi|direct|-|-",
+    /// "Cellular|direct|-"). They are never merged with identified records —
+    /// we do not invent identity for old data; they simply age out.
+    static func key(connectionType: String, vpnActive: Bool, ssid: String?, subnet: String?, country: String? = nil) -> String {
         let vpn = vpnActive ? "vpn" : "direct"
         if isCellular(connectionType) {
-            return "\(connectionType)|\(vpn)|-|-"
+            let c = (country?.isEmpty == false) ? country!.uppercased() : "-"
+            return "\(connectionType)|\(vpn)|\(c)"
         }
         let s = (ssid?.isEmpty == false) ? ssid! : "-"
         let n = (subnet?.isEmpty == false) ? subnet! : "-"

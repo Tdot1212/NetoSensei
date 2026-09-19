@@ -139,19 +139,20 @@ struct DiagnosticHistoryEntry: Codable, Identifiable {
     var vpnActive: Bool? = nil
     var networkSSID: String? = nil
     var localSubnet: String? = nil
+    var publicCountry: String? = nil   // Diagnosis v2 §G: cellular key only
 
     /// nil for legacy entries with no identity — they never merge with
     /// identified entries.
     var segmentKey: String? {
         guard let type = connectionType, let vpn = vpnActive else { return nil }
         return NetworkSegment.key(connectionType: type, vpnActive: vpn,
-                                  ssid: networkSSID, subnet: localSubnet)
+                                  ssid: networkSSID, subnet: localSubnet, country: publicCountry)
     }
 
     /// Field-wise initializer (tests / synthetic entries).
     init(timestamp: Date, summary: String, issueCount: Int, primaryIssueCategory: String,
          overallStatus: String, connectionType: String? = nil, vpnActive: Bool? = nil,
-         networkSSID: String? = nil, localSubnet: String? = nil) {
+         networkSSID: String? = nil, localSubnet: String? = nil, publicCountry: String? = nil) {
         self.id = UUID()
         self.timestamp = timestamp
         self.summary = summary
@@ -162,9 +163,12 @@ struct DiagnosticHistoryEntry: Codable, Identifiable {
         self.vpnActive = vpnActive
         self.networkSSID = networkSSID
         self.localSubnet = localSubnet
+        self.publicCountry = publicCountry
     }
 
-    init(from result: DiagnosticResult) {
+    /// - Parameter publicCountry: GeoIP country code at the time of the run
+    ///   (the caller reads it on the MainActor; NetworkStatus carries none).
+    init(from result: DiagnosticResult, publicCountry: String? = nil) {
         self.id = UUID()
         self.timestamp = result.timestamp
         self.summary = result.summary
@@ -176,6 +180,7 @@ struct DiagnosticHistoryEntry: Codable, Identifiable {
         self.vpnActive = snap.vpn.isActive
         self.networkSSID = snap.wifi.ssid
         self.localSubnet = NetworkSegment.subnet(of: snap.localIP)
+        self.publicCountry = publicCountry
     }
 }
 

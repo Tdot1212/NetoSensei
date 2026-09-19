@@ -37,6 +37,7 @@ enum VerdictInputs {
                         streaks: FailureStreaks,
                         recentSpeedTest: SpeedTestResult? = nil,
                         vpnOn vpnOverride: Bool? = nil,
+                        publicCountry: String? = nil,
                         now: Date = Date()) -> [CheckRecord] {
         var r: [CheckRecord] = []
         let cellularOnly = status.connectionType == .cellular && !status.wifi.isConnected
@@ -96,7 +97,8 @@ enum VerdictInputs {
         let segment = NetworkSegment.key(connectionType: status.connectionType?.displayName ?? "Unknown",
                                          vpnActive: vpnOn,
                                          ssid: status.wifi.ssid,
-                                         subnet: NetworkSegment.subnet(of: status.localIP))
+                                         subnet: NetworkSegment.subnet(of: status.localIP),
+                                         country: publicCountry)
         if let speed = recentSpeedTest,
            speed.segmentKey == segment,
            now.timeIntervalSince(speed.timestamp) < speedTestFreshness {
@@ -121,8 +123,9 @@ enum VerdictInputs {
                         streaks: FailureStreaks,
                         recentSpeedTest: SpeedTestResult? = nil,
                         vpnOn: Bool? = nil,
+                        publicCountry: String? = nil,
                         now: Date = Date()) -> [CheckRecord] {
-        var base = records(from: status, streaks: streaks, recentSpeedTest: recentSpeedTest, vpnOn: vpnOn, now: now)
+        var base = records(from: status, streaks: streaks, recentSpeedTest: recentSpeedTest, vpnOn: vpnOn, publicCountry: publicCountry, now: now)
         func replace(_ id: CheckID, with rec: CheckRecord) {
             base.removeAll { $0.id == id }
             base.append(rec)
@@ -214,7 +217,8 @@ enum VerdictInputs {
         let type = status.connectionType?.displayName ?? "Unknown"
         return VerdictContext(
             segmentKey: NetworkSegment.key(connectionType: type, vpnActive: vpnOn,
-                                           ssid: status.wifi.ssid, subnet: NetworkSegment.subnet(of: status.localIP)),
+                                           ssid: status.wifi.ssid, subnet: NetworkSegment.subnet(of: status.localIP),
+                                           country: geoCountryCode ?? vpnResult?.publicCountry),
             connectionType: type,
             vpn: vpn,
             latencyIntercepted: status.internet.latencyIntercepted,
@@ -252,7 +256,7 @@ enum VerdictInputs {
         let ctx = currentContext(status: status)
         let recs = records(from: status, streaks: currentStreaks(),
                            recentSpeedTest: HistoryManager.shared.speedTestHistory.first,
-                           vpnOn: ctx.vpn.isOn)
+                           vpnOn: ctx.vpn.isOn, publicCountry: ctx.publicCountry)
         return VerdictComposer.compose(records: recs, context: ctx)
     }
 
@@ -262,7 +266,7 @@ enum VerdictInputs {
         let ctx = currentContext(status: status)
         let recs = records(fromQuickCheck: result, status: status, streaks: currentStreaks(),
                            recentSpeedTest: HistoryManager.shared.speedTestHistory.first,
-                           vpnOn: ctx.vpn.isOn)
+                           vpnOn: ctx.vpn.isOn, publicCountry: ctx.publicCountry)
         return VerdictComposer.compose(records: recs, context: ctx)
     }
 }

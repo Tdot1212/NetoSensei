@@ -208,7 +208,7 @@ struct TrendsHonestyTests {
                 == "WiFi|direct|HomeNet|192.168.1")
         // Cellular: carrier-assigned /24 is not an identity; SSID doesn't exist.
         #expect(NetworkSegment.key(connectionType: "Cellular", vpnActive: true, ssid: nil, subnet: "10.32.7")
-                == "Cellular|vpn|-|-")
+                == "Cellular|vpn|-")   // Commit 5: type|vpn|country, "-" when the country is unknown
         // Legacy records (no identity fields) get the coarse key, never a guess.
         #expect(NetworkSegment.key(connectionType: "WiFi", vpnActive: false, ssid: nil, subnet: nil)
                 == "WiFi|direct|-|-")
@@ -394,7 +394,7 @@ struct TrendsHonestyTests {
         #expect(records[0].latencyIntercepted == false)
         #expect(records[0].networkSSID == nil && records[0].localSubnet == nil)
         #expect(records[0].ping == 999)          // raw sentinel survives decode…
-        #expect(records[0].segmentKey == "Cellular|vpn|-|-")
+        #expect(records[0].segmentKey == "Cellular|vpn|-")
     }
 
     @Test func migration_stripsSentinels_recomputesQuality_leavesHonestValues() throws {
@@ -947,5 +947,53 @@ struct TrendsOrderingTests {
         #expect(ordered.map(\.metric) == ["download", "latency", TrendAnalyzer.networkChangedMetric])
         // The card shows prefix(2): the neutral line is the one left out.
         #expect(!ordered.prefix(2).contains { $0.metric == TrendAnalyzer.networkChangedMetric })
+    }
+}
+
+// MARK: - Cellular segment key: country (Diagnosis v2 §G, Commit 5)
+
+struct CellularCountryKeyTests {
+
+    @Test func cellularKey_includesCountry_wifiKeyDoesNot() {
+        #expect(NetworkSegment.key(connectionType: "Cellular", vpnActive: false, ssid: nil, subnet: "10.32.7", country: "cn") == "Cellular|direct|CN")
+        #expect(NetworkSegment.key(connectionType: "Cellular", vpnActive: false, ssid: nil, subnet: nil, country: "US") == "Cellular|direct|US")
+        #expect(NetworkSegment.key(connectionType: "Cellular", vpnActive: false, ssid: nil, subnet: nil, country: nil) == "Cellular|direct|-")   // legacy: coarse, never guessed
+        #expect(NetworkSegment.key(connectionType: "WiFi", vpnActive: false, ssid: "HomeNet", subnet: "192.168.1", country: "US") == "WiFi|direct|HomeNet|192.168.1")
+    }
+
+    @Test func chinaCellularAndUSRoamingSIM_areNeverComparedAsATrend() {
+        // 3 fast tests on China cellular, then 3 slow tests on a US SIM (newest).
+        // Phase 4 alone keyed both as "Cellular|direct" → "Down 93%". Now: two segments, no delta.
+        func speed(_ i: Int, down: Double, country: String) -> SpeedTestResult {
+            var r = SpeedTestResult(downloadSpeed: down, uploadSpeed: down / 4, ping: 40, jitter: 3, packetLoss: 0, testDuration: 0,
+                                    connectionType: "Cellular", vpnActive: false, publicCountry: country)
+            r.timestamp = TrendsHonestyTests.base.addingTimeInterval(Double(i) * 600)
+            return r
+        }
+        let h = [speed(0, down: 120, country: "CN"), speed(1, down: 118, country: "CN"), speed(2, down: 122, country: "CN"),
+                 speed(3, down: 8, country: "US"), speed(4, down: 7, country: "US"), speed(5, down: 9, country: "US")]
+        let insights = TrendAnalyzer.analyzeSpeedTrends(history: h)
+        #expect(!insights.contains { $0.metric == "download" })
+        #expect(h[5].segmentKey != h[0].segmentKey)
+        // Same SIM abroad (home-routed roaming keeps CN): same backhaul path → still one segment.
+        #expect(speed(9, down: 50, country: "cn").segmentKey == h[0].segmentKey)
+    }
+
+    @Test func legacyCellularRecords_withoutCountry_doNotMergeWithKeyedOnes() throws {
+        let json = """
+        [{"id":"66666666-6666-6666-6666-666666666666","timestamp":700000000,"downloadSpeed":90,"uploadSpeed":20,
+          "testDuration":0,"connectionType":"Cellular","vpnActive":false,"quality":"Good"}]
+        """.data(using: .utf8)!
+        let legacy = try JSONDecoder().decode([SpeedTestResult].self, from: json)[0]
+        #expect(legacy.publicCountry == nil && legacy.segmentKey == "Cellular|direct|-")
+        let keyed = SpeedTestResult(downloadSpeed: 90, uploadSpeed: 20, ping: nil, jitter: nil, packetLoss: nil, testDuration: 0,
+                                    connectionType: "Cellular", vpnActive: false, publicCountry: "CN")
+        #expect(keyed.segmentKey != legacy.segmentKey)
+    }
+
+    @Test func diagnosticEntry_carriesCountry_inCellularKey() {
+        let e = DiagnosticHistoryEntry(timestamp: Date(), summary: "", issueCount: 0, primaryIssueCategory: "None", overallStatus: "green",
+                                       connectionType: "Cellular", vpnActive: true, networkSSID: nil, localSubnet: nil, publicCountry: "US")
+        #expect(e.segmentKey == "Cellular|vpn|US")
     }
 }

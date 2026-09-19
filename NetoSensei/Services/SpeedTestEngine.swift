@@ -48,6 +48,10 @@ class SpeedTestEngine: ObservableObject {
         // as DashboardViewModel.networkIdentityKey). Observed, never guessed.
         let networkSSID = status.wifi.ssid
         let localSubnet = NetworkSegment.subnet(of: status.localIP)
+        // Diagnosis v2 §G: public-IP country for the cellular segment key. GeoIP
+        // first, the VPN detector's IP lookup as fallback; nil if neither has one.
+        let geo = GeoIPService.shared.currentGeoIP
+        let publicCountry = (geo.publicIP.isEmpty ? nil : geo.countryCode) ?? SmartVPNDetector.shared.detectionResult?.publicCountry
         let isInChina = SmartVPNDetector.shared.detectionResult?.isLikelyInChina ?? false
 
         // Phase 1: Finding Server (10%)
@@ -106,7 +110,8 @@ class SpeedTestEngine: ObservableObject {
             ipAddress: ipAddress,
             latencyIntercepted: pingIntercepted,
             networkSSID: networkSSID,
-            localSubnet: localSubnet
+            localSubnet: localSubnet,
+            publicCountry: publicCountry
         )
 
         self.isRunning = false

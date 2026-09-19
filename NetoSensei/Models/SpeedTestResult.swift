@@ -47,6 +47,7 @@ struct SpeedTestResult: Codable, Identifiable {
     // decode with nil and are segmented at the coarsest key they support.
     var networkSSID: String? = nil   // Wi-Fi SSID at test time (nil if unreadable/cellular)
     var localSubnet: String? = nil   // /24 prefix of the local IPv4 address
+    var publicCountry: String? = nil // GeoIP country code at test time (Diagnosis v2 §G; cellular key only)
 
     // Performance rating
     var quality: QualityRating
@@ -54,7 +55,7 @@ struct SpeedTestResult: Codable, Identifiable {
     /// Segment this record belongs to for trend comparison. See NetworkSegment.
     var segmentKey: String {
         NetworkSegment.key(connectionType: connectionType, vpnActive: vpnActive,
-                           ssid: networkSSID, subnet: localSubnet)
+                           ssid: networkSSID, subnet: localSubnet, country: publicCountry)
     }
 
     // MARK: - Codable (backward compatible)
@@ -71,7 +72,7 @@ struct SpeedTestResult: Codable, Identifiable {
         case ping, jitter, packetLoss, latencyIntercepted
         case serverUsed, serverLocation, testDuration
         case connectionType, vpnActive, ipAddress
-        case networkSSID, localSubnet
+        case networkSSID, localSubnet, publicCountry
         case quality
     }
 
@@ -95,6 +96,7 @@ struct SpeedTestResult: Codable, Identifiable {
         ipAddress = try c.decodeIfPresent(String.self, forKey: .ipAddress)
         networkSSID = try c.decodeIfPresent(String.self, forKey: .networkSSID)
         localSubnet = try c.decodeIfPresent(String.self, forKey: .localSubnet)
+        publicCountry = try c.decodeIfPresent(String.self, forKey: .publicCountry)
         quality = try c.decode(QualityRating.self, forKey: .quality)
     }
 
@@ -160,11 +162,12 @@ struct SpeedTestResult: Codable, Identifiable {
     init(downloadSpeed: Double, uploadSpeed: Double, ping: Double?, jitter: Double?, packetLoss: Double?,
          serverUsed: String? = nil, serverLocation: String? = nil, testDuration: TimeInterval,
          connectionType: String, vpnActive: Bool, ipAddress: String? = nil, latencyIntercepted: Bool = false,
-         networkSSID: String? = nil, localSubnet: String? = nil) {
+         networkSSID: String? = nil, localSubnet: String? = nil, publicCountry: String? = nil) {
         self.id = UUID()
         self.timestamp = Date()
         self.networkSSID = networkSSID
         self.localSubnet = localSubnet
+        self.publicCountry = publicCountry
         self.downloadSpeed = downloadSpeed
         self.uploadSpeed = uploadSpeed
         self.ping = ping
