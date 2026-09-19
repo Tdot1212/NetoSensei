@@ -631,10 +631,12 @@ struct VerdictComposerTests {
         ], context: Self.wifiDirect)
         #expect(v.state == .degraded)
         let f = v.primary
-        #expect(f?.kind == .internetSlow && f?.severity == .poor)
-        #expect(f?.evidence.first?.text.hasPrefix("Internet delay: 220 ms (poor)") == true)
+        // Router fine + VPN off + slow internet is the E5 provider pattern (commit 3);
+        // the generic internetSlow finding is the fallback when no pattern claims it.
+        #expect((f?.kind == .ispSlow || f?.kind == .internetSlow) && f?.severity == .poor)
+        #expect(f?.evidence.contains { $0.text.hasPrefix("Internet delay: 220 ms (poor)") } == true)
         #expect(f?.cause.isEmpty == false)
-        #expect(f?.action != .none)
+        #expect(f?.action != Action.none)
         // Headline rule: no jargon tokens.
         for banned in ["latency", "jitter", "DNS", "gateway", "packet", "RTT", "ms", "ISP"] {
             #expect(!(f?.headline.contains(banned) ?? false), "headline contains jargon: \(banned)")
@@ -672,5 +674,187 @@ struct VerdictComposerTests {
             .notRun(.vpnLeak, "Deep Scan only")
         ])
         #expect(cov.line == "1 of 2 checks completed · 1 couldn't run — DNS hijack test timed out")
+    }
+}
+
+// MARK: - Named patterns (Diagnosis v2, Commit 3)
+//
+// Each pattern's detection signature against synthetic check records, plus
+// the §C contract: plain headline, evidence, cause, exactly one action. The
+// cellular pair (tower congestion / roaming backhaul) is mutually exclusive
+// by signature and must be honest that iOS exposes no signal strength.
+
+struct VerdictPatternTests {
+
+    static func oneAction(_ f: Finding?) -> Bool { f != nil }
+    static func isNotFixable(_ f: Finding?) -> Bool { if case .notFixable = f?.action { return true } else { return false } }
+    static func isUserFixable(_ f: Finding?) -> Bool { if case .userFixable(let s) = f?.action { return !s.isEmpty } else { return false } }
+    static func isElsewhere(_ f: Finding?) -> String? { if case .fixableElsewhere(let who, _, _) = f?.action { return who } else { return nil } }
+
+    // ---- E1 tower congestion ----
+
+    @Test func towerCongestion_cellularSlowAndUnsteady_isNotFixable_andHonestAboutSignal() {
+        let ctx = VerdictContext(connectionType: "Cellular", vpn: .off, radioTechnology: "5G")
+        let v = VerdictComposer.compose(records: [
+            .notApplicable(.gatewayLatency, "no router on cellular"),
+            .ran(.externalLatency, 320, unit: "ms"), .ran(.jitter, 85, unit: "ms"),
+            .ran(.throughput, 2.1, unit: "Mbps"), .ran(.packetLoss, 4, unit: "%")
+        ], context: ctx)
+        let f = v.primary
+        #expect(f?.kind == .towerCongestion)
+        #expect(Self.isNotFixable(f))
+        #expect(f?.byDesign == true && v.state == .degraded)                 // never "broken"
+        #expect(f?.confidence.level == .medium)
+        #expect(f?.confidence.reason.contains("does not let apps read cellular signal strength") == true)
+        #expect(f?.evidence.count == 4)
+        if case .notFixable(_, let expect, let workarounds) = f?.action { #expect(!expect.isEmpty && workarounds.count >= 2) }
+        // The generic loss/jitter findings must not double-report the same checks.
+        #expect(!v.findings.contains { $0.kind == .packetLossHigh || $0.kind == .jitterHigh || $0.kind == .internetSlow })
+    }
+
+    @Test func towerCongestion_requiresAJitterReading() {
+        // Slow cellular without a steadiness reading cannot be told from a distant route → generic finding, jitter listed as sharpening.
+        let v = VerdictComposer.compose(records: [
+            .notApplicable(.gatewayLatency, "no router on cellular"), .ran(.externalLatency, 320, unit: "ms")
+        ], context: VerdictContext(connectionType: "Cellular", vpn: .off))
+        #expect(!v.findings.contains { $0.kind == .towerCongestion })
+        #expect(v.primary?.kind == .internetSlow)
+    }
+
+    // ---- E2 roaming SIM backhaul ----
+
+    @Test func roamingSIM_cellularSteadyFarExitCountryMismatch_isNotFixable() {
+        let ctx = VerdictContext(connectionType: "Cellular", vpn: .off, publicCountry: "CN", expectedCountry: "US", publicIPVerified: true)
+        let v = VerdictComposer.compose(records: [
+            .notApplicable(.gatewayLatency, "no router on cellular"),
+            .ran(.externalLatency, 296, unit: "ms"), .ran(.jitter, 8, unit: "ms")
+        ], context: ctx)
+        let f = v.primary
+        #expect(f?.kind == .roamingSIMBackhaul)
+        #expect(Self.isNotFixable(f) && f?.byDesign == true)
+        #expect(f?.confidence.level == .high)
+        #expect(f?.cause.contains("CN") == true && f?.cause.contains("US") == true)
+        if case .notFixable(_, _, let w) = f?.action { #expect(w.contains { $0.contains("eSIM") }) }
+        #expect(!v.findings.contains { $0.kind == .towerCongestion })       // mutually exclusive
+    }
+
+    @Test func roamingSIM_isSuppressed_byVPN_bySameRegion_byUnsteadyDelay() {
+        let base: [CheckRecord] = [.notApplicable(.gatewayLatency, "no router on cellular"), .ran(.externalLatency, 296, unit: "ms"), .ran(.jitter, 8, unit: "ms")]
+        // VPN on: the IP country is the exit, not the SIM.
+        let vpn = VerdictContext(connectionType: "Cellular", vpn: .on(authoritative: true, exitCountry: "US"), publicCountry: "US", expectedCountry: "CN")
+        #expect(!VerdictComposer.compose(records: base, context: vpn).findings.contains { $0.kind == .roamingSIMBackhaul })
+        // HK exit while in CN is the same region group.
+        let hk = VerdictContext(connectionType: "Cellular", vpn: .off, publicCountry: "HK", expectedCountry: "CN")
+        #expect(!VerdictComposer.compose(records: base, context: hk).findings.contains { $0.kind == .roamingSIMBackhaul })
+        // Unsteady delay is E1's territory, not E2's.
+        let unsteady: [CheckRecord] = [.notApplicable(.gatewayLatency, "no router on cellular"), .ran(.externalLatency, 296, unit: "ms"), .ran(.jitter, 90, unit: "ms")]
+        let ctx = VerdictContext(connectionType: "Cellular", vpn: .off, publicCountry: "CN", expectedCountry: "US")
+        let v = VerdictComposer.compose(records: unsteady, context: ctx)
+        #expect(!v.findings.contains { $0.kind == .roamingSIMBackhaul })
+        #expect(v.findings.contains { $0.kind == .towerCongestion })
+    }
+
+    // ---- E3 proxy interception ----
+
+    @Test func proxyInterception_explainsMissingNumbers_byDesign() {
+        let ctx = VerdictContext(connectionType: "WiFi", vpn: .on(authoritative: false, exitCountry: nil), latencyIntercepted: true)
+        let v = VerdictComposer.compose(records: [
+            .ran(.gatewayLatency, 5, unit: "ms"), .failed(.externalLatency, .intercepted)
+        ], context: ctx)
+        let f = v.findings.first { $0.kind == .proxyInterception }
+        #expect(f != nil && f?.byDesign == true && Self.isNotFixable(f))
+        #expect(v.score == nil)                                                // no internet delay measured → no number
+        #expect(v.state != .broken)
+        #expect(v.coverage.line.contains("internet delay was answered by a local VPN/proxy"))
+    }
+
+    // ---- E4 VPN overhead vs E5 ISP vs E6 undetermined ----
+
+    @Test func vpnOverhead_routerFineTunnelSlow_isUserFixable_measuredNeverEstimated() {
+        let ctx = VerdictContext(connectionType: "WiFi", vpn: .on(authoritative: true, exitCountry: "US"))
+        let v = VerdictComposer.compose(records: [.ran(.gatewayLatency, 4, unit: "ms"), .ran(.externalLatency, 335, unit: "ms")], context: ctx)
+        let f = v.primary
+        #expect(f?.kind == .vpnOverhead && Self.isUserFixable(f))
+        #expect(f?.evidence.contains { $0.label == "Added by the VPN" && $0.value == 331 } == true)
+        #expect(f?.cause.contains("in US") == true)
+        #expect(f?.severity == .fair && v.state == .degraded)
+    }
+
+    @Test func ispSlow_routerFineVPNOff_isFixableElsewhere_byTheProvider() {
+        let v = VerdictComposer.compose(records: [.ran(.gatewayLatency, 6, unit: "ms"), .ran(.externalLatency, 240, unit: "ms"), .ran(.throughput, 3.2, unit: "Mbps")],
+                                        context: VerdictContext(connectionType: "WiFi", vpn: .off))
+        let f = v.primary
+        #expect(f?.kind == .ispSlow)
+        #expect(Self.isElsewhere(f) == "Your internet provider")
+        #expect(f?.evidence.count == 3)
+        #expect(!v.findings.contains { $0.kind == .internetSlow })            // pattern claims the check; no generic duplicate
+    }
+
+    @Test func ispSlow_isNotClaimed_whenTheRouterIsAlsoSlow() {
+        // Router 70 ms, internet 240 ms: the local hop is suspect, so the provider is not blamed.
+        let v = VerdictComposer.compose(records: [.ran(.gatewayLatency, 70, unit: "ms"), .ran(.externalLatency, 240, unit: "ms")],
+                                        context: VerdictContext(connectionType: "WiFi", vpn: .off))
+        #expect(!v.findings.contains { $0.kind == .ispSlow })
+        #expect(v.findings.contains { $0.kind == .routerSlow })
+    }
+
+    @Test func vpnOn_routerHidden_cannotAttribute_saysSo() {
+        let ctx = VerdictContext(connectionType: "WiFi", vpn: .on(authoritative: true, exitCountry: "US"))
+        let v = VerdictComposer.compose(records: [.notApplicable(.gatewayLatency, "hidden by VPN"), .ran(.externalLatency, 500, unit: "ms")], context: ctx)
+        let f = v.findings.first { $0.kind == .vpnOrNetworkUndetermined }
+        #expect(f != nil && f?.confidence.level == .low && f?.action == Action.none)
+        #expect(f?.wouldSharpen == [.gatewayLatency])
+        #expect(!v.findings.contains { $0.kind == .vpnOverhead })              // no `ext − 30` guess, ever
+    }
+
+    // ---- E9 captive portal, E10 cross-border, E14 hotspot ----
+
+    @Test func captivePortal_isCriticalAndUserFixable() {
+        let v = VerdictComposer.compose(records: [.ran(.captivePortal, 1, unit: ""), .failed(.externalLatency, .blocked, streak: 2), .ran(.gatewayLatency, 3, unit: "ms")],
+                                        context: VerdictContext(connectionType: "WiFi", vpn: .off))
+        #expect(v.primary?.kind == .captivePortal && Self.isUserFixable(v.primary))
+        #expect(v.state == .broken)
+    }
+
+    @Test func crossBorder_chinaVPNOff_domesticOKOverseasBlocked_isByDesign() {
+        let ctx = VerdictContext(connectionType: "WiFi", vpn: .off, likelyInChina: true)
+        let v = VerdictComposer.compose(records: [.ran(.gatewayLatency, 3, unit: "ms"), .ran(.externalLatency, 18, unit: "ms"),
+                                                  .ran(.domesticReach, 1, unit: ""), .failed(.httpReach, .timeout, streak: 2)], context: ctx)
+        let f = v.findings.first { $0.kind == .crossBorderRestriction }
+        #expect(f != nil && f?.byDesign == true && Self.isNotFixable(f))
+        #expect(!v.findings.contains { $0.kind == .noInternet })              // the web check is explained, not a "no internet"
+        #expect(v.state == .degraded)
+    }
+
+    @Test func hotspot_isInformational() {
+        let v = VerdictComposer.compose(records: [.ran(.gatewayLatency, 30, unit: "ms"), .ran(.externalLatency, 90, unit: "ms")],
+                                        context: VerdictContext(connectionType: "WiFi", vpn: .off, isHotspot: true))
+        let f = v.findings.first { $0.kind == .hotspotShared }
+        #expect(f != nil && f?.action == Action.none && f?.byDesign == true)
+    }
+
+    // ---- Every pattern finding honours the §C contract ----
+
+    @Test func everyPatternFinding_hasPlainHeadline_causeAndExactlyOneAction() {
+        let cases: [([CheckRecord], VerdictContext)] = [
+            ([.notApplicable(.gatewayLatency, "-"), .ran(.externalLatency, 320, unit: "ms"), .ran(.jitter, 85, unit: "ms")], VerdictContext(connectionType: "Cellular", vpn: .off)),
+            ([.notApplicable(.gatewayLatency, "-"), .ran(.externalLatency, 296, unit: "ms"), .ran(.jitter, 8, unit: "ms")], VerdictContext(connectionType: "Cellular", vpn: .off, publicCountry: "CN", expectedCountry: "US")),
+            ([.ran(.gatewayLatency, 5, unit: "ms"), .failed(.externalLatency, .intercepted)], VerdictContext(connectionType: "WiFi", vpn: .on(authoritative: false, exitCountry: nil), latencyIntercepted: true)),
+            ([.ran(.gatewayLatency, 4, unit: "ms"), .ran(.externalLatency, 335, unit: "ms")], VerdictContext(connectionType: "WiFi", vpn: .on(authoritative: true, exitCountry: "US"))),
+            ([.ran(.gatewayLatency, 6, unit: "ms"), .ran(.externalLatency, 240, unit: "ms")], VerdictContext(connectionType: "WiFi", vpn: .off)),
+            ([.ran(.captivePortal, 1, unit: ""), .ran(.gatewayLatency, 3, unit: "ms"), .failed(.externalLatency, .blocked, streak: 2)], VerdictContext(connectionType: "WiFi", vpn: .off)),
+        ]
+        let banned = ["latency", "jitter", "DNS", "gateway", "packet", "RTT", " ms", "ISP", "CGNAT", "MITM", "TUN"]
+        for (records, ctx) in cases {
+            let v = VerdictComposer.compose(records: records, context: ctx)
+            #expect(!v.findings.isEmpty)
+            for f in v.findings {
+                #expect(f.headline.count <= 60, "headline too long: \(f.headline)")
+                for b in banned { #expect(!f.headline.contains(b), "jargon '\(b)' in: \(f.headline)") }
+                #expect(!f.cause.isEmpty)
+                if case .notFixable(let why, let expect, _) = f.action { #expect(!why.isEmpty && !expect.isEmpty) }
+                if case .fixableElsewhere(let who, _, _) = f.action { #expect(!who.isEmpty) }
+            }
+        }
     }
 }

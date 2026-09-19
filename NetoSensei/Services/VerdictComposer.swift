@@ -140,7 +140,10 @@ enum VerdictComposer {
         let real = findings.filter { !$0.byDesign }
         if real.contains(where: { $0.severity == .critical }) { return .broken }
         if score == nil && real.isEmpty && findings.isEmpty { return .unknown }
-        if real.contains(where: { $0.severity <= .poor }) { return .degraded }
+        // Any real finding (fair or worse) means something is not right — a
+        // "fair" VPN-overhead finding with steps to take is still degradation,
+        // even when the number lands in the "good" band.
+        if real.contains(where: { $0.severity <= .fair }) { return .degraded }
         if let s = score, s.band <= .fair { return .degraded }
         if !findings.isEmpty && findings.allSatisfy({ $0.byDesign }) { return .degraded }
         return score == nil ? .unknown : .working
@@ -156,7 +159,7 @@ enum VerdictComposer {
         // No internet: the internet delay failed repeatedly (or the web check did).
         let extFailed = coverage.record(.externalLatency).map { $0.status.didFail && $0.consecutiveFailures >= failureStreakForFinding } ?? false
         let httpFailed = coverage.record(.httpReach).map { $0.status.didFail && $0.consecutiveFailures >= failureStreakForFinding } ?? false
-        if (extFailed || httpFailed) && !explained(.externalLatency) {
+        if (extFailed || httpFailed) && !explained(.externalLatency) && !explained(.httpReach) {
             out.append(Finding(
                 kind: .noInternet, severity: .critical,
                 confidence: Confidence(level: .high, reason: "Repeated probes to the internet got no answer"),

@@ -17,7 +17,7 @@ import Foundation
 enum CheckID: String, Codable, Sendable, CaseIterable {
     // Performance domain
     case gatewayReach, gatewayLatency, externalLatency, dnsResolve, dnsLatency, httpReach,
-         vpnState, throughput, packetLoss, jitter
+         domesticReach, vpnState, throughput, packetLoss, jitter
     // Privacy domain (producers land post-trip; IDs reserved so coverage lines are stable)
     case dnsHijack, vpnLeak, ipv6Leak, captivePortal, certTrust, dnsEncryption, wifiSafety
 
@@ -30,6 +30,7 @@ enum CheckID: String, Codable, Sendable, CaseIterable {
         case .dnsResolve: return "address lookup"
         case .dnsLatency: return "address lookup delay"
         case .httpReach: return "web check"
+        case .domesticReach: return "domestic web check"
         case .vpnState: return "VPN status"
         case .throughput: return "speed test"
         case .packetLoss: return "dropped-data test"
@@ -260,12 +261,14 @@ struct VerdictContext: Codable, Sendable, Equatable {
     let expectedCountry: String?
     let likelyInChina: Bool
     let radioTechnology: String?        // "LTE", "5G", … cellular only; nil when unknown
+    let isHotspot: Bool                 // Wi-Fi that is another phone's tethering
+    let publicIPVerified: Bool          // GeoIP agreed by 2+ sources (SmartVPNDetector.ipVerified)
 
     var isCellular: Bool { connectionType.lowercased().contains("cellular") }
 
     init(segmentKey: String = "", connectionType: String, vpn: VPNContext, latencyIntercepted: Bool = false,
          publicCountry: String? = nil, expectedCountry: String? = nil, likelyInChina: Bool = false,
-         radioTechnology: String? = nil) {
+         radioTechnology: String? = nil, isHotspot: Bool = false, publicIPVerified: Bool = false) {
         self.segmentKey = segmentKey
         self.connectionType = connectionType
         self.vpn = vpn
@@ -274,6 +277,8 @@ struct VerdictContext: Codable, Sendable, Equatable {
         self.expectedCountry = expectedCountry
         self.likelyInChina = likelyInChina
         self.radioTechnology = radioTechnology
+        self.isHotspot = isHotspot
+        self.publicIPVerified = publicIPVerified
     }
 }
 
