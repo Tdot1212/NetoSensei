@@ -468,3 +468,34 @@ struct TrendsHonestyTests {
         #expect(NetworkHistoryEntry.averageLatency(of: []) == nil)
     }
 }
+
+// MARK: - Default route resolver (Diagnosis v2, Commit 1)
+//
+// The simulator shares the host's kernel routing table, so this exercises the
+// real sysctl parser. It asserts structural validity, not a specific address:
+// every parsed route must be a dotted IPv4 gateway on a named interface, and
+// the LAN pick (if any) must be on a physical en* interface — never a tunnel.
+
+struct DefaultRouteResolverTests {
+
+    @Test func parsedRoutes_areWellFormed() {
+        let routes = DefaultRouteResolver.ipv4DefaultRoutes()
+        for r in routes {
+            let octets = r.gateway.split(separator: ".")
+            #expect(octets.count == 4, "gateway must be dotted IPv4: \(r.gateway)")
+            #expect(octets.allSatisfy { UInt8($0) != nil }, "octets must be 0–255: \(r.gateway)")
+            #expect(r.gateway != "0.0.0.0")
+            #expect(!r.interface.isEmpty)
+        }
+    }
+
+    @Test func lanGateway_isNeverATunnelOrCellularInterface() {
+        if let lan = DefaultRouteResolver.lanGateway() {
+            #expect(lan.interface.hasPrefix("en"))
+            #expect(!lan.interface.hasPrefix("utun"))
+            #expect(!lan.interface.hasPrefix("pdp_ip"))
+            #expect(DefaultRouteResolver.ipv4DefaultRoutes().contains(lan))
+        }
+        // No LAN default route (e.g. a host with only a tunnel) is a valid nil, not a guess.
+    }
+}

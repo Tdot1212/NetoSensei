@@ -945,7 +945,36 @@ class NetworkMonitorService: ObservableObject {
         return address
     }
 
+    /// The LAN router address and where it came from.
+    struct GatewayAddress: Equatable {
+        let ip: String
+        /// false = read from the kernel routing table (real); true = inferred
+        /// from the local IP by the legacy heuristic (a guess, labelled as such).
+        let isAssumed: Bool
+    }
+
+    /// Diagnosis v2 (Commit 1): the real default gateway from the routing table
+    /// when available; the legacy heuristic only as a labelled fallback.
+    /// Returns nil on cellular-only paths and whenever nothing can be read or
+    /// inferred — callers must treat nil as "not applicable", never as a failure.
+    nonisolated func detectedGateway() -> GatewayAddress? {
+        if let route = DefaultRouteResolver.lanGateway() {
+            return GatewayAddress(ip: route.gateway, isAssumed: false)
+        }
+        if let guess = heuristicGateway() {
+            return GatewayAddress(ip: guess, isAssumed: true)
+        }
+        return nil
+    }
+
     nonisolated private func estimateGateway() -> String? {
+        detectedGateway()?.ip
+    }
+
+    /// Legacy inference from the local IP. Only the 192.168.x.1 rule is a
+    /// reasonable assumption; the 10.x and 172.x rules are literal guesses.
+    /// Kept solely as a labelled fallback for DefaultRouteResolver.
+    nonisolated private func heuristicGateway() -> String? {
         guard let localIP = getLocalIP() else { return nil }
 
         if localIP.hasPrefix("192.168.") {

@@ -92,7 +92,7 @@ class DiagnosticViewModel: ObservableObject {
                     self.progress = 0.1
                 }
                 let gateway = try await withTimeout(seconds: 3) {
-                    await self.testGateway()
+                    await self.testGateway(snapshot: networkSnapshot)
                 }
 
                 // STEP 2: Ping External Servers (0.2 = 20%) - 3s timeout
@@ -141,10 +141,8 @@ class DiagnosticViewModel: ObservableObject {
                     self.currentTest = "Testing ISP performance..."
                     self.progress = 0.7
                 }
-                let isp = try await withTimeout(seconds: 3) {
-                    await self.testISP()
-                }
-                debugLog("✅ testISP() completed")
+                let isp = self.ispPlaceholder()
+                debugLog("✅ ISP step recorded as not run (superseded by the Internet check)")
 
                 // STEP 7: Evaluate and produce result (0.7+ = 70-100%)
                 await MainActor.run {
@@ -198,6 +196,10 @@ class DiagnosticViewModel: ObservableObject {
                     let vpnResult = SmartVPNDetector.shared.detectionResult
                     let vpnActive = vpn.details.contains("active") || (vpnResult?.isVPNActive ?? false)
 
+                    // Diagnosis v2, Commit 1: ISP inputs are the Internet check
+                    // (one measurement, not a duplicate ping); a not-applicable
+                    // router check and a cellular path are passed explicitly so
+                    // the interpreter neither penalises nor blames them.
                     _ = NetworkInterpreter.shared.interpret(
                         gatewayLatency: gateway.latency,
                         gatewayReachable: gateway.result == .pass,
@@ -209,12 +211,15 @@ class DiagnosticViewModel: ObservableObject {
                         vpnActive: vpnActive,
                         vpnServerLocation: vpnResult?.publicCity ?? vpnResult?.publicCountry,
                         vpnIP: vpnResult?.publicIP,
-                        ispLatency: isp.latency,
-                        ispReachable: isp.result != .fail,
+                        ispLatency: external.latency,
+                        ispReachable: external.result == .pass,
                         wifiConnected: networkSnapshot.wifi.isConnected,
                         ssid: networkSnapshot.wifi.ssid,
                         publicIP: networkSnapshot.publicIP,
-                        isp: vpnResult?.publicISP
+                        isp: vpnResult?.publicISP,
+                        // .warning = an assumed address didn't answer: undetermined, not a router fault
+                        gatewayApplicable: gateway.result != .notApplicable && gateway.result != .warning,
+                        onCellular: networkSnapshot.connectionType == .cellular && !networkSnapshot.wifi.isConnected
                     )
                     debugLog("🧠 NetworkInterpreter updated after diagnostic")
 
@@ -339,31 +344,68 @@ class DiagnosticViewModel: ObservableObject {
 
     // MARK: - Test Functions (ALL NONISOLATED)
 
-    private func testGateway() async -> DiagnosticTest {
+    /// Diagnosis v2, Commit 1. The target is the REAL default gateway from the
+    /// routing table (DefaultRouteResolver), never a literal address.
+    ///   - Cellular-only, or no gateway can be read/inferred → NOT APPLICABLE.
+    ///     There is no router to test; this is not a failure and costs nothing.
+    ///   - Gateway read from the routing table and it doesn't answer → FAIL.
+    ///   - Gateway only *assumed* by the legacy heuristic and it doesn't answer
+    ///     → WARNING "couldn't confirm": a guessed address not answering is not
+    ///     evidence that the router is down.
+    private func testGateway(snapshot: NetworkStatus) async -> DiagnosticTest {
         debugLog("🔍 testGateway() started")
 
-        let (success, latency) = await networkMonitor.pingHost("192.168.1.1", timeout: 2.0)
-        let latencyMs = latency ?? 0
-
-        debugLog("🔍 testGateway() - success: \(success), latency: \(latencyMs)")
-
-        if !success {
+        let isCellularOnly = snapshot.connectionType == .cellular && !snapshot.wifi.isConnected
+        guard !isCellularOnly else {
+            debugLog("🔍 testGateway() - not applicable: cellular-only path")
             return DiagnosticTest(
                 name: "Router/Gateway",
-                result: .fail,
-                latency: latencyMs,
-                details: "Cannot reach router - disconnected or router offline",
-                timestamp: Date()
-            )
-        } else {
-            return DiagnosticTest(
-                name: "Router/Gateway",
-                result: .pass,
-                latency: latencyMs,
-                details: "Router reachable",
+                result: .notApplicable,
+                latency: nil,
+                details: "Not applicable — on cellular there is no local router to test",
                 timestamp: Date()
             )
         }
+
+        guard let gateway = networkMonitor.detectedGateway() else {
+            debugLog("🔍 testGateway() - not applicable: no gateway address could be read or inferred")
+            return DiagnosticTest(
+                name: "Router/Gateway",
+                result: .notApplicable,
+                latency: nil,
+                details: "Not applicable — this network's router address couldn't be determined",
+                timestamp: Date()
+            )
+        }
+
+        let (success, latency) = await networkMonitor.pingHost(gateway.ip, timeout: 2.0)
+        debugLog("🔍 testGateway() - target: \(gateway.ip)\(gateway.isAssumed ? " (assumed)" : " (routing table)"), success: \(success), latency: \(latency.map { String(Int($0)) } ?? "nil")")
+
+        if success {
+            return DiagnosticTest(
+                name: "Router/Gateway",
+                result: .pass,
+                latency: latency,
+                details: "Router \(gateway.ip) reachable",
+                timestamp: Date()
+            )
+        }
+        if gateway.isAssumed {
+            return DiagnosticTest(
+                name: "Router/Gateway",
+                result: .warning,
+                latency: nil,
+                details: "Couldn't confirm the router — \(gateway.ip) was inferred, not read from the routing table, and it didn't answer",
+                timestamp: Date()
+            )
+        }
+        return DiagnosticTest(
+            name: "Router/Gateway",
+            result: .fail,
+            latency: nil,
+            details: "Router \(gateway.ip) didn't answer — disconnected, router offline, or a VPN is blocking local access",
+            timestamp: Date()
+        )
     }
 
     private func testExternal() async -> DiagnosticTest {
@@ -472,72 +514,48 @@ class DiagnosticViewModel: ObservableObject {
         // If either detector thinks VPN is active, treat it as active
         // This prevents false negatives when one detector is slower
         let isActive = networkMonitorVPN || smartDetectorVPN
+        let authoritative = await MainActor.run {
+            SmartVPNDetector.shared.detectionResult?.isAuthoritative ?? false
+        }
 
         debugLog("🔍 testVPN() - networkMonitor: \(networkMonitorVPN), smartDetector: \(smartDetectorVPN), final: \(isActive)")
 
+        // Diagnosis v2, Commit 1: this step reports the VPN STATE, it is not a
+        // test that can pass. No VPN → NOT APPLICABLE (never counted as a pass).
         if isActive {
             return DiagnosticTest(
                 name: "VPN Tunnel",
                 result: .pass,
                 latency: nil,
-                details: "VPN is active",
+                details: authoritative
+                    ? "VPN active (confirmed by the system)"
+                    : "VPN or proxy active (inferred from routing/IP — not confirmed by the system)",
                 timestamp: Date()
             )
         } else {
             return DiagnosticTest(
                 name: "VPN Tunnel",
-                result: .pass,
+                result: .notApplicable,
                 latency: nil,
-                details: "No VPN detected",
+                details: "Not applicable — no VPN in use",
                 timestamp: Date()
             )
         }
     }
 
-    private func testISP() async -> DiagnosticTest {
-        debugLog("🔍 testISP() started")
-
-        // Do a fresh ping test instead of reading cached status
-        let (success, latency) = await networkMonitor.pingHost("1.1.1.1", timeout: 2.0)
-        let internetLatency = latency ?? 0
-
-        debugLog("🔍 testISP() - success: \(success), latency: \(internetLatency)")
-
-        // Check if VPN is active to give accurate diagnosis
-        let vpnActive = await MainActor.run {
-            networkMonitor.currentStatus.vpn.isActive || (SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false)
-        }
-
-        if !success || internetLatency > 200 {
-            // FIXED: Don't blame ISP when VPN is the actual cause
-            let details = vpnActive
-                ? "High latency (\(Int(internetLatency))ms) — caused by VPN routing"
-                : "High latency detected — possible ISP congestion"
-
-            return DiagnosticTest(
-                name: "ISP Performance",
-                result: .warning,
-                latency: internetLatency,
-                details: details,
-                timestamp: Date()
-            )
-        } else if internetLatency > 100 {
-            return DiagnosticTest(
-                name: "ISP Performance",
-                result: .pass,
-                latency: internetLatency,
-                details: "Moderate latency",
-                timestamp: Date()
-            )
-        } else {
-            return DiagnosticTest(
-                name: "ISP Performance",
-                result: .pass,
-                latency: internetLatency,
-                details: "Good ISP performance",
-                timestamp: Date()
-            )
-        }
+    /// Diagnosis v2, Commit 1: the old "ISP Performance" step re-pinged the
+    /// same 1.1.1.1 the Internet check had just pinged and reported the second
+    /// sample as an independent finding (the two could disagree by chance).
+    /// One measurement, one row: this step is recorded as NOT RUN and the
+    /// Internet check above is the only source for the provider path.
+    nonisolated private func ispPlaceholder() -> DiagnosticTest {
+        DiagnosticTest(
+            name: "ISP Performance",
+            result: .skipped,
+            latency: nil,
+            details: "Not run — same path as the Internet check above; a second ping would not be a second finding",
+            timestamp: Date()
+        )
     }
 
     // MARK: - Helper Functions
@@ -665,11 +683,17 @@ class DiagnosticViewModel: ObservableObject {
         let summary: String
         let vpnActive = networkSnapshot.vpn.isActive
         let extLatency = networkSnapshot.internet.latencyToExternal ?? 0
+        // Diagnosis v2, Commit 1: only claim the checks that actually ran.
+        let ranCount = tests.filter { $0.result == .pass || $0.result == .warning || $0.result == .fail }.count
+        let notRunCount = tests.count - ranCount
+        let coverage = notRunCount == 0 ? "All \(ranCount) checks" : "\(ranCount) of \(tests.count) checks"
         if issues.isEmpty && !hasTestWarnings && !hasTestFailures {
             if vpnActive && extLatency > 150 {
-                summary = "All tests passed. VPN adds overhead (\(Int(extLatency))ms latency)."
+                summary = "\(coverage) passed. VPN adds overhead (\(Int(extLatency))ms latency)."
             } else {
-                summary = "All tests passed! Your network is healthy."
+                summary = notRunCount == 0
+                    ? "\(coverage) passed. Your network is healthy."
+                    : "\(coverage) passed; \(notRunCount) didn't apply on this network."
             }
         } else if issues.isEmpty && hasTestWarnings {
             let warningCount = tests.filter { $0.result == .warning }.count

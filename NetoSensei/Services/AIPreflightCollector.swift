@@ -743,6 +743,7 @@ final class AIPreflightCollector: ObservableObject {
         case .fail:    return "fail"
         case .warning: return "warning"
         case .skipped: return "skipped"
+        case .notApplicable: return "not_applicable"
         }
     }
 

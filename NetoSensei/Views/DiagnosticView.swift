@@ -689,6 +689,7 @@ struct DiagnosticContentView: View {
         case .fail: return "xmark.circle.fill"
         case .warning: return "exclamationmark.triangle.fill"
         case .skipped: return "minus.circle.fill"
+        case .notApplicable: return "minus.circle"
         }
     }
 
@@ -697,7 +698,7 @@ struct DiagnosticContentView: View {
         case .pass: return AppColors.green
         case .fail: return AppColors.red
         case .warning: return AppColors.yellow
-        case .skipped: return .gray
+        case .skipped, .notApplicable: return .gray
         }
     }
 

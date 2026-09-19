@@ -180,7 +180,9 @@ class RootCauseAnalyzer {
         let wifiConnected: Bool
         // REMOVED: wifiSignal - cannot be measured on iOS
         let routerLatency: Double?
-        let routerReachable: Bool
+        /// nil = the router check was NOT APPLICABLE (cellular / no gateway
+        /// address) — never a failure, never a −40. (Diagnosis v2, Commit 1)
+        let routerReachable: Bool?
         let internetLatency: Double?
         let internetReachable: Bool
         let vpnActive: Bool
@@ -199,17 +201,30 @@ class RootCauseAnalyzer {
         let externalTest = diagnostic.testsPerformed.first { $0.name.contains("External") }
         let dnsTest = diagnostic.testsPerformed.first { $0.name.contains("DNS") }
 
+        // nil when the router check did not apply (cellular / unknown gateway) or
+        // could not be confirmed (an *assumed* address that didn't answer = .warning).
+        // Only a real gateway that did not answer is `false`.
+        let routerReachable: Bool?
+        switch gatewayTest?.result {
+        case .pass: routerReachable = true
+        case .fail: routerReachable = false
+        default: routerReachable = nil
+        }
+
         return Measurements(
             wifiConnected: networkStatus.wifi.isConnected,
             // REMOVED: wifiSignal - iOS has no public API for RSSI
             routerLatency: gatewayTest?.latency,
-            routerReachable: gatewayTest?.result == .pass,
+            routerReachable: routerReachable,
             internetLatency: externalTest?.latency,
             internetReachable: externalTest?.result == .pass,
             vpnActive: networkStatus.vpn.isActive,
             vpnLatency: networkStatus.vpn.isActive ? externalTest?.latency : nil,
             dnsLatency: dnsTest?.latency,
-            dnsWorking: dnsTest?.result == .pass,
+            // Diagnosis v2, Commit 1: a slow lookup (.warning, >100 ms) is DNS that WORKS.
+            // The old `== .pass` turned every slow-DNS warning into "DNS Failure" (−20) —
+            // the exact root cause the device log showed next to a working connection.
+            dnsWorking: dnsTest?.result != .fail,
             cdnThroughput: nil, // Will be populated from streaming tests
             cdnPing: nil
         )
@@ -229,7 +244,8 @@ class RootCauseAnalyzer {
         // REMOVED: wifiSignal check - cannot be measured on iOS
 
         // 2. Router Issues - use FIXED thresholds
-        if !measurements.routerReachable {
+        // routerReachable == nil means the check did not apply (cellular): skip, don't blame.
+        if measurements.routerReachable == false {
             return .routerUnreachable
         }
 
@@ -771,7 +787,7 @@ class RootCauseAnalyzer {
         }
 
         // Critical failures
-        if !measurements.routerReachable { score -= 40 }
+        if measurements.routerReachable == false { score -= 40 }   // nil (not applicable) costs nothing
         if !measurements.internetReachable { score -= 40 }
         if !measurements.dnsWorking { score -= 20 }
 

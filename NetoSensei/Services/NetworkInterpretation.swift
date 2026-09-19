@@ -167,7 +167,9 @@ class NetworkInterpreter: ObservableObject {
         wifiConnected: Bool,
         ssid: String?,
         publicIP: String?,
-        isp: String?
+        isp: String?,
+        gatewayApplicable: Bool = true,   // Diagnosis v2, Commit 1: false = no router to test (cellular / unknown gateway)
+        onCellular: Bool = false          // Diagnosis v2, Commit 1: true = cellular path; "WiFi disconnected" is not a problem
     ) -> NetworkInterpretation {
 
         // ========================================
@@ -228,7 +230,15 @@ class NetworkInterpreter: ObservableObject {
         let router: ComponentStatus
         let routerHasMeasuredLatency = LatencyValidation.normalize(gatewayLatency) != nil
         let routerReachableEffective = gatewayReachable || routerHasMeasuredLatency
-        if let gw = LatencyValidation.normalize(gatewayLatency), routerReachableEffective {
+        if !gatewayApplicable {
+            // Diagnosis v2, Commit 1: no router on this path. Neither good nor bad.
+            router = ComponentStatus(
+                name: "Router", status: .inactive,
+                value: "Not applicable",
+                detail: onCellular ? "No local router on cellular" : "Router address couldn't be determined",
+                color: .gray
+            )
+        } else if let gw = LatencyValidation.normalize(gatewayLatency), routerReachableEffective {
             if gw < gatewayThresholdGood {
                 router = ComponentStatus(
                     name: "Router", status: .good,
@@ -423,11 +433,12 @@ class NetworkInterpreter: ObservableObject {
 
         var score = 100
 
-        // WiFi (max -20)
-        if !wifiConnected { score -= 20 }
+        // WiFi (max -20) — not a fault when the phone is on cellular by choice.
+        if !wifiConnected && !onCellular { score -= 20 }
 
-        // Router (max -20, but reduce penalty when VPN masks it)
-        if !gatewayReachable && !vpnActive { score -= 20 }
+        // Router (max -20, but reduce penalty when VPN masks it; nothing when not applicable)
+        if !gatewayApplicable { /* no router to test: no penalty */ }
+        else if !gatewayReachable && !vpnActive { score -= 20 }
         else if !gatewayReachable && vpnActive { score -= 5 } // VPN expected to mask router
         else if let gw = gatewayLatency {
             if gw > gatewayThresholdFair { score -= 15 }
@@ -487,7 +498,7 @@ class NetworkInterpreter: ObservableObject {
                 severity: .critical,
                 icon: "wifi.slash"
             )
-        } else if !wifiConnected {
+        } else if !wifiConnected && !onCellular {
             rootCause = RootCause(
                 title: "WiFi Disconnected",
                 description: "You're not connected to a WiFi network.",
@@ -555,7 +566,7 @@ class NetworkInterpreter: ObservableObject {
         testResults.append(TestResult(
             name: "Router/Gateway",
             value: router.value,
-            passed: router.status == .good || router.status == .hidden,
+            passed: router.status == .good || router.status == .hidden || router.status == .inactive,
             statusColor: router.color,
             icon: "wifi.router",
             detail: router.detail
@@ -747,7 +758,9 @@ class NetworkInterpreter: ObservableObject {
             wifiConnected: status.wifi.isConnected,
             ssid: status.wifi.ssid,
             publicIP: status.publicIP,
-            isp: vpnResult?.publicISP
+            isp: vpnResult?.publicISP,
+            gatewayApplicable: status.router.gatewayIP != nil,
+            onCellular: status.connectionType == .cellular && !status.wifi.isConnected
         )
     }
 }

@@ -37,7 +37,8 @@ struct DiagnosticTest {
         case pass
         case fail
         case warning
-        case skipped
+        case skipped         // not run (e.g. superseded by another check)
+        case notApplicable   // cannot apply on this network (e.g. no router on cellular, no VPN in use); never a pass, never a fail
     }
 }
 

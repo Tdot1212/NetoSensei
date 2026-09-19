@@ -138,7 +138,7 @@ struct DiagnoseTabView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Quick Check")
                             .font(.headline)
-                        Text("Router • Internet • DNS • VPN • ISP")
+                        Text("Router • Internet • DNS • Web • VPN")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.8))
                     }
