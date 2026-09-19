@@ -42,8 +42,61 @@ struct SpeedTestResult: Codable, Identifiable {
     var vpnActive: Bool
     var ipAddress: String?
 
+    // Network identity (Phase 4, Trends honesty). Recorded on NEW results so
+    // trends only compare measurements from the same network. Old records
+    // decode with nil and are segmented at the coarsest key they support.
+    var networkSSID: String? = nil   // Wi-Fi SSID at test time (nil if unreadable/cellular)
+    var localSubnet: String? = nil   // /24 prefix of the local IPv4 address
+
     // Performance rating
     var quality: QualityRating
+
+    /// Segment this record belongs to for trend comparison. See NetworkSegment.
+    var segmentKey: String {
+        NetworkSegment.key(connectionType: connectionType, vpnActive: vpnActive,
+                           ssid: networkSSID, subnet: localSubnet)
+    }
+
+    // MARK: - Codable (backward compatible)
+    //
+    // Phase 4: a custom decoder. Synthesized Decodable does NOT apply property
+    // default values — it `decode`s every non-optional key — so records written
+    // before Phase 3 (no `latencyIntercepted` key) failed to decode and the
+    // WHOLE history array was silently dropped by `try?` at launch. Every field
+    // added after the original schema is decoded with `decodeIfPresent`.
+    // Encoding stays synthesized.
+
+    private enum CodingKeys: String, CodingKey {
+        case id, timestamp, downloadSpeed, downloadJitter, uploadSpeed, uploadJitter
+        case ping, jitter, packetLoss, latencyIntercepted
+        case serverUsed, serverLocation, testDuration
+        case connectionType, vpnActive, ipAddress
+        case networkSSID, localSubnet
+        case quality
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        timestamp = try c.decode(Date.self, forKey: .timestamp)
+        downloadSpeed = try c.decode(Double.self, forKey: .downloadSpeed)
+        downloadJitter = try c.decodeIfPresent(Double.self, forKey: .downloadJitter)
+        uploadSpeed = try c.decode(Double.self, forKey: .uploadSpeed)
+        uploadJitter = try c.decodeIfPresent(Double.self, forKey: .uploadJitter)
+        ping = try c.decodeIfPresent(Double.self, forKey: .ping)
+        jitter = try c.decodeIfPresent(Double.self, forKey: .jitter)
+        packetLoss = try c.decodeIfPresent(Double.self, forKey: .packetLoss)
+        latencyIntercepted = try c.decodeIfPresent(Bool.self, forKey: .latencyIntercepted) ?? false
+        serverUsed = try c.decodeIfPresent(String.self, forKey: .serverUsed)
+        serverLocation = try c.decodeIfPresent(String.self, forKey: .serverLocation)
+        testDuration = try c.decode(TimeInterval.self, forKey: .testDuration)
+        connectionType = try c.decode(String.self, forKey: .connectionType)
+        vpnActive = try c.decode(Bool.self, forKey: .vpnActive)
+        ipAddress = try c.decodeIfPresent(String.self, forKey: .ipAddress)
+        networkSSID = try c.decodeIfPresent(String.self, forKey: .networkSSID)
+        localSubnet = try c.decodeIfPresent(String.self, forKey: .localSubnet)
+        quality = try c.decode(QualityRating.self, forKey: .quality)
+    }
 
     enum QualityRating: String, Codable {
         case excellent = "Excellent"
@@ -106,9 +159,12 @@ struct SpeedTestResult: Codable, Identifiable {
 
     init(downloadSpeed: Double, uploadSpeed: Double, ping: Double?, jitter: Double?, packetLoss: Double?,
          serverUsed: String? = nil, serverLocation: String? = nil, testDuration: TimeInterval,
-         connectionType: String, vpnActive: Bool, ipAddress: String? = nil, latencyIntercepted: Bool = false) {
+         connectionType: String, vpnActive: Bool, ipAddress: String? = nil, latencyIntercepted: Bool = false,
+         networkSSID: String? = nil, localSubnet: String? = nil) {
         self.id = UUID()
         self.timestamp = Date()
+        self.networkSSID = networkSSID
+        self.localSubnet = localSubnet
         self.downloadSpeed = downloadSpeed
         self.uploadSpeed = uploadSpeed
         self.ping = ping

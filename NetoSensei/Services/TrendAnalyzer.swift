@@ -2,7 +2,15 @@
 //  TrendAnalyzer.swift
 //  NetoSensei
 //
-//  Analyzes speed test and diagnostic history for trend insights
+//  Analyzes speed test and diagnostic history for trend insights.
+//
+//  Accuracy audit Phase 4 (Trends honesty): every comparison is confined to
+//  ONE network segment (see NetworkSegment) — the segment of the newest
+//  record, i.e. the network the user is on now. A change of network or VPN
+//  state is a state change, not a trend; comparing across it produced the
+//  live bug "Download speed dropped — Down 93% (7 vs 122 Mbps)" where 122 was
+//  Wi-Fi and 7 was cellular+VPN. Insufficient same-segment samples → no
+//  insight. Silence beats garbage.
 //
 
 import Foundation
@@ -16,11 +24,35 @@ struct TrendAnalyzer {
         let severity: Severity
         let metric: String
         let changePercent: Double?
+        /// The "recent" average the insight was computed from, so a caller can
+        /// sanity-check it against a live reading without re-deriving history.
+        let recentValue: Double?
 
         enum Severity {
             case positive, neutral, negative
         }
+
+        init(title: String, description: String, severity: Severity, metric: String,
+             changePercent: Double?, recentValue: Double? = nil) {
+            self.title = title
+            self.description = description
+            self.severity = severity
+            self.metric = metric
+            self.changePercent = changePercent
+            self.recentValue = recentValue
+        }
     }
+
+    // MARK: - Tunables
+
+    /// Records per comparison window (recent vs earlier), within one segment.
+    static let windowSize = 3
+    /// Minimum same-segment records before any delta insight can be emitted.
+    static var minimumSamplesForDelta: Int { windowSize * 2 }
+    /// Same-segment records inspected for the packet-loss frequency insight.
+    static let lossWindow = 5
+
+    static let networkChangedMetric = "networkChanged"
 
     // MARK: - Speed Test Trend Analysis
 
@@ -29,56 +61,73 @@ struct TrendAnalyzer {
 
         var insights: [TrendInsight] = []
         let sorted = history.sorted { $0.timestamp > $1.timestamp }
+        guard let newest = sorted.first else { return [] }
 
-        // Compare last 3 tests average vs previous 3 tests average
-        if sorted.count >= 6 {
-            let recent = Array(sorted.prefix(3))
-            let earlier = Array(sorted.dropFirst(3).prefix(3))
+        // The comparison base is the CURRENT network. Every other segment is
+        // a different network and is excluded from every comparison below.
+        let currentSegment = newest.segmentKey
+        let sameSegment = sorted.filter { $0.segmentKey == currentSegment }
 
-            let recentDownload = recent.map(\.downloadSpeed).reduce(0, +) / 3.0
-            let earlierDownload = earlier.map(\.downloadSpeed).reduce(0, +) / 3.0
+        // Cross-segment honesty: if the newest result is on a different
+        // network than the one before it, say so instead of computing a
+        // delta across the change. Neutral, self-clearing (disappears after
+        // the next test on this network).
+        if sorted.count >= 2, sorted[1].segmentKey != currentSegment {
+            insights.append(TrendInsight(
+                title: "Network changed",
+                description: "Comparisons reset — trends resume after a few tests on this network.",
+                severity: .neutral,
+                metric: networkChangedMetric,
+                changePercent: nil
+            ))
+        }
 
-            if earlierDownload > 0 {
+        // Delta insights: recent window vs earlier window, same segment only.
+        if sameSegment.count >= minimumSamplesForDelta {
+            let recent = Array(sameSegment.prefix(windowSize))
+            let earlier = Array(sameSegment.dropFirst(windowSize).prefix(windowSize))
+
+            // Download (always measured; 0 = failed test, excluded from the mean)
+            if let (recentDownload, earlierDownload) = windowMeans(
+                recent: recent.map { $0.downloadSpeed > 0 ? $0.downloadSpeed : nil },
+                earlier: earlier.map { $0.downloadSpeed > 0 ? $0.downloadSpeed : nil }
+            ) {
                 let changePercent = ((recentDownload - earlierDownload) / earlierDownload) * 100
-
                 if changePercent < -20 {
                     insights.append(TrendInsight(
                         title: "Download speed dropped",
-                        description: "Down \(Int(abs(changePercent)))% compared to earlier tests (\(String(format: "%.0f", recentDownload)) vs \(String(format: "%.0f", earlierDownload)) Mbps)",
+                        description: "Down \(Int(abs(changePercent)))% compared to earlier tests on this network (\(String(format: "%.0f", recentDownload)) vs \(String(format: "%.0f", earlierDownload)) Mbps)",
                         severity: .negative,
                         metric: "download",
-                        changePercent: changePercent
+                        changePercent: changePercent,
+                        recentValue: recentDownload
                     ))
                 } else if changePercent > 20 {
                     insights.append(TrendInsight(
                         title: "Download speed improved",
-                        description: "Up \(Int(changePercent))% compared to earlier tests",
+                        description: "Up \(Int(changePercent))% compared to earlier tests on this network",
                         severity: .positive,
                         metric: "download",
-                        changePercent: changePercent
+                        changePercent: changePercent,
+                        recentValue: recentDownload
                     ))
                 }
             }
 
-            // Latency trend. Phase 3: ping is optional — average only measured
-            // values (compactMap drops unmeasurable/nil samples), don't divide by
-            // a fixed 3 that may include missing readings. (Trends segmentation is
-            // a later phase; this is a mechanical adaptation to the optional type.)
-            let recentPings = recent.compactMap(\.ping)
-            let earlierPings = earlier.compactMap(\.ping)
-            let recentPing = recentPings.isEmpty ? 0 : recentPings.reduce(0, +) / Double(recentPings.count)
-            let earlierPing = earlierPings.isEmpty ? 0 : earlierPings.reduce(0, +) / Double(earlierPings.count)
-
-            if earlierPing > 0 && !recentPings.isEmpty {
+            // Latency (Phase 3: optional — only measured pings are averaged)
+            if let (recentPing, earlierPing) = windowMeans(
+                recent: recent.map { $0.ping },
+                earlier: earlier.map { $0.ping }
+            ) {
                 let latencyChange = ((recentPing - earlierPing) / earlierPing) * 100
-
                 if latencyChange > 30 {
                     insights.append(TrendInsight(
                         title: "Latency has been increasing",
-                        description: "Ping up \(Int(latencyChange))% over the past \(sorted.count) tests (\(Int(recentPing))ms avg now)",
+                        description: "Ping up \(Int(latencyChange))% over the last \(sameSegment.count) tests on this network (\(Int(recentPing))ms avg now)",
                         severity: .negative,
                         metric: "latency",
-                        changePercent: latencyChange
+                        changePercent: latencyChange,
+                        recentValue: recentPing
                     ))
                 } else if latencyChange < -20 {
                     insights.append(TrendInsight(
@@ -86,19 +135,21 @@ struct TrendAnalyzer {
                         description: "Ping down \(Int(abs(latencyChange)))% (\(Int(recentPing))ms avg now)",
                         severity: .positive,
                         metric: "latency",
-                        changePercent: latencyChange
+                        changePercent: latencyChange,
+                        recentValue: recentPing
                     ))
                 }
             }
         }
 
-        // Check for consistent packet loss
-        let recentTests = Array(sorted.prefix(5))
-        let lossyTests = recentTests.filter { ($0.packetLoss ?? 0) > 1.0 }  // nil = unmeasurable, not lossy
+        // Frequent packet loss — same network only. nil loss = unmeasurable,
+        // which is not evidence of loss.
+        let recentTests = Array(sameSegment.prefix(lossWindow))
+        let lossyTests = recentTests.filter { ($0.packetLoss ?? 0) > 1.0 }
         if lossyTests.count >= 3 {
             insights.append(TrendInsight(
                 title: "Frequent packet loss",
-                description: "Packet loss detected in \(lossyTests.count) of last \(recentTests.count) tests",
+                description: "Packet loss detected in \(lossyTests.count) of the last \(recentTests.count) tests on this network",
                 severity: .negative,
                 metric: "packetLoss",
                 changePercent: nil
@@ -108,6 +159,19 @@ struct TrendAnalyzer {
         return insights
     }
 
+    /// Means of the measured values in each window. nil unless BOTH windows
+    /// contain at least one measured value and the earlier mean is > 0 (a
+    /// ratio against nothing is not a change).
+    static func windowMeans(recent: [Double?], earlier: [Double?]) -> (recent: Double, earlier: Double)? {
+        let r = recent.compactMap { $0 }
+        let e = earlier.compactMap { $0 }
+        guard !r.isEmpty, !e.isEmpty else { return nil }
+        let recentMean = r.reduce(0, +) / Double(r.count)
+        let earlierMean = e.reduce(0, +) / Double(e.count)
+        guard earlierMean > 0 else { return nil }
+        return (recentMean, earlierMean)
+    }
+
     // MARK: - Diagnostic Trend Analysis
 
     static func analyzeDiagnosticTrends(history: [DiagnosticHistoryEntry]) -> [TrendInsight] {
@@ -115,7 +179,14 @@ struct TrendAnalyzer {
 
         var insights: [TrendInsight] = []
         let sorted = history.sorted { $0.timestamp > $1.timestamp }
-        let recent = Array(sorted.prefix(5))
+        guard let newest = sorted.first else { return [] }
+
+        // Phase 4: same-network only. Legacy entries (no identity, key nil)
+        // only ever compare with other legacy entries and age out.
+        let currentSegment = newest.segmentKey
+        let sameSegment = sorted.filter { $0.segmentKey == currentSegment }
+        let recent = Array(sameSegment.prefix(5))
+        guard recent.count >= 2 else { return [] }
 
         // Check for recurring failures
         let categoryCounts = Dictionary(grouping: recent, by: \.primaryIssueCategory)
@@ -125,7 +196,7 @@ struct TrendAnalyzer {
         for (category, count) in categoryCounts where count >= 3 {
             insights.append(TrendInsight(
                 title: "\(category) issues recurring",
-                description: "\(category) problems found in \(count) of your last \(recent.count) diagnostics",
+                description: "\(category) problems found in \(count) of your last \(recent.count) diagnostics on this network",
                 severity: .negative,
                 metric: "diagnostic",
                 changePercent: nil
@@ -140,7 +211,7 @@ struct TrendAnalyzer {
             if recentIssueCount < earlierIssueCount && earlierIssueCount > 0 {
                 insights.append(TrendInsight(
                     title: "Connection stability improved",
-                    description: "Fewer issues detected in recent diagnostics",
+                    description: "Fewer issues detected in recent diagnostics on this network",
                     severity: .positive,
                     metric: "stability",
                     changePercent: nil
@@ -165,6 +236,10 @@ struct TrendAnalyzer {
     /// wildly with the live measurement — when it does, suppress the
     /// "Latency has improved/worsened" insights so the dashboard doesn't
     /// contradict itself across cards.
+    ///
+    /// Phase 4: the recent average is carried on the insight itself
+    /// (`recentValue`, computed over the same network segment), so this filter
+    /// no longer re-derives it from unsegmented history.
     static func allInsights(
         speedHistory: [SpeedTestResult],
         diagnosticHistory: [DiagnosticHistoryEntry],
@@ -175,16 +250,7 @@ struct TrendAnalyzer {
 
         return raw.filter { insight in
             // Only filter latency-trend insights — other insights are independent.
-            guard insight.metric == "latency" else { return true }
-            // Determine the trend's "recent avg latency" by recomputing from
-            // speedHistory, the same way analyzeSpeedTrends did. Cheap re-derive:
-            let sorted = speedHistory.sorted { $0.timestamp > $1.timestamp }
-            guard sorted.count >= 6 else { return true }
-            let recent = Array(sorted.prefix(3))
-            // Phase 3: average only measured pings; if none, keep the insight.
-            let recentPings = recent.compactMap(\.ping)
-            guard !recentPings.isEmpty else { return true }
-            let recentPing = recentPings.reduce(0, +) / Double(recentPings.count)
+            guard insight.metric == "latency", let recentPing = insight.recentValue else { return true }
             // Drop insights whose recent value disagrees with the live reference
             // by more than 50% — they will only confuse the user.
             let diffRatio = abs(recentPing - ref) / max(ref, 1)

@@ -238,7 +238,7 @@ class DiagnosticViewModel: ObservableObject {
                 // This prevents @Published property updates from triggering cascading refreshes
                 let gatewayLatency = gateway.latency ?? 0
                 let dnsLatency = dns.latency ?? 0
-                let externalLatency = external.latency ?? 0
+                let externalLatency = external.latency  // Phase 4: nil stays nil (unmeasured), never 0
                 let vpnActive = vpn.details.contains("active")
                 let connectionType = networkSnapshot.connectionType?.displayName ?? "Unknown"
                 let healthScore = rootCauseAnalysis.healthScore

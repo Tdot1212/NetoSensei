@@ -44,6 +44,10 @@ class SpeedTestEngine: ObservableObject {
         let connectionType = status.connectionType?.displayName ?? "Unknown"
         let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
         let ipAddress = status.publicIP
+        // Phase 4: network identity for trend segmentation (same key concept
+        // as DashboardViewModel.networkIdentityKey). Observed, never guessed.
+        let networkSSID = status.wifi.ssid
+        let localSubnet = NetworkSegment.subnet(of: status.localIP)
         let isInChina = SmartVPNDetector.shared.detectionResult?.isLikelyInChina ?? false
 
         // Phase 1: Finding Server (10%)
@@ -100,7 +104,9 @@ class SpeedTestEngine: ObservableObject {
             connectionType: connectionType,
             vpnActive: vpnActive,
             ipAddress: ipAddress,
-            latencyIntercepted: pingIntercepted
+            latencyIntercepted: pingIntercepted,
+            networkSSID: networkSSID,
+            localSubnet: localSubnet
         )
 
         self.isRunning = false

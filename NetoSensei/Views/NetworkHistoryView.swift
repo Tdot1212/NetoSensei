@@ -315,17 +315,21 @@ struct NetworkHistoryView: View {
                             .foregroundStyle(healthColor(entry.healthScore))
 
                         case .latency:
-                            LineMark(
-                                x: .value("Time", entry.timestamp),
-                                y: .value("Latency", entry.latency)
-                            )
-                            .foregroundStyle(latencyColor(entry.latency))
+                            // Phase 4: unmeasured latency is nil — skip the
+                            // point rather than plot a fake 0 ms.
+                            if let latency = entry.latency {
+                                LineMark(
+                                    x: .value("Time", entry.timestamp),
+                                    y: .value("Latency", latency)
+                                )
+                                .foregroundStyle(latencyColor(latency))
 
-                            PointMark(
-                                x: .value("Time", entry.timestamp),
-                                y: .value("Latency", entry.latency)
-                            )
-                            .foregroundStyle(latencyColor(entry.latency))
+                                PointMark(
+                                    x: .value("Time", entry.timestamp),
+                                    y: .value("Latency", latency)
+                                )
+                                .foregroundStyle(latencyColor(latency))
+                            }
 
                         case .speed:
                             if let speed = entry.downloadSpeed {
@@ -441,14 +445,16 @@ struct NetworkHistoryView: View {
                     )
                 }
 
-                // Latency comparison
-                comparisonRow(
-                    label: "Latency",
-                    current: "\(Int(latest.latency))ms",
-                    baseline: baseline.latency,
-                    currentValue: latest.latency,
-                    isHigherBetter: false
-                )
+                // Latency comparison — only when both sides were measured (Phase 4)
+                if let latestLatency = latest.latency, let baselineLatency = baseline.latency {
+                    comparisonRow(
+                        label: "Latency",
+                        current: "\(Int(latestLatency))ms",
+                        baseline: baselineLatency,
+                        currentValue: latestLatency,
+                        isHigherBetter: false
+                    )
+                }
 
                 // Gateway comparison
                 comparisonRow(
@@ -511,7 +517,14 @@ struct NetworkHistoryView: View {
 
     private func analyzeComparison(latest: NetworkHistoryEntry, baseline: NetworkHistoryEntry) -> String {
         let gatewayDiff = abs(latest.gatewayLatency - baseline.gatewayLatency)
-        let latencyRatio = latest.latency / max(baseline.latency, 1)
+        // Phase 4: the ISP-vs-local verdict needs a measured external latency
+        // on both sides; without it, only the gateway comparison is claimed.
+        guard let latestLatency = latest.latency, let baselineLatency = baseline.latency else {
+            return gatewayDiff > 20
+                ? "→ Your local WiFi/router is slower than usual. Try restarting router."
+                : "→ Local network is close to baseline. Internet latency wasn't measured on one of these runs."
+        }
+        let latencyRatio = latestLatency / max(baselineLatency, 1)
 
         if gatewayDiff < 10 && latencyRatio > 1.5 {
             if latest.vpnActive {

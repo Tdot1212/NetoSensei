@@ -115,9 +115,27 @@ class HistoryManager: ObservableObject {
 
     private func loadHistory() {
         // Load speed test history
-        if let data = userDefaults.data(forKey: speedTestKey),
-           let decoded = try? JSONDecoder().decode([SpeedTestResult].self, from: data) {
-            speedTestHistory = decoded
+        if let data = userDefaults.data(forKey: speedTestKey) {
+            do {
+                let decoded = try JSONDecoder().decode([SpeedTestResult].self, from: data)
+                // Phase 4: one-time, idempotent cleanup of pre-Phase-3 sentinel
+                // records (ping 999 / loss 100 → nil). Runs on every load but
+                // only rewrites — and logs — when something actually changed, so
+                // a failed save simply retries next launch instead of being
+                // masked by a "done" flag.
+                let migrated = LegacySpeedRecordMigration.apply(decoded)
+                speedTestHistory = migrated.records
+                if migrated.changedCount > 0 {
+                    debugLog("🧹 HistoryManager: migrated \(migrated.changedCount) of \(decoded.count) legacy speed records (999 ping / 100% loss sentinels → nil)")
+                    let toSave = migrated.records
+                    Task.detached {
+                        UserDefaults.standard.setSafe(toSave, forKey: "speedTestHistory", maxItems: 50)
+                    }
+                }
+            } catch {
+                // Never silently discard history: make the failure visible.
+                debugLog("❌ HistoryManager: speed test history failed to decode — \(error)")
+            }
         }
 
         // Load diagnostic history

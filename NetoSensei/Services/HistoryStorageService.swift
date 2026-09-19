@@ -135,7 +135,7 @@ actor HistoryStorageService {
                 "\(entry.healthScore)",
                 entry.downloadSpeed.map { String(format: "%.2f", $0) } ?? "",
                 entry.uploadSpeed.map { String(format: "%.2f", $0) } ?? "",
-                String(format: "%.0f", entry.latency),
+                entry.latency.map { String(format: "%.0f", $0) } ?? "",
                 String(format: "%.0f", entry.gatewayLatency),
                 String(format: "%.0f", entry.dnsLatency),
                 entry.jitter.map { String(format: "%.1f", $0) } ?? "",

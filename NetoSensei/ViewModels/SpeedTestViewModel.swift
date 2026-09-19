@@ -157,18 +157,13 @@ class SpeedTestViewModel: ObservableObject {
                 let vpnResult = SmartVPNDetector.shared.detectionResult
                 let vpnServerLocation = vpnResult?.publicCity ?? vpnResult?.publicCountry
 
-                // NOTE (Phase 3): NetworkHistoryEntry.latency is non-optional and
-                // this timeline already uses the `?? 0` convention (gateway/dns
-                // below). Unmeasurable ping therefore lands as 0 in the TRENDS
-                // timeline — pre-existing pollution surfaced for the Trends phase
-                // to make NHE.latency optional. The primary SpeedTestResult record
-                // (HistoryManager) correctly stores nil. jitter/packetLoss are
-                // already optional here, so they pass through honestly.
+                // Phase 4: NetworkHistoryEntry.latency is optional — an
+                // unmeasurable ping is stored as nil, never as 0.
                 let historyEntry = NetworkHistoryEntry(
                     healthScore: healthScore,
                     downloadSpeed: final.downloadSpeed,
                     uploadSpeed: final.uploadSpeed,
-                    latency: final.ping ?? 0,
+                    latency: final.ping,
                     gatewayLatency: networkStatus.router.latency ?? 0,
                     dnsLatency: networkStatus.dns.latency ?? 0,
                     jitter: final.jitter,

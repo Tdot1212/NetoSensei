@@ -24,7 +24,7 @@ struct NetworkHistoryEntry: Codable, Identifiable {
     let healthScore: Int           // 0-100
     let downloadSpeed: Double?     // Mbps
     let uploadSpeed: Double?       // Mbps
-    let latency: Double            // ms (external)
+    let latency: Double?           // ms (external). Phase 4: nil = unmeasured, never 0
     let gatewayLatency: Double     // ms
     let dnsLatency: Double         // ms
     let jitter: Double?            // ms
@@ -67,7 +67,12 @@ struct NetworkHistoryEntry: Codable, Identifiable {
         healthScore = try container.decode(Int.self, forKey: .healthScore)
         downloadSpeed = try container.decodeIfPresent(Double.self, forKey: .downloadSpeed)
         uploadSpeed = try container.decodeIfPresent(Double.self, forKey: .uploadSpeed)
-        latency = try container.decode(Double.self, forKey: .latency)
+        // Phase 4: latency is optional. Entries written before this change
+        // stored `?? 0` for an unmeasured ping — an external latency of exactly
+        // 0 ms is physically impossible, so it is decoded as nil (read-time
+        // strip; the file is rewritten on the next save anyway).
+        let rawLatency = try container.decodeIfPresent(Double.self, forKey: .latency)
+        latency = (rawLatency ?? 0) > 0 ? rawLatency : nil
         gatewayLatency = try container.decode(Double.self, forKey: .gatewayLatency)
         dnsLatency = try container.decode(Double.self, forKey: .dnsLatency)
         jitter = try container.decodeIfPresent(Double.self, forKey: .jitter)
@@ -93,7 +98,7 @@ struct NetworkHistoryEntry: Codable, Identifiable {
         healthScore: Int,
         downloadSpeed: Double?,
         uploadSpeed: Double?,
-        latency: Double,
+        latency: Double?,
         gatewayLatency: Double,
         dnsLatency: Double,
         jitter: Double?,
@@ -147,7 +152,7 @@ struct NetworkHistoryEntry: Codable, Identifiable {
 
         self.downloadSpeed = speedTest?.downloadSpeed
         self.uploadSpeed = speedTest?.uploadSpeed
-        self.latency = status.internet.latencyToExternal ?? 0
+        self.latency = status.internet.latencyToExternal  // Phase 4: nil stays nil
         self.gatewayLatency = status.router.latency ?? 0
         self.dnsLatency = status.dns.latency ?? 0
         self.jitter = status.router.jitter
@@ -199,6 +204,15 @@ struct NetworkHistoryEntry: Codable, Identifiable {
         }
 
         return max(0, min(100, score))
+    }
+
+    // MARK: - Pure aggregates (Phase 4: nil-safe, unit-tested)
+
+    /// Mean of the MEASURED latencies only; nil when none were measured.
+    static func averageLatency(of entries: [NetworkHistoryEntry]) -> Double? {
+        let measured = entries.compactMap { $0.latency }
+        guard !measured.isEmpty else { return nil }
+        return measured.reduce(0, +) / Double(measured.count)
     }
 }
 
@@ -271,7 +285,7 @@ class NetworkHistoryManager: ObservableObject {
 
         // Calculate averages
         let avgHealth = topEntries.map { $0.healthScore }.reduce(0, +) / topCount
-        let avgLatency = topEntries.map { $0.latency }.reduce(0, +) / Double(topCount)
+        let avgLatency = NetworkHistoryEntry.averageLatency(of: topEntries)  // nil if none measured
         let avgGateway = topEntries.map { $0.gatewayLatency }.reduce(0, +) / Double(topCount)
         let avgDns = topEntries.map { $0.dnsLatency }.reduce(0, +) / Double(topCount)
 
@@ -314,9 +328,7 @@ class NetworkHistoryManager: ObservableObject {
     }
 
     func averageLatency(for period: HistoryPeriod) -> Double? {
-        let periodEntries = entriesForPeriod(period)
-        guard !periodEntries.isEmpty else { return nil }
-        return periodEntries.map { $0.latency }.reduce(0, +) / Double(periodEntries.count)
+        NetworkHistoryEntry.averageLatency(of: entriesForPeriod(period))
     }
 
     func averageDownloadSpeed(for period: HistoryPeriod) -> Double? {

@@ -131,6 +131,38 @@ struct DiagnosticHistoryEntry: Codable, Identifiable {
     var primaryIssueCategory: String
     var overallStatus: String
 
+    // Phase 4 (Trends honesty): network identity so diagnostic trends only
+    // compare runs on the same network. All optional — entries written before
+    // this field set decode with nil and are segmented as "unknown".
+    var connectionType: String? = nil
+    var vpnActive: Bool? = nil
+    var networkSSID: String? = nil
+    var localSubnet: String? = nil
+
+    /// nil for legacy entries with no identity — they never merge with
+    /// identified entries.
+    var segmentKey: String? {
+        guard let type = connectionType, let vpn = vpnActive else { return nil }
+        return NetworkSegment.key(connectionType: type, vpnActive: vpn,
+                                  ssid: networkSSID, subnet: localSubnet)
+    }
+
+    /// Field-wise initializer (tests / synthetic entries).
+    init(timestamp: Date, summary: String, issueCount: Int, primaryIssueCategory: String,
+         overallStatus: String, connectionType: String? = nil, vpnActive: Bool? = nil,
+         networkSSID: String? = nil, localSubnet: String? = nil) {
+        self.id = UUID()
+        self.timestamp = timestamp
+        self.summary = summary
+        self.issueCount = issueCount
+        self.primaryIssueCategory = primaryIssueCategory
+        self.overallStatus = overallStatus
+        self.connectionType = connectionType
+        self.vpnActive = vpnActive
+        self.networkSSID = networkSSID
+        self.localSubnet = localSubnet
+    }
+
     init(from result: DiagnosticResult) {
         self.id = UUID()
         self.timestamp = result.timestamp
@@ -138,6 +170,11 @@ struct DiagnosticHistoryEntry: Codable, Identifiable {
         self.issueCount = result.issues.count
         self.primaryIssueCategory = result.primaryIssue?.category.description ?? "None"
         self.overallStatus = result.overallStatus.color
+        let snap = result.networkSnapshot
+        self.connectionType = snap.connectionType?.displayName ?? "Unknown"
+        self.vpnActive = snap.vpn.isActive
+        self.networkSSID = snap.wifi.ssid
+        self.localSubnet = NetworkSegment.subnet(of: snap.localIP)
     }
 }
 
