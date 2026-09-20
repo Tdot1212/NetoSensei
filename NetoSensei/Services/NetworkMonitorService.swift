@@ -31,8 +31,10 @@ class NetworkMonitorService: ObservableObject {
     // Using nonisolated(unsafe) to allow cleanup in deinit
     nonisolated(unsafe) private var updateTimer: Timer?
 
-    // ISSUE 1 FIX: State-diff check — only run full update when something changed
-    private var lastPathDescription: String = ""
+    // Commit 10: rebuild only when the path IDENTITY changes (see PathIdentity).
+    // The previous gate compared NWPath.debugDescription, which changes on every
+    // radio handover and tunnel negotiation step.
+    private var lastPathIdentity: PathIdentity?
     private var lastSSID: String?
 
     // ISSUE 2 FIX: Cache CNCopyCurrentNetworkInfo failure so we skip straight to NEHotspotNetwork
@@ -120,16 +122,27 @@ class NetworkMonitorService: ObservableObject {
         let newMonitor = NWPathMonitor()
         self.monitor = newMonitor
 
-        // NWPathMonitor fires on actual network changes — triggers immediate full update
+        // NWPathMonitor fires on every path attribute change. Commit 10: only an
+        // IDENTITY change (status / physical interface / Wi-Fi subnet / tunnel
+        // routing) triggers a full rebuild. Handovers and tunnel flag churn are
+        // logged and skipped; the radio label follows handovers on its own
+        // (CellularRadioInfo observes CoreTelephony directly).
         newMonitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let identity = self.pathIdentity(for: path)
             let desc = path.debugDescription
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                // Only run full update if the path actually changed
-                if desc != self.lastPathDescription {
-                    self.lastPathDescription = desc
-                    debugLog("[Network] Path changed — running full update")
-                    await self.performUpdate()
+                if let reason = PathIdentity.rebuildReason(from: self.lastPathIdentity, to: identity) {
+                    self.lastPathIdentity = identity
+                    debugLog("[Network] Path changed (\(reason)) — running full update [\(identity)]")
+                    // force: a change during an in-flight rebuild waits for it and
+                    // re-runs, so a burst (tunnel negotiation) coalesces into at
+                    // most one extra rebuild and the final identity is measured.
+                    await self.performUpdate(force: true)
+                } else {
+                    let radio = await MainActor.run { CellularRadioInfo.shared.generation ?? "unknown" }
+                    debugLog("[Network] Path changed but identity unchanged (radio \(radio); \(desc)) — no rebuild")
                 }
             }
         }
@@ -1029,6 +1042,42 @@ class NetworkMonitorService: ObservableObject {
         }
 
         return nil
+    }
+
+    // MARK: - Path identity (Commit 10)
+
+    /// Synchronous, kernel-level identity of the active path. Conservative:
+    /// anything not proven stable across a handover/tunnel flap is included.
+    nonisolated private func pathIdentity(for path: Network.NWPath) -> PathIdentity {
+        let status: PathIdentity.Status
+        switch path.status {
+        case .satisfied: status = .satisfied
+        case .unsatisfied: status = .unsatisfied
+        case .requiresConnection: status = .requiresConnection
+        @unknown default: status = .unsatisfied
+        }
+
+        // The physical carrier. With a TUN VPN the path's own interface is the
+        // tunnel (type .other); the carrier is then found in availableInterfaces.
+        func physical(in interfaces: [NWInterface]) -> NWInterface? {
+            interfaces.first { $0.type == .wifi } ?? interfaces.first { $0.type == .cellular } ?? interfaces.first { $0.type == .wiredEthernet }
+        }
+        let direct = physical(in: path.usesInterfaceType(.wifi) || path.usesInterfaceType(.cellular) || path.usesInterfaceType(.wiredEthernet)
+                              ? path.availableInterfaces.filter { path.usesInterfaceType($0.type) } : [])
+        let carrier = direct ?? physical(in: path.availableInterfaces)
+        let physicalType: PathIdentity.Physical
+        switch carrier?.type {
+        case .wifi?: physicalType = .wifi
+        case .cellular?: physicalType = .cellular
+        case .wiredEthernet?: physicalType = .wired
+        default: physicalType = .none
+        }
+        // Routed through a tunnel = the path uses an .other interface (utun/ipsec)
+        // and does not use the physical type directly.
+        let viaTunnel = path.usesInterfaceType(.other) && !(path.usesInterfaceType(.wifi) || path.usesInterfaceType(.cellular) || path.usesInterfaceType(.wiredEthernet))
+        let subnet: String? = (physicalType == .wifi || physicalType == .wired) ? NetworkSegment.subnet(of: getLocalIP()) : nil
+
+        return PathIdentity(status: status, physical: physicalType, physicalName: carrier?.name, subnet: subnet, viaTunnel: viaTunnel)
     }
 
     nonisolated private func getCurrentInterface() -> NWInterface.InterfaceType? {

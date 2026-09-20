@@ -1265,3 +1265,50 @@ struct CellularCardTests {
         #expect(ConnectionCards.cellularCard(status: s, generation: nil, smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: stale, publicCountry: "CN")?.downloadMbps == nil)
     }
 }
+
+// MARK: - Path identity (Commit 10)
+
+struct PathIdentityTests {
+    static func id(_ status: PathIdentity.Status = .satisfied, _ physical: PathIdentity.Physical = .cellular,
+                   name: String? = "pdp_ip0", subnet: String? = nil, tunnel: Bool = false) -> PathIdentity {
+        PathIdentity(status: status, physical: physical, physicalName: name, subnet: subnet, viaTunnel: tunnel)
+    }
+
+    @Test func radioHandover_sameInterface_isSuppressed() {
+        // NSA-5G ↔ LTE: the kernel path is the same pdp_ip0; the identity does not carry the radio.
+        let before = Self.id(), after = Self.id()
+        #expect(PathIdentity.rebuildReason(from: before, to: after) == nil)
+    }
+
+    @Test func tunnelFlagChurn_withUnchangedRouting_isSuppressed() {
+        // Tunnel negotiation steps change ipv4/ipv6/dns flags in the description, not the identity.
+        let a = Self.id(tunnel: true), b = Self.id(tunnel: true)
+        #expect(PathIdentity.rebuildReason(from: a, to: b) == nil)
+    }
+
+    @Test func tunnelStartingOrStopping_toCarryTraffic_rebuilds() {
+        #expect(PathIdentity.rebuildReason(from: Self.id(tunnel: false), to: Self.id(tunnel: true)) == "VPN tunnel now carrying traffic")
+        #expect(PathIdentity.rebuildReason(from: Self.id(tunnel: true), to: Self.id(tunnel: false)) == "VPN tunnel no longer carrying traffic")
+    }
+
+    @Test func wifiToCellular_rebuilds() {
+        let wifi = Self.id(.satisfied, .wifi, name: "en0", subnet: "192.168.10")
+        let cell = Self.id()
+        #expect(PathIdentity.rebuildReason(from: wifi, to: cell)?.hasPrefix("interface wifi → cellular") == true)
+    }
+
+    @Test func ssidOrSubnetChange_rebuilds() {
+        let home = Self.id(.satisfied, .wifi, name: "en0", subnet: "192.168.10")
+        let hotel = Self.id(.satisfied, .wifi, name: "en0", subnet: "10.32.7")
+        #expect(PathIdentity.rebuildReason(from: home, to: hotel) == "subnet 192.168.10 → 10.32.7")
+    }
+
+    @Test func satisfiedToUnsatisfied_rebuilds() {
+        let up = Self.id(), down = Self.id(.unsatisfied, .none, name: nil)
+        #expect(PathIdentity.rebuildReason(from: up, to: down)?.hasPrefix("status satisfied → unsatisfied") == true)
+    }
+
+    @Test func firstPath_alwaysRebuilds() {
+        #expect(PathIdentity.rebuildReason(from: nil, to: Self.id()) == "first path")
+    }
+}
