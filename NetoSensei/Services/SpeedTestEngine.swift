@@ -29,9 +29,6 @@ class SpeedTestEngine: ObservableObject {
 
     // MARK: - Run Speed Test (GUARANTEED TO COMPLETE)
 
-    /// Whether the last speed test was against an overseas server (affects interpretation)
-    @Published var lastTestWasOverseas: Bool = false
-
     func runSpeedTest() async -> SpeedTestResult {
         debugLog("🚀 SpeedTestEngine: Starting speed test")
 
@@ -50,17 +47,36 @@ class SpeedTestEngine: ObservableObject {
         // as DashboardViewModel.networkIdentityKey). Observed, never guessed.
         let networkSSID = status.wifi.ssid
         let localSubnet = NetworkSegment.subnet(of: status.localIP)
-        // Diagnosis v2 §G: public-IP country for the cellular segment key. GeoIP
-        // first, the VPN detector's IP lookup as fallback; nil if neither has one.
-        let geo = GeoIPService.shared.currentGeoIP
-        let publicCountry = (geo.publicIP.isEmpty ? nil : geo.countryCode) ?? SmartVPNDetector.shared.detectionResult?.publicCountry
+        // Diagnosis v2 §G / Commit 11: ONE resolver for the exit country (same
+        // source the Home card and history use, so segment keys agree).
+        let publicCountry = ExitPath.country()
         let isInChina = SmartVPNDetector.shared.detectionResult?.isLikelyInChina ?? false
 
-        // Phase 1: Finding Server (10%)
+        // Phase 1: Finding Server (10%) — Commit 11: exit-path candidates,
+        // probe-disqualified, never a silent fallback.
         self.currentPhase = .findingServer; self.progress = 0.1
-        selectedServer = await findBestServer()
-        let serverLabel = isInternationalTest ? "\(currentServer.label) (overseas)" : currentServer.label
-        debugLog("✅ Server selected: \(serverLabel)")
+        let decision = await selectServer(exitCountry: publicCountry, vpnActive: vpnActive)
+        let serverLabel: String
+        let serverRegion: SpeedTestServerSelection.Region
+        switch decision {
+        case .selected(let candidate, let region):
+            selectedServer = candidate.hostname
+            serverLabel = candidate.label
+            serverRegion = region
+            debugLog("✅ Server selected: \(candidate.label) (\(region.text))")
+        case .unavailable(let reason):
+            debugLog("⛔ Speed test not run — \(reason)")
+            self.isRunning = false
+            self.currentPhase = .idle
+            var unavailable = SpeedTestResult(
+                downloadSpeed: 0, uploadSpeed: 0, ping: nil, jitter: nil, packetLoss: nil,
+                serverUsed: nil, serverLocation: nil, testDuration: 0,
+                connectionType: connectionType, vpnActive: vpnActive, ipAddress: ipAddress,
+                networkSSID: networkSSID, localSubnet: localSubnet, publicCountry: publicCountry
+            )
+            unavailable.testUnavailableReason = reason
+            return unavailable
+        }
 
         // Phase 2: Testing Ping (20%)
         self.currentPhase = .testingPing; self.progress = 0.2
@@ -74,8 +90,8 @@ class SpeedTestEngine: ObservableObject {
         // Phase 3: Testing Download (40%) - 30s timeout
         self.currentPhase = .testingDownload; self.progress = 0.4
         let (downloadSpeed, _) = await testDownloadSpeed(timeout: 30.0)
-        if downloadSpeed == 0 && isInChina && !vpnActive {
-            debugLog("⚠️ Download test failed — overseas server unreachable from China without VPN")
+        if downloadSpeed == 0 {
+            debugLog("⚠️ Download test failed against \(serverLabel) (\(serverRegion.text)) — no bytes moved")
         } else {
             debugLog("✅ Download: \(downloadSpeed) Mbps")
         }
@@ -96,16 +112,14 @@ class SpeedTestEngine: ObservableObject {
         debugLog("✅ Packet Loss: \(packetLoss.map { String(format: "%.1f", $0) + "%" } ?? "unmeasurable (probes blocked)")")
         self.progress = 1.0; self.currentPhase = .complete
 
-        self.lastTestWasOverseas = isInternationalTest
-
-        let result = SpeedTestResult(
+        var result = SpeedTestResult(
             downloadSpeed: downloadSpeed,
             uploadSpeed: uploadSpeed,
             ping: ping,
             jitter: jitter,
             packetLoss: packetLoss,
             serverUsed: serverLabel,
-            serverLocation: isInternationalTest ? "\(currentServer.location) (overseas)" : currentServer.location,
+            serverLocation: serverRegion.text,
             testDuration: 0,
             connectionType: connectionType,
             vpnActive: vpnActive,
@@ -115,6 +129,7 @@ class SpeedTestEngine: ObservableObject {
             localSubnet: localSubnet,
             publicCountry: publicCountry
         )
+        result.serverRegion = serverRegion.text
 
         self.isRunning = false
         self.currentPhase = .idle
@@ -123,86 +138,27 @@ class SpeedTestEngine: ObservableObject {
         return result
     }
 
-    // MARK: - Server Selection (China-aware)
-
-    /// Speed test server descriptor
-    struct SpeedTestServer {
-        let hostname: String
-        let label: String
-        let location: String
-        let isCloudflare: Bool  // Uses Cloudflare /__down / /__up API
-
-        /// Build download URL for this server
-        func downloadURL(bytes: Int) -> String {
-            if isCloudflare {
-                return "https://\(hostname)/__down?bytes=\(bytes)"
-            }
-            // For non-Cloudflare servers, download a fixed-size test file
-            // We'll measure whatever we get
-            return "https://\(hostname)/__down?bytes=\(bytes)"
-        }
-
-        /// Build upload URL for this server
-        func uploadURL() -> String {
-            return "https://\(hostname)/__up"
-        }
-    }
-
-    /// China-domestic speed test servers (tried in order)
-    private static let chinaDomesticServers: [SpeedTestServer] = [
-        // Cloudflare has China PoPs via JD Cloud partnership — often reachable and fast domestically
-        SpeedTestServer(hostname: "speed.cloudflare.com", label: "Cloudflare (China PoP)", location: "Cloudflare China", isCloudflare: true),
-    ]
-
-    private static let cloudflareServer = SpeedTestServer(
-        hostname: "speed.cloudflare.com", label: "Cloudflare", location: "Cloudflare", isCloudflare: true
-    )
+    // MARK: - Server Selection (Commit 11: exit-path, probe-disqualified, no silent fallback)
 
     /// Selected server for current test
-    private var selectedServer: String = "speed.cloudflare.com"
+    private var selectedServer: String = SpeedTestServerSelection.cloudflare.hostname
 
-    /// Whether we're testing via an international path (affects result interpretation)
-    private var isInternationalTest: Bool = false
-
-    /// The selected server descriptor
-    private var currentServer: SpeedTestServer = cloudflareServer
-
-    private func selectBestServer() -> String {
-        return selectedServer
-    }
-
-    /// Find the best reachable speed test server, considering China mode
-    private func findBestServer() async -> String {
-        let isInChina = SmartVPNDetector.shared.detectionResult?.isLikelyInChina ?? false
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-
-        if isInChina && !vpnActive {
-            // China without VPN: Try domestic servers first
-            for server in Self.chinaDomesticServers {
-                let (ok, latency) = await NetworkMonitorService.shared.pingHost(server.hostname, timeout: 3.0)
-                if ok {
-                    currentServer = server
-                    // If latency < 80ms, likely hitting a China PoP (domestic);
-                    // higher (or unmeasured) implies international routing. No 999
-                    // sentinel — an absent latency simply isn't "domestic".
-                    let isDomestic = (latency.map { $0 < 80 } ?? false)
-                    isInternationalTest = !isDomestic
-                    let routeLabel = isDomestic ? "domestic" : "international"
-                    debugLog("[SpeedTest] In China, \(server.label) reachable (\(routeLabel), \(latency.map { "\(Int($0))ms" } ?? "latency n/a"))")
-                    return server.hostname
-                }
-            }
-            // No servers reachable
-            isInternationalTest = true
-            currentServer = Self.cloudflareServer
-            debugLog("[SpeedTest] In China without VPN, all servers unreachable — speed test will likely fail")
-            return "speed.cloudflare.com"
+    /// Probe every candidate for the exit country with the same HTTPS-HEAD
+    /// probe the rest of the app uses, then let the pure rules decide.
+    private func selectServer(exitCountry: String?, vpnActive: Bool) async -> SpeedTestServerSelection.Decision {
+        let candidates = SpeedTestServerSelection.candidates(forExitCountry: exitCountry)
+        var probes: [SpeedTestServerSelection.Probe] = []
+        for c in candidates {
+            let (ok, rtt) = await NetworkMonitorService.shared.pingHost(c.hostname, timeout: 3.0)
+            let measured = ok ? LatencyValidation.normalize(rtt) : nil
+            debugLog("[SpeedTest] Candidate \(c.label) (\(c.hostname)) exit=\(exitCountry ?? "unknown") vpn=\(vpnActive): \(ok ? "reachable" : "unreachable")\(measured.map { ", probe \(Int($0)) ms" } ?? "")")
+            probes.append(.init(candidate: c, reachable: ok, rttMs: measured))
         }
-
-        // Outside China or VPN active: use Cloudflare
-        isInternationalTest = false
-        currentServer = Self.cloudflareServer
-        return "speed.cloudflare.com"
+        let decision = SpeedTestServerSelection.decide(probes: probes, vpnActive: vpnActive, exitCountry: exitCountry)
+        if case .unavailable(let reason) = decision {
+            debugLog("[SpeedTest] No suitable server: \(reason)")
+        }
+        return decision
     }
 
     // MARK: - Latency Test (Phase 3: sentinel-free, interception-aware)

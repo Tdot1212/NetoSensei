@@ -243,10 +243,9 @@ enum VerdictInputs {
 
     @MainActor
     static func currentContext(status: NetworkStatus) -> VerdictContext {
-        let geo = GeoIPService.shared.currentGeoIP
         return context(status: status,
                        vpnResult: SmartVPNDetector.shared.detectionResult,
-                       geoCountryCode: geo.publicIP.isEmpty ? nil : geo.countryCode,
+                       geoCountryCode: ExitPath.country(),                        // Commit 11: one resolver
                        radioTechnology: CellularRadioInfo.shared.generation)   // Commit 9: current data-service radio, change-notified
     }
 

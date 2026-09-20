@@ -54,9 +54,8 @@ class HistoryManager: ObservableObject {
     func addDiagnostic(_ result: DiagnosticResult) {
         // Diagnosis v2 §G: record the public-IP country so cellular runs on
         // different SIMs/countries are never compared as a trend.
-        let geo = GeoIPService.shared.currentGeoIP
-        let country = geo.publicIP.isEmpty ? nil : geo.countryCode
-        let entry = DiagnosticHistoryEntry(from: result, publicCountry: country ?? SmartVPNDetector.shared.detectionResult?.publicCountry)
+        // Commit 11: ExitPath is the one resolver, so records and cards agree.
+        let entry = DiagnosticHistoryEntry(from: result, publicCountry: ExitPath.country())
         diagnosticHistory.insert(entry, at: 0)
 
         // Keep only recent results

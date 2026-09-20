@@ -441,13 +441,21 @@ final class AIPreflightCollector: ObservableObject {
             await completeStep(5, status: cached.downloadSpeed > 0 ? .completed : .failed)
         } else {
             let speed = await SpeedTestEngine.shared.runSpeedTest()
-            applySpeedTestResult(speed, to: &snapshot)
-            HistoryManager.shared.addSpeedTest(speed)
-            // Only mark feature tested when we actually got a download measurement.
-            // A zero download means the test failed — don't feed "0 Mbps" to the AI as real data.
-            let ok = speed.downloadSpeed > 0
-            setFeature("speed_test", ok)
-            await completeStep(5, status: ok ? .completed : .failed)
+            if let reason = speed.testUnavailableReason {
+                // Commit 11: no suitable server → not a measurement. Nothing
+                // stored, nothing fed to the AI, step honestly failed.
+                debugLog("[AI Preflight] Speed test not run — \(reason)")
+                setFeature("speed_test", false)
+                await completeStep(5, status: .failed)
+            } else {
+                applySpeedTestResult(speed, to: &snapshot)
+                HistoryManager.shared.addSpeedTest(speed)
+                // Only mark feature tested when we actually got a download measurement.
+                // A zero download means the test failed — don't feed "0 Mbps" to the AI as real data.
+                let ok = speed.downloadSpeed > 0
+                setFeature("speed_test", ok)
+                await completeStep(5, status: ok ? .completed : .failed)
+            }
         }
 
         // ---- Step 6: DNS security ----

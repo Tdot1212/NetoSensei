@@ -123,6 +123,22 @@ class SpeedTestViewModel: ObservableObject {
             // Check for cancellation before updating UI
             guard !Task.isCancelled else { return }
 
+            // Commit 11: no suitable server → the test did not run. Show the
+            // reason; store nothing (a 0/0 record is not a measurement).
+            if let reason = final.testUnavailableReason {
+                debugLog("⛔ SpeedTestViewModel: test not run — \(reason)")
+                await MainActor.run { [weak self] in
+                    guard let self = self else { return }
+                    self.result = nil
+                    self.errorMessage = reason
+                    self.isRunning = false
+                    self.progress = 0.0
+                    self.currentPhase = .idle
+                    HapticFeedback.error()
+                }
+                return
+            }
+
             debugLog("✅ SpeedTestViewModel: Got result - Download: \(final.downloadSpeed) Mbps")
 
             // Update UI: Complete (already on MainActor)

@@ -1312,3 +1312,121 @@ struct PathIdentityTests {
         #expect(PathIdentity.rebuildReason(from: nil, to: Self.id()) == "first path")
     }
 }
+
+// MARK: - Commit 11: speed-test server selection (exit path, probe disqualification, no silent fallback)
+
+@Suite("Commit 11 — speed-test server selection")
+struct SpeedTestServerSelectionTests {
+    typealias Sel = SpeedTestServerSelection
+    static let cf = Sel.cloudflare
+    static func probe(_ c: Sel.Candidate = cf, reachable: Bool = true, rtt: Double?) -> Sel.Probe {
+        Sel.Probe(candidate: c, reachable: reachable, rttMs: rtt)
+    }
+
+    // The exact device case: Guangzhou, no VPN, the only candidate answers in 1162 ms.
+    @Test func implausibleProbe_withoutVPN_isDisqualified_notMeasured() {
+        let d = Sel.decide(probes: [Self.probe(rtt: 1162)], vpnActive: false, exitCountry: "CN")
+        guard case .unavailable(let reason) = d else { Issue.record("selected a server 1162 ms away"); return }
+        #expect(reason.contains("1162 ms"))
+        #expect(reason.contains("international route"))
+        #expect(reason.contains("from CN"))
+    }
+
+    @Test func nearbyProbe_withoutVPN_isSelected_andLabelledNearby() {
+        let d = Sel.decide(probes: [Self.probe(rtt: 180)], vpnActive: false, exitCountry: "US")
+        #expect(d == .selected(Self.cf, .nearby(probeMs: 180)))
+        if case .selected(_, let r) = d { #expect(r.text == "nearby — 180 ms probe") }
+    }
+
+    @Test func thresholdIsExclusive_andJustifiedByThreeRTTs() {
+        // 400 ms HEAD = 3 network RTTs + TLS. Same-region worst case (cellular,
+        // ~120 ms RTT) ≈ 360 ms passes; the shortest cross-ocean path from
+        // East Asia (~150 ms RTT → ≥ 450 ms HEAD) fails.
+        #expect(Sel.nearbyProbeThresholdMs == 400)
+        #expect(Sel.decide(probes: [Self.probe(rtt: 399)], vpnActive: false, exitCountry: nil) == .selected(Self.cf, .nearby(probeMs: 399)))
+        if case .selected = Sel.decide(probes: [Self.probe(rtt: 400)], vpnActive: false, exitCountry: nil) { Issue.record("400 ms must not count as nearby") }
+        if case .selected = Sel.decide(probes: [Self.probe(rtt: 450)], vpnActive: false, exitCountry: nil) { Issue.record("450 ms (US West Coast from East Asia) must not count as nearby") }
+    }
+
+    @Test func noReachableServer_isUnavailable_neverAFallback() {
+        let d = Sel.decide(probes: [Self.probe(reachable: false, rtt: nil)], vpnActive: false, exitCountry: "CN")
+        guard case .unavailable(let reason) = d else { Issue.record("fell back to an unreachable server"); return }
+        #expect(reason.contains("didn't answer"))
+        // With a VPN too: unreachable is unreachable.
+        if case .selected = Sel.decide(probes: [Self.probe(reachable: false, rtt: nil)], vpnActive: true, exitCountry: "US") { Issue.record("selected an unreachable server through VPN") }
+        // No candidates at all is also honest.
+        if case .unavailable(let r) = Sel.decide(probes: [], vpnActive: false, exitCountry: nil) { #expect(r.contains("no test servers are configured")) } else { Issue.record("empty candidate list selected something") }
+    }
+
+    @Test func reachableButUnmeasured_withoutVPN_isNotSelected() {
+        // Reachable with no round-trip figure: distance can't be judged, so it
+        // cannot be called nearby.
+        let d = Sel.decide(probes: [Self.probe(rtt: nil)], vpnActive: false, exitCountry: "CN")
+        if case .selected = d { Issue.record("selected without a probe figure") }
+    }
+
+    @Test func vpnOn_probeIncludesTunnel_soDistanceIsNotJudged_andLabelSaysThroughVPN() {
+        // The same 1162 ms that disqualifies a direct path is accepted through
+        // a VPN — the tunnel path is what the user experiences — and labelled.
+        let d = Sel.decide(probes: [Self.probe(rtt: 1162)], vpnActive: true, exitCountry: "US")
+        #expect(d == .selected(Self.cf, .viaVPN(probeMs: 1162)))
+        if case .selected(_, let r) = d { #expect(r.text == "through your VPN — 1162 ms probe") }
+        #expect(Sel.Region.viaVPN(probeMs: nil).text == "through your VPN")
+    }
+
+    @Test func candidatesFollowTheExitCountry_notTheLocale() {
+        // Same host everywhere today, but the CN entry says what it really is:
+        // no candidate is ever labelled a "China PoP" by assertion.
+        let cn = Sel.candidates(forExitCountry: "cn")
+        #expect(cn.count == 1 && cn[0].hostname == "speed.cloudflare.com" && cn[0].label == "Cloudflare")
+        #expect(!cn[0].label.contains("China PoP"))
+        #expect(cn[0].servesFrom.contains("only if the probe is nearby"))
+        #expect(Sel.candidates(forExitCountry: "US") == [Self.cf])
+        #expect(Sel.candidates(forExitCountry: nil) == [Self.cf])
+    }
+
+    @Test func firstQualifyingCandidateWins_laterOnesNotNeeded() {
+        let far = Sel.Candidate(hostname: "far.example", label: "Far", servesFrom: "elsewhere")
+        let near = Sel.Candidate(hostname: "near.example", label: "Near", servesFrom: "here")
+        let d = Sel.decide(probes: [Self.probe(far, rtt: 900), Self.probe(near, rtt: 120)], vpnActive: false, exitCountry: "CN")
+        #expect(d == .selected(near, .nearby(probeMs: 120)))
+    }
+
+    // MARK: Result contract
+
+    @Test func speedTestResult_roundTripsRegionAndUnavailableReason_andLegacyDecodesNil() throws {
+        var r = SpeedTestResult(downloadSpeed: 150, uploadSpeed: 30, ping: 40, jitter: 3, packetLoss: 0,
+                                serverUsed: "Cloudflare", serverLocation: "nearby — 180 ms probe", testDuration: 0,
+                                connectionType: "Cellular", vpnActive: false, publicCountry: "CN")
+        r.serverRegion = "nearby — 180 ms probe"
+        let back = try JSONDecoder().decode(SpeedTestResult.self, from: JSONEncoder().encode(r))
+        #expect(back.serverRegion == "nearby — 180 ms probe" && back.testUnavailableReason == nil)
+
+        // A pre-Commit-11 record (no serverRegion / testUnavailableReason keys) still decodes.
+        let legacy = """
+        {"id":"9A3E2C1A-6B4F-4B0C-9E7B-1F2D3C4B5A69","timestamp":700000000,"downloadSpeed":88.5,"uploadSpeed":12.1,
+         "testDuration":0,"connectionType":"WiFi","vpnActive":false,"quality":"Good"}
+        """.data(using: .utf8)!
+        let l = try JSONDecoder().decode(SpeedTestResult.self, from: legacy)
+        #expect(l.serverRegion == nil && l.testUnavailableReason == nil && l.downloadSpeed == 88.5)
+    }
+
+    // MARK: Segment-key agreement (the Home cellular card gap)
+
+    @Test func cellularRecordAndCard_shareAKey_whenResolvedFromTheSameSource() {
+        // Before Commit 11 the record keyed "Cellular|direct|CN" (GeoIP ?? detector)
+        // while the card keyed GeoIP-only → "Cellular|direct|-" on a fresh launch.
+        // The fix is the same resolver on both sides, not a looser match:
+        // the rule below must still refuse a different country.
+        let record = SpeedTestResult(downloadSpeed: 150, uploadSpeed: 30, ping: 40, jitter: 3, packetLoss: 0,
+                                     testDuration: 0, connectionType: "Cellular", vpnActive: false, publicCountry: "CN")
+        #expect(record.segmentKey == "Cellular|direct|CN")
+        let s = CellularCardTests.status(type: .cellular, wifi: false)
+        let same = ConnectionCards.cellularCard(status: s, generation: "5G", smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: record, publicCountry: "CN")
+        #expect(same?.downloadMbps == 150 && same?.uploadMbps == 30)
+        let unresolved = ConnectionCards.cellularCard(status: s, generation: "5G", smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: record, publicCountry: nil)
+        #expect(unresolved?.downloadMbps == nil)   // "-" ≠ "CN": still no match — by design
+        let otherSIM = ConnectionCards.cellularCard(status: s, generation: "5G", smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: record, publicCountry: "US")
+        #expect(otherSIM?.downloadMbps == nil)
+    }
+}

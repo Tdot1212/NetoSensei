@@ -495,14 +495,19 @@ struct DashboardView: View {
     // MARK: - Cellular Card (Commit 9)
 
     private var cellularCardModel: CellularCardModel? {
-        let geo = vm.geoIPInfo
+        // Commit 11: the record was keyed with ExitPath.country() at test time;
+        // resolve the card's key from the same source (GeoIP, else the VPN
+        // detector's lookup) so a fresh launch with GeoIP still pending does
+        // not produce "Cellular|direct|-" against a "Cellular|direct|CN" record.
+        // `_ = vm.geoIPInfo` keeps the view re-evaluating when GeoIP resolves.
+        _ = vm.geoIPInfo
         return ConnectionCards.cellularCard(
             status: vm.status,
             generation: cellularRadio.generation,
             smoothedLatency: vm.smoothedInternetLatency,
             smoothedDNS: vm.smoothedDNSLatency,
             recentSpeedTest: HistoryManager.shared.speedTestHistory.first,
-            publicCountry: geo.publicIP.isEmpty ? nil : geo.countryCode
+            publicCountry: ExitPath.country()
         )
     }
 

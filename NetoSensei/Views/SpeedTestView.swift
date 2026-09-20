@@ -55,6 +55,10 @@ struct SpeedTestContentView: View {
                     } else if let result = vm.result {
                         // Results
                         resultsView(result: result)
+                    } else if let reason = vm.errorMessage {
+                        // Commit 11: the test did not run (no suitable server) —
+                        // say why, in the words the selection produced.
+                        testNotRunView(reason: reason)
                     } else {
                         // Intro
                         introView
@@ -164,6 +168,9 @@ struct SpeedTestContentView: View {
             // Big download number
             downloadSpeedCard(result: result)
 
+            // Commit 11: what the number was measured against
+            serverLine(result: result)
+
             // Metrics row with explanations
             metricsRow(result: result)
 
@@ -191,6 +198,74 @@ struct SpeedTestContentView: View {
         }
     }
 
+    // MARK: - Server line (Commit 11)
+
+    /// "Measured against Cloudflare — nearby — 180 ms probe" or
+    /// "… — through your VPN — 540 ms probe". Legacy records without a
+    /// region note show the server only.
+    @ViewBuilder
+    private func serverLine(result: SpeedTestResult) -> some View {
+        if let server = result.serverUsed {
+            HStack(spacing: 6) {
+                Image(systemName: "server.rack")
+                Text("Measured against \(server)" + (result.serverRegion.map { " — \($0)" } ?? ""))
+            }
+            .font(.caption)
+            .foregroundColor(AppColors.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, UIConstants.spacingS)
+            if result.vpnActive {
+                Text("With a VPN on, the server sits near your tunnel's exit; its distance from the phone can't be judged from here. The number is what you get through the VPN.")
+                    .font(.caption2)
+                    .foregroundColor(AppColors.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, UIConstants.spacingS)
+            }
+        }
+    }
+
+    // MARK: - Test Not Run View (Commit 11)
+
+    private func testNotRunView(reason: String) -> some View {
+        VStack(spacing: UIConstants.spacingXL) {
+            Spacer()
+
+            Image(systemName: "mappin.slash")
+                .font(.system(size: 60))
+                .foregroundColor(AppColors.yellow)
+
+            VStack(spacing: UIConstants.spacingM) {
+                Text("Test Not Run")
+                    .font(.title.bold())
+
+                Text(reason)
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(AppColors.textSecondary)
+                    .padding(.horizontal)
+            }
+
+            Button(action: {
+                HapticFeedback.medium()
+                vm.runSpeedTest()
+            }) {
+                HStack {
+                    Image(systemName: "arrow.clockwise")
+                    Text("Try Again")
+                        .font(.headline)
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(AppColors.accent)
+                .foregroundColor(.white)
+                .cornerRadius(UIConstants.cornerRadiusL)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, UIConstants.spacingXL)
+
+            Spacer()
+        }
+    }
+
     // MARK: - Complete Failure View
 
     private var completeFailureView: some View {
@@ -209,6 +284,14 @@ struct SpeedTestContentView: View {
                     .multilineTextAlignment(.center)
                     .foregroundColor(AppColors.textSecondary)
                     .padding(.horizontal)
+
+                if let result = vm.result, let server = result.serverUsed {
+                    Text("Server: \(server)" + (result.serverRegion.map { " — \($0)" } ?? "") + ". It answered the reachability probe but moved no bytes.")
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(AppColors.textSecondary)
+                        .padding(.horizontal)
+                }
 
                 VStack(alignment: .leading, spacing: UIConstants.spacingS) {
                     Text("• VPN or proxy blocking test servers")

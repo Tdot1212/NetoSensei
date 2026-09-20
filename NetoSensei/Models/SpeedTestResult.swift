@@ -49,6 +49,13 @@ struct SpeedTestResult: Codable, Identifiable {
     var localSubnet: String? = nil   // /24 prefix of the local IPv4 address
     var publicCountry: String? = nil // GeoIP country code at test time (Diagnosis v2 §G; cellular key only)
 
+    // Commit 11: what the number was measured against, and why a test could not run.
+    /// "nearby — 180 ms probe" / "through your VPN — 540 ms probe". nil on legacy records.
+    var serverRegion: String? = nil
+    /// Set when no suitable server was found; the record then carries no measurement
+    /// and is NOT saved to history.
+    var testUnavailableReason: String? = nil
+
     // Performance rating
     var quality: QualityRating
 
@@ -73,6 +80,7 @@ struct SpeedTestResult: Codable, Identifiable {
         case serverUsed, serverLocation, testDuration
         case connectionType, vpnActive, ipAddress
         case networkSSID, localSubnet, publicCountry
+        case serverRegion, testUnavailableReason
         case quality
     }
 
@@ -97,6 +105,8 @@ struct SpeedTestResult: Codable, Identifiable {
         networkSSID = try c.decodeIfPresent(String.self, forKey: .networkSSID)
         localSubnet = try c.decodeIfPresent(String.self, forKey: .localSubnet)
         publicCountry = try c.decodeIfPresent(String.self, forKey: .publicCountry)
+        serverRegion = try c.decodeIfPresent(String.self, forKey: .serverRegion)
+        testUnavailableReason = try c.decodeIfPresent(String.self, forKey: .testUnavailableReason)
         quality = try c.decode(QualityRating.self, forKey: .quality)
     }
 
