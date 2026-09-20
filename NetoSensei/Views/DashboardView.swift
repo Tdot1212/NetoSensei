@@ -20,6 +20,8 @@ struct DashboardView: View {
     @State private var showingSettings = false
     @State private var versionTapCount = 0
     @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject private var cellularRadio = CellularRadioInfo.shared
+    @State private var showingCellularInfo = false
 
     var body: some View {
         NavigationView {
@@ -41,8 +43,15 @@ struct DashboardView: View {
                             signalStrengthCard
                         }
 
-                        // Wi-Fi Card
-                        wifiCard
+                        // Commit 9: cellular is a first-class connection. On
+                        // cellular-only the Wi-Fi card is HIDDEN (its absence is
+                        // not a failure); on dual-stack both cards show.
+                        if ConnectionCards.showsCellularCard(vm.status) {
+                            cellularCard
+                        }
+                        if ConnectionCards.showsWiFiCard(vm.status) {
+                            wifiCard
+                        }
 
                         // Router Card (FIXED: yellow warning when VPN active)
                         routerCard
@@ -478,6 +487,135 @@ struct DashboardView: View {
                         value: vm.connectionTypeDescription,
                         color: AppColors.green
                     )
+                }
+            }
+        }
+    }
+
+    // MARK: - Cellular Card (Commit 9)
+
+    private var cellularCardModel: CellularCardModel? {
+        let geo = vm.geoIPInfo
+        return ConnectionCards.cellularCard(
+            status: vm.status,
+            generation: cellularRadio.generation,
+            smoothedLatency: vm.smoothedInternetLatency,
+            smoothedDNS: vm.smoothedDNSLatency,
+            recentSpeedTest: HistoryManager.shared.speedTestHistory.first,
+            publicCountry: geo.publicIP.isEmpty ? nil : geo.countryCode
+        )
+    }
+
+    private var cellularCard: some View {
+        Group {
+            if let m = cellularCardModel {
+                CardView {
+                    VStack(alignment: .leading, spacing: UIConstants.spacingM) {
+                        HStack {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .font(.system(size: UIConstants.iconSizeM))
+                                .foregroundColor(AppColors.textSecondary)
+                            Text("Cellular")
+                                .font(.headline)
+                            Spacer()
+                            Button {
+                                showingCellularInfo = true
+                            } label: {
+                                Image(systemName: "info.circle")
+                                    .font(.subheadline)
+                                    .foregroundColor(AppColors.accent)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("About cellular measurements")
+                        }
+
+                        // Positive statement of the connection; the generation
+                        // only when iOS reported one.
+                        StatusRow(title: "Status", value: vm.isInitializing ? "Detecting..." : m.statusText,
+                                  color: vm.isInitializing ? .secondary : AppColors.green)
+
+                        if let text = m.latencyText {
+                            StatusRow(title: "Latency", value: text,
+                                      color: m.latencyMs.map { latencyColor($0) } ?? AppColors.yellow)
+                        }
+                        if let dns = m.dnsMs {
+                            StatusRow(title: "DNS", value: "\(Int(dns))ms", color: dnsLatencyColor(dns))
+                        }
+                        if let down = m.downloadMbps {
+                            StatusRow(title: "Download", value: String(format: "%.1f Mbps", down), color: NetworkColors.forSpeed(down))
+                        }
+                        if let up = m.uploadMbps {
+                            StatusRow(title: "Upload", value: String(format: "%.1f Mbps", up), color: NetworkColors.forSpeed(up))
+                        }
+                        if let loss = m.packetLossPercent {
+                            StatusRow(title: "Packet loss", value: String(format: "%.1f%%", loss), color: NetworkColors.forPacketLoss(loss))
+                        }
+                        if let j = m.jitterMs {
+                            StatusRow(title: "Jitter", value: "\(Int(j))ms", color: NetworkColors.forJitter(j))
+                        }
+                        if m.downloadMbps == nil {
+                            Text("Run a speed test on this connection to see throughput here.")
+                                .font(.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
+                    }
+                }
+                .sheet(isPresented: $showingCellularInfo) {
+                    cellularInfoSheet(m)
+                }
+            }
+        }
+    }
+
+    private func cellularInfoSheet(_ m: CellularCardModel) -> some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: UIConstants.spacingL) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Signal strength")
+                            .font(.headline)
+                        Text(CellularRadioInfo.signalStrengthLimitation)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Radio")
+                            .font(.headline)
+                        Text(m.generation.map { "iOS reports this connection as \($0)." }
+                             ?? "iOS did not report a radio generation for this connection, so none is shown.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        if let raw = cellularRadio.rawTechnology {
+                            Text("Reported value: \(raw)")
+                                .font(.caption2.monospaced())
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("What is measured here")
+                            .font(.headline)
+                        Text("Latency is a TCP handshake to a public resolver over the cellular path (\"Via VPN/proxy\" when a local tunnel answers it instead). DNS is a real lookup. Download, upload, packet loss and jitter come from the most recent speed test, shown only if it ran on this same connection in the last 10 minutes. Carrier name is not shown: iOS no longer provides it to apps.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Not measured on cellular")
+                            .font(.headline)
+                        Text("There is no local router on a mobile connection, so the router check is not applicable rather than failed.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Cellular")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showingCellularInfo = false }
                 }
             }
         }

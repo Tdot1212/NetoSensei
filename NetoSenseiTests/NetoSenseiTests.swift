@@ -7,6 +7,8 @@
 
 import Testing
 import Foundation
+import Network
+import CoreTelephony
 @testable import NetoSensei
 
 struct NetoSenseiTests {
@@ -705,7 +707,7 @@ struct VerdictPatternTests {
         #expect(Self.isNotFixable(f))
         #expect(f?.byDesign == true && v.state == .degraded)                 // never "broken"
         #expect(f?.confidence.level == .medium)
-        #expect(f?.confidence.reason.contains("does not let apps read cellular signal strength") == true)
+        #expect(f?.confidence.reason.contains("let apps read cellular signal strength") == true)
         #expect(f?.evidence.count == 4)
         if case .notFixable(_, let expect, let workarounds) = f?.action { #expect(!expect.isEmpty && workarounds.count >= 2) }
         // The generic loss/jitter findings must not double-report the same checks.
@@ -1179,5 +1181,87 @@ struct RefreshPolicyTests {
         #expect(VM.forcesMonitorUpdate(.userInitiated))
         #expect(VM.forcesMonitorUpdate(.foreground))
         #expect(!VM.forcesMonitorUpdate(.automatic))
+    }
+}
+
+// MARK: - Cellular as a first-class connection (Commit 9)
+
+struct CellularCardTests {
+
+    static func status(type: NWInterface.InterfaceType?, wifi: Bool, latency: Double? = 48, intercepted: Bool = false,
+                       dns: Double? = 30, vpn: Bool = false, publicIP: String? = "120.239.73.125") -> NetworkStatus {
+        var s = NetworkStatus.empty
+        s.connectionType = type
+        s.wifi.isConnected = wifi
+        s.internet.latencyToExternal = latency
+        s.internet.latencyIntercepted = intercepted
+        s.internet.isReachable = true
+        s.dns.latency = dns
+        s.dns.lookupSuccess = dns != nil
+        s.vpn.isActive = vpn
+        s.publicIP = publicIP
+        return s
+    }
+
+    @Test func radioGeneration_mapsOnlyWhatiOSReports_neverADefault() {
+        #expect(CellularRadioInfo.generationLabel(forRawTechnology: CTRadioAccessTechnologyNR) == "5G")
+        #expect(CellularRadioInfo.generationLabel(forRawTechnology: CTRadioAccessTechnologyNRNSA) == "5G")
+        #expect(CellularRadioInfo.generationLabel(forRawTechnology: CTRadioAccessTechnologyLTE) == "LTE")
+        #expect(CellularRadioInfo.generationLabel(forRawTechnology: CTRadioAccessTechnologyWCDMA) == "3G")
+        #expect(CellularRadioInfo.generationLabel(forRawTechnology: CTRadioAccessTechnologyEdge) == "2G")
+        #expect(CellularRadioInfo.generationLabel(forRawTechnology: nil) == nil)
+        #expect(CellularRadioInfo.generationLabel(forRawTechnology: "CTRadioAccessTechnologyFuture") == nil)
+    }
+
+    @Test func cellularOnly_showsCellularCard_hidesWiFiCard() {
+        let s = Self.status(type: .cellular, wifi: false)
+        #expect(ConnectionCards.showsCellularCard(s))
+        #expect(!ConnectionCards.showsWiFiCard(s))
+        #expect(ConnectionCards.isCellularOnly(s))
+    }
+
+    @Test func dualStack_showsBothCards_wifiOnly_showsOnlyWiFi() {
+        let dual = Self.status(type: .cellular, wifi: true)         // cellular carries traffic, Wi-Fi still associated
+        #expect(ConnectionCards.showsCellularCard(dual) && ConnectionCards.showsWiFiCard(dual))
+        #expect(!ConnectionCards.isCellularOnly(dual))
+        let wifi = Self.status(type: .wifi, wifi: true)
+        #expect(!ConnectionCards.showsCellularCard(wifi) && ConnectionCards.showsWiFiCard(wifi))
+        // No path at all: the Wi-Fi card stays so it can explain an offline phone.
+        #expect(ConnectionCards.showsWiFiCard(Self.status(type: nil, wifi: false)))
+    }
+
+    @Test func cellularCard_statesConnectionPositively_withGenerationOnlyWhenKnown() {
+        let s = Self.status(type: .cellular, wifi: false)
+        let known = ConnectionCards.cellularCard(status: s, generation: "5G", smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: nil, publicCountry: "CN")
+        #expect(known?.statusText == "Connected — 5G" && known?.generation == "5G")
+        let unknown = ConnectionCards.cellularCard(status: s, generation: nil, smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: nil, publicCountry: "CN")
+        #expect(unknown?.statusText == "Connected" && unknown?.generation == nil)
+        #expect(ConnectionCards.cellularCard(status: Self.status(type: .wifi, wifi: true), generation: "5G", smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: nil, publicCountry: nil) == nil)
+    }
+
+    @Test func cellularCard_carriesTheExistingMeasurements_andInterception() {
+        let s = Self.status(type: .cellular, wifi: false, latency: 48, dns: 30)
+        let m = ConnectionCards.cellularCard(status: s, generation: "LTE", smoothedLatency: 52, smoothedDNS: nil, recentSpeedTest: nil, publicCountry: "CN")
+        #expect(m?.latencyText == "52ms" && m?.latencyMs == 52)      // smoothed value preferred
+        #expect(m?.dnsMs == 30)
+        #expect(m?.downloadMbps == nil)                              // no speed test → no invented throughput
+        let intercepted = ConnectionCards.cellularCard(status: Self.status(type: .cellular, wifi: false, latency: nil, intercepted: true),
+                                                       generation: "LTE", smoothedLatency: 3, smoothedDNS: nil, recentSpeedTest: nil, publicCountry: "CN")
+        #expect(intercepted?.latencyText == "Via VPN/proxy" && intercepted?.latencyMs == nil)   // stale smoothed value never leaks
+    }
+
+    @Test func cellularCard_usesSpeedTest_onlyIfFreshAndSameSegment() {
+        let s = Self.status(type: .cellular, wifi: false)
+        var fresh = SpeedTestResult(downloadSpeed: 42, uploadSpeed: 8, ping: 60, jitter: 12, packetLoss: 0.5, testDuration: 0,
+                                    connectionType: "Cellular", vpnActive: false, publicCountry: "CN")
+        fresh.timestamp = Date()
+        let m = ConnectionCards.cellularCard(status: s, generation: nil, smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: fresh, publicCountry: "CN")
+        #expect(m?.downloadMbps == 42 && m?.uploadMbps == 8 && m?.packetLossPercent == 0.5 && m?.jitterMs == 12)
+        // Other country (other SIM) → not this segment.
+        let other = ConnectionCards.cellularCard(status: s, generation: nil, smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: fresh, publicCountry: "US")
+        #expect(other?.downloadMbps == nil)
+        // Stale → not evidence.
+        var stale = fresh; stale.timestamp = Date().addingTimeInterval(-3600)
+        #expect(ConnectionCards.cellularCard(status: s, generation: nil, smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: stale, publicCountry: "CN")?.downloadMbps == nil)
     }
 }

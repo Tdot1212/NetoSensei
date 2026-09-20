@@ -182,7 +182,7 @@ enum VerdictPatterns {
         let radio = ctx.radioTechnology.map { " on \($0)" } ?? ""
         return Finding(
             kind: .towerCongestion, severity: MetricBands.internetDelay(ms: ext, viaVPN: viaVPN),
-            confidence: Confidence(level: .medium, reason: "Inferred from slow AND unsteady delay\(radio); iOS does not let apps read cellular signal strength, so a weak signal cannot be ruled out"),
+            confidence: Confidence(level: .medium, reason: "Inferred from slow AND unsteady delay\(radio). iOS doesn't let apps read cellular signal strength, so a weak signal cannot be ruled out"),
             headline: "The cell tower here is crowded",
             evidence: evidence,
             cause: "Nothing on your phone is broken. Many people are sharing this tower, so every packet waits in line — delay jumps around and speed drops.",

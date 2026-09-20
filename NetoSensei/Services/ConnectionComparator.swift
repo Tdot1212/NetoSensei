@@ -735,53 +735,12 @@ class ConnectionComparator: ObservableObject {
 
     // MARK: - Cellular Info
 
+    /// Commit 9: radio generation comes from CellularRadioInfo (current API,
+    /// change-notified). Carrier name is NOT read — CTCarrier is deprecated
+    /// with no replacement and returns "--" on modern iOS; a placeholder would
+    /// be a fabrication.
     private func updateCellularInfo() {
-        // Note: CTCarrier APIs are deprecated in iOS 16+ but still functional.
-        // Apple has not provided a replacement.
-        let networkInfo = CTTelephonyNetworkInfo()
-
-        if #available(iOS 16.0, *) {
-            // On iOS 16+, carrier info may return "--" but we try anyway
-            if let carriers = networkInfo.serviceSubscriberCellularProviders,
-               let carrier = carriers.values.first {
-                let carrierName = carrier.carrierName
-
-                var radioTech: String?
-                if let techDict = networkInfo.serviceCurrentRadioAccessTechnology,
-                   let tech = techDict.values.first {
-                    radioTech = simplifyRadioTech(tech)
-                }
-
-                cellularInfo = CellularInfo(
-                    carrierName: carrierName != "--" ? carrierName : nil,
-                    radioTechnology: radioTech
-                )
-            }
-        } else {
-            // Pre-iOS 16
-            if let carrier = networkInfo.serviceSubscriberCellularProviders?.values.first {
-                let carrierName = carrier.carrierName
-
-                var radioTech: String?
-                if let techDict = networkInfo.serviceCurrentRadioAccessTechnology,
-                   let tech = techDict.values.first {
-                    radioTech = simplifyRadioTech(tech)
-                }
-
-                cellularInfo = CellularInfo(
-                    carrierName: carrierName,
-                    radioTechnology: radioTech
-                )
-            }
-        }
-    }
-
-    private func simplifyRadioTech(_ tech: String) -> String {
-        if tech.contains("NR") { return "5G" }
-        if tech.contains("LTE") { return "4G LTE" }
-        if tech.contains("WCDMA") || tech.contains("HSDPA") || tech.contains("HSUPA") { return "3G" }
-        if tech.contains("EDGE") { return "EDGE" }
-        if tech.contains("GPRS") { return "GPRS" }
-        return tech
+        CellularRadioInfo.shared.refresh()
+        cellularInfo = CellularInfo(carrierName: nil, radioTechnology: CellularRadioInfo.shared.generation)
     }
 }

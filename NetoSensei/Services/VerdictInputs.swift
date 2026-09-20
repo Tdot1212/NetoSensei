@@ -247,7 +247,7 @@ enum VerdictInputs {
         return context(status: status,
                        vpnResult: SmartVPNDetector.shared.detectionResult,
                        geoCountryCode: geo.publicIP.isEmpty ? nil : geo.countryCode,
-                       radioTechnology: ConnectionComparator.shared.cellularInfo?.radioTechnology)
+                       radioTechnology: CellularRadioInfo.shared.generation)   // Commit 9: current data-service radio, change-notified
     }
 
     /// The verdict for the live dashboard.
