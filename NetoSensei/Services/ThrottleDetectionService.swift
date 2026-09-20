@@ -201,6 +201,10 @@ class ThrottleDetectionService {
     // MARK: - Detect Throttling
 
     func detectThrottling(progressHandler: ((Double, String) -> Void)? = nil) async -> ThrottleAnalysis {
+        // Commit 7: four ≥10 MB CDN downloads are self-generated load; the
+        // stability monitor must not judge the network by them.
+        await MainActor.run { AppLoadTracker.shared.begin("throttleTest") }
+        defer { Task { @MainActor in AppLoadTracker.shared.end("throttleTest") } }
         let isVPNActive = await MainActor.run {
             SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
         }

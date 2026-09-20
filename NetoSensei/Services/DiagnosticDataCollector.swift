@@ -420,6 +420,8 @@ class DiagnosticDataCollector: ObservableObject {
     func collectFullDiagnostics() async -> ComprehensiveDiagnosticSummary {
         isCollecting = true
         progress = 0
+        AppLoadTracker.shared.begin("fullDiagnostics")       // Commit 7
+        defer { AppLoadTracker.shared.end("fullDiagnostics") }
 
         var issues: [String] = []
         var warnings: [String] = []
@@ -718,15 +720,17 @@ class DiagnosticDataCollector: ObservableObject {
                 certificateIssuer: leafCert?.issuer,
                 certificateExpiry: leafCert?.validTo,
                 daysUntilExpiry: daysUntilExpiry,
-                securityRating: result.securityRating.rawValue,
+                securityRating: result.securityRating?.rawValue ?? "unavailable",   // Commit 7
                 issues: result.issues.map { $0.title }
             )
 
             tlsAnalysisData.append(siteData)
 
             // Check for issues
-            if result.securityRating == .poor || result.securityRating == .critical {
-                warnings.append("TLS issues detected for \(site): \(result.securityRating.rawValue)")
+            if let rating = result.securityRating, rating == .poor || rating == .critical {
+                warnings.append("TLS issues detected for \(site): \(rating.rawValue)")
+            } else if let reason = result.unavailableReason {
+                warnings.append("TLS for \(site) not assessed: \(reason.text)")
             }
             if let days = daysUntilExpiry, days < 30 {
                 warnings.append("Certificate for \(site) expires in \(days) days")

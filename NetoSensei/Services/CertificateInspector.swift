@@ -44,9 +44,10 @@ struct CertificateInspection: Identifiable {
     let summary: String
 
     enum Severity {
-        case info       // proxy MITM expected (user installed the CA themselves)
-        case warning    // unknown / non-public issuer; user should check
-        case critical   // trust failure outside of the proxy explanation
+        case info        // proxy MITM expected (user installed the CA themselves)
+        case warning     // unknown / non-public issuer; user should check
+        case critical    // trust failure outside of the proxy explanation
+        case unavailable // Commit 7: host unreachable or intercepted — NOT assessed; never counts toward the verdict
     }
 }
 
@@ -127,9 +128,12 @@ final class CertificateInspector {
             severity = .info
             let appLabel = proxyApp.map { " (\($0))" } ?? ""
             summary = "Proxy-intercepted\(appLabel) — your local proxy is decrypting and re-signing this connection. Normal if you installed the proxy CA. Concerning if you didn't."
-        } else if result.certificateChain.isEmpty {
-            severity = .critical
-            summary = "Could not retrieve the certificate chain — the host may be unreachable or blocking inspection."
+        } else if let reason = result.unavailableReason {
+            // Commit 7: unreachable ≠ insecure. An unassessed host is reported
+            // as such and excluded from the Combined verdict — it used to map
+            // an empty chain to .critical, turning a blocked host into "Unsafe".
+            severity = .unavailable
+            summary = reason.text + "."
         } else if result.securityRating == .critical {
             // Trust failed. If VPN is active, the most likely cause is a proxy
             // re-signing certs with a CA not in our needle list. Treat as

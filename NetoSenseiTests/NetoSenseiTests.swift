@@ -1014,3 +1014,130 @@ struct ExternalTargetTests {
         #expect(LatencyValidation.normalize(0) == 0)   // a stored 0 WOULD render as "0ms" — hence nil, not 0
     }
 }
+
+// MARK: - Commit 7: stability monitor self-interference, TLS unavailable, Deep Scan coverage
+
+struct StabilityMonitorTests {
+    typealias M = ConnectionStabilityMonitor
+
+    @Test func samplesUnderAppLoad_recordNothing_andDropPendingCandidates() {
+        // A speed test in progress: excellent → poor would be a "Degraded" event. Under load it is not evidence.
+        let d = M.qualityTransition(recorded: .excellent, pending: .poor, pendingCount: 1, sample: .poor, underLoad: true)
+        #expect(d == M.QualityDecision(record: nil, pending: nil, pendingCount: 0))
+    }
+
+    @Test func oneSampleBlip_isNotRecorded_persistenceRequired() {
+        // Idle, excellent → poor seen once: pending only.
+        let first = M.qualityTransition(recorded: .excellent, pending: nil, pendingCount: 0, sample: .poor, underLoad: false)
+        #expect(first.record == nil && first.pending == .poor && first.pendingCount == 1)
+        // Next sample back to excellent: candidate dropped, nothing recorded — the "green → red → green" flap is gone.
+        let back = M.qualityTransition(recorded: .excellent, pending: .poor, pendingCount: 1, sample: .excellent, underLoad: false)
+        #expect(back == M.QualityDecision(record: nil, pending: nil, pendingCount: 0))
+    }
+
+    @Test func persistentDegradation_isRecorded_onTheSecondSample() {
+        let second = M.qualityTransition(recorded: .excellent, pending: .poor, pendingCount: 1, sample: .poor, underLoad: false)
+        #expect(second.record == .degraded)
+        let improved = M.qualityTransition(recorded: .poor, pending: .excellent, pendingCount: 1, sample: .excellent, underLoad: false)
+        #expect(improved.record == .improved)
+    }
+
+    @Test func unknownIsNeitherBetterNorWorse() {
+        #expect(!M.healthDegraded(from: .excellent, to: .unknown))   // losing a reading is not a degradation
+        #expect(!M.healthImproved(from: .unknown, to: .excellent))
+        let d = M.qualityTransition(recorded: .excellent, pending: nil, pendingCount: 0, sample: .unknown, underLoad: false)
+        #expect(d.record == nil && d.pending == nil)
+        #expect(M.healthDegraded(from: .excellent, to: .poor) && M.healthImproved(from: .poor, to: .excellent))
+        #expect(!M.healthDegraded(from: .excellent, to: .fair))      // one step is not an event (unchanged rule)
+    }
+
+    @Test func highThroughputZeroLossRun_recordsNoInstability() {
+        // The device run: 152 Mbps / 0 % loss speed test. The monitor's samples during the
+        // test flip excellent → poor → excellent; all are under load, then the post-load
+        // grace sample, then idle excellent. Simulate the sequence: nothing is recorded.
+        var recorded: NetworkHealth? = .excellent
+        var pending: NetworkHealth? = nil
+        var count = 0
+        var events: [M.QualityTransition] = []
+        let sequence: [(NetworkHealth, Bool)] = [(.poor, true), (.poor, true), (.excellent, true), (.excellent, true /* grace */), (.excellent, false), (.excellent, false)]
+        for (sample, load) in sequence {
+            let d = M.qualityTransition(recorded: recorded, pending: pending, pendingCount: count, sample: sample, underLoad: load)
+            pending = d.pending; count = d.pendingCount
+            if let r = d.record { events.append(r); recorded = sample }
+        }
+        #expect(events.isEmpty)
+    }
+}
+
+struct TLSAssessmentTests {
+    typealias A = TLSAnalyzer
+    static let cert = CertificateInfo(subject: "x", issuer: "DigiCert", serialNumber: "1", validFrom: nil, validTo: nil,
+                                      publicKeyInfo: "", isSelfSigned: false, isRootCA: false, isTrusted: true)
+
+    @Test func timedOutOrUnreachableHost_isUnavailable_notAGrade() {
+        let a = A.classifyAssessment(chain: [], isTrusted: false, isProxyMITM: false, fetchErrorCode: -1001)
+        #expect(a == .unavailable(.unreachable(code: -1001)))
+        let b = A.classifyAssessment(chain: [], isTrusted: false, isProxyMITM: false, fetchErrorCode: -1004)
+        #expect(b == .unavailable(.unreachable(code: -1004)))
+        if case .unavailable(let r) = a { #expect(r.text.hasPrefix("Couldn't assess — host unreachable")) }
+    }
+
+    @Test func trustFailureWithoutProxyCA_isInterceptedOrBlocked_notCritical() {
+        let a = A.classifyAssessment(chain: [Self.cert], isTrusted: false, isProxyMITM: false, fetchErrorCode: nil)
+        #expect(a == .unavailable(.interceptedOrBlocked))
+        if case .unavailable(let r) = a { #expect(r.text.contains("intercepted or blocked")) }
+    }
+
+    @Test func trustedChain_orKnownProxyCA_isACompletedAssessment() {
+        #expect(A.classifyAssessment(chain: [Self.cert], isTrusted: true, isProxyMITM: false, fetchErrorCode: nil) == .completed)
+        #expect(A.classifyAssessment(chain: [Self.cert], isTrusted: false, isProxyMITM: true, fetchErrorCode: nil) == .completed)
+    }
+
+    @Test func unavailableResult_hasNoRating_andIsNotSecure() {
+        var r = TLSAnalysisResult(host: "chase.com", port: 443, tlsVersion: .unknown, certificateChain: [], issues: [],
+                                  cipherSuite: nil, handshakeLatencyMs: nil, timestamp: Date())
+        r.assessment = .unavailable(.interceptedOrBlocked)
+        #expect(r.securityRating == nil)
+        #expect(r.ratingText == "Couldn't assess")
+        #expect(!r.isSecure)
+    }
+}
+
+struct DeepScanCoverageTests {
+    typealias S = AdvancedDiagnosticSummary
+
+    @Test func noThreatCheckCompleted_isUnknown_neverSecure() {
+        #expect(S.threatLevel(dnsBehavior: .allNormal, vpnLeaked: false, anyThreatCheckCompleted: false) == .unknown)
+        #expect(S.threatLevel(dnsBehavior: .allNormal, vpnLeaked: false, anyThreatCheckCompleted: true) == .secure)
+        #expect(S.threatLevel(dnsBehavior: .abnormalDNSBehavior, vpnLeaked: false, anyThreatCheckCompleted: true) == .high)
+        #expect(S.threatLevel(dnsBehavior: .allNormal, vpnLeaked: true, anyThreatCheckCompleted: true) == .high)
+    }
+
+    @Test func timedOutDNSHijack_andNoVPN_yieldsUnknownWithCoverageLine() {
+        let summary = S(timestamp: Date(), arpResult: nil, dnsHijackResults: [], vpnLeakResult: nil,
+                        routingInterpretation: nil, performanceMetrics: nil, vpnRegionScores: [], wifiChannels: [], lanDevices: [],
+                        networkDiagnosis: nil,
+                        coverage: Coverage(records: [.failed(.dnsHijack, .timeout), .notApplicable(.vpnLeak, "no VPN in use"),
+                                                     .ran(.traceroute, 3, unit: ""), .ran(.performance, 40, unit: "Mbps")]))
+        #expect(summary.overallThreatLevel == .unknown)
+        #expect(summary.summaryText == "Couldn't judge security — the threat checks didn't complete")
+        #expect(summary.coverage?.line == "2 of 3 checks completed · 1 couldn't run — DNS hijack test timed out · not applicable — VPN leak test: no VPN in use")
+    }
+
+    @Test func completedDNSHijack_withNoVPN_isSecure_andSaysWhatCompleted() {
+        let clean = DNSHijackResult(domain: "baidu.com", expectedIPs: ["110.242."], resolvedIPs: ["110.242.68.66"], hijacked: false, confidence: 1, region: .chinaNative)
+        let summary = S(timestamp: Date(), arpResult: nil, dnsHijackResults: [clean], vpnLeakResult: nil,
+                        routingInterpretation: nil, performanceMetrics: nil, vpnRegionScores: [], wifiChannels: [], lanDevices: [],
+                        networkDiagnosis: nil,
+                        coverage: Coverage(records: [.ran(.dnsHijack, 1, unit: ""), .notApplicable(.vpnLeak, "no VPN in use"),
+                                                     .failed(.traceroute, .timeout), .ran(.performance, 40, unit: "Mbps")]))
+        #expect(summary.overallThreatLevel == .secure)
+        #expect(summary.summaryText == "No security threats found in the checks that completed")
+    }
+
+    @Test func legacySummary_withoutCoverage_keepsOldBehaviour() {
+        let summary = S(timestamp: Date(), arpResult: nil, dnsHijackResults: [], vpnLeakResult: nil,
+                        routingInterpretation: nil, performanceMetrics: nil, vpnRegionScores: [], wifiChannels: [], lanDevices: [], networkDiagnosis: nil)
+        #expect(summary.coverage == nil && summary.overallThreatLevel == .secure)
+    }
+}

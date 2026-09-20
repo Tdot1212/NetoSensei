@@ -195,14 +195,22 @@ struct TLSAnalyzerView: View {
                 Text("Security Rating")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text(result.securityRating.rawValue)
-                    .font(.title.bold())
+                // Commit 7: a grade only for a completed assessment; otherwise
+                // the reason, in neutral yellow (the network is not at fault).
+                Text(result.securityRating?.rawValue ?? "Couldn't assess")
+                    .font(result.securityRating == nil ? .title3.bold() : .title.bold())
                     .foregroundColor(ratingColor(result.securityRating))
+                if let reason = result.unavailableReason {
+                    Text(reason.text)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer()
 
-            Image(systemName: result.securityRating.icon)
+            Image(systemName: result.securityRating?.icon ?? "questionmark.diamond")
                 .font(.system(size: 50))
                 .foregroundColor(ratingColor(result.securityRating))
         }
@@ -384,7 +392,7 @@ struct TLSAnalyzerView: View {
                 ForEach(analyzer.recentResults) { result in
                     Button(action: { Task { await analyzer.analyzeHost(result.host) } }) {
                         HStack {
-                            Image(systemName: result.securityRating.icon)
+                            Image(systemName: result.securityRating?.icon ?? "questionmark.diamond")
                                 .foregroundColor(ratingColor(result.securityRating))
 
                             Text(result.host)
@@ -452,8 +460,9 @@ struct TLSAnalyzerView: View {
 
     // MARK: - Helpers
 
-    private func ratingColor(_ rating: TLSAnalysisResult.SecurityRating) -> Color {
+    private func ratingColor(_ rating: TLSAnalysisResult.SecurityRating?) -> Color {
         switch rating {
+        case nil: return .yellow          // Commit 7: not assessed — neutral, never red
         case .excellent: return .green
         case .good: return .blue
         case .fair: return .orange

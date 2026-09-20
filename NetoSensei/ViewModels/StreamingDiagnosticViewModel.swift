@@ -77,6 +77,8 @@ class StreamingDiagnosticViewModel: ObservableObject {
         progress = 0.0
         errorMessage = nil
         result = nil
+        AppLoadTracker.shared.begin("streamingTest")         // Commit 7
+        defer { AppLoadTracker.shared.end("streamingTest") }
 
         // Capture network status snapshot upfront to avoid MainActor access issues
         let networkSnapshot = networkMonitor.currentStatus

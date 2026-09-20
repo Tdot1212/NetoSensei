@@ -163,9 +163,13 @@ enum ThreatLevel: String, Codable {
     case medium = "Medium Risk"
     case high = "High Risk"
     case critical = "Critical"
+    /// Commit 7: too few threat checks completed to judge — never "Secure"
+    /// by default (design §B: a verdict may only claim what actually ran).
+    case unknown = "Unknown"
 
     var color: String {
         switch self {
+        case .unknown: return "gray"
         case .secure: return "green"
         case .low: return "blue"
         case .medium: return "yellow"
@@ -176,6 +180,7 @@ enum ThreatLevel: String, Codable {
 
     var icon: String {
         switch self {
+        case .unknown: return "questionmark.diamond"
         case .secure: return "checkmark.shield.fill"
         case .low: return "shield.lefthalf.filled"
         case .medium: return "exclamationmark.shield.fill"

@@ -103,6 +103,24 @@ class ConnectionStabilityMonitor: ObservableObject {
     private let startupDelay: TimeInterval = 5.0      // Don't fire events for first 5 seconds
     private let minEventInterval: TimeInterval = 5.0  // Debounce: max 1 event per 5 seconds
 
+    // Commit 7 — the monitor must not measure the app's own traffic.
+    /// Samples taken while NetoSensei itself is generating load (speed test,
+    /// Deep Scan, Combined check, streaming/throttle tests) — or within this
+    /// many seconds after it stopped — are not evidence about the network.
+    /// 45 s covers one full monitor interval (30 s) of recovery after load.
+    nonisolated static let postLoadGrace: TimeInterval = 45
+    /// A quality transition must be seen on this many CONSECUTIVE idle samples
+    /// before it is recorded. The monitor samples every 30 s, so a real
+    /// degradation persists ≥60 s before it becomes an event; a one-sample
+    /// blip (contention, a blocked probe) never does. The health rubric and
+    /// its thresholds are untouched — only single-sample flips are ignored.
+    nonisolated static let requiredConsecutiveSamples = 2
+    /// The last quality level that was RECORDED (the baseline transitions are
+    /// judged against) and the pending candidate with its consecutive count.
+    private var recordedHealth: NetworkHealth?
+    private var pendingHealth: NetworkHealth?
+    private var pendingCount = 0
+
     // MARK: - Services
 
     private var cancellables = Set<AnyCancellable>()
@@ -196,8 +214,9 @@ class ConnectionStabilityMonitor: ObservableObject {
             recordEvent(.connected, details: "Internet connection restored")
         }
 
-        // Check for latency spikes (only when connected)
-        if isConnected {
+        // Check for latency spikes (only when connected, and never while the
+        // app's own transfer is what's inflating the reading — Commit 7)
+        if isConnected && !AppLoadTracker.shared.isActiveOrRecent(grace: Self.postLoadGrace) {
             if let newLatency = newStatus.internet.latencyToExternal,
                let oldLatency = oldStatus.internet.latencyToExternal {
                 // Spike: latency increased by >100ms or exceeded threshold
@@ -224,29 +243,86 @@ class ConnectionStabilityMonitor: ObservableObject {
             recordEvent(.vpnDisconnected, details: "VPN tunnel closed")
         }
 
-        // Check for quality changes
-        let oldHealth = oldStatus.overallHealth
+        // Check for quality changes (Commit 7: load-aware, persistence-gated)
+        let underLoad = AppLoadTracker.shared.isActiveOrRecent(grace: Self.postLoadGrace)
         let newHealth = newStatus.overallHealth
-
-        // Compare health using helper function
-        if healthDegraded(from: oldHealth, to: newHealth) {
-            recordEvent(.qualityDegraded, details: "\(oldHealth.color) → \(newHealth.color)")
-        } else if healthImproved(from: oldHealth, to: newHealth) {
-            recordEvent(.qualityImproved, details: "\(oldHealth.color) → \(newHealth.color)")
+        if recordedHealth == nil, !underLoad, newHealth != .unknown {
+            recordedHealth = newHealth   // first idle, known sample = baseline
+        }
+        let decision = Self.qualityTransition(
+            recorded: recordedHealth,
+            pending: pendingHealth,
+            pendingCount: pendingCount,
+            sample: newHealth,
+            underLoad: underLoad
+        )
+        pendingHealth = decision.pending
+        pendingCount = decision.pendingCount
+        if let transition = decision.record {
+            let from = recordedHealth ?? .unknown
+            recordedHealth = newHealth
+            switch transition {
+            case .degraded: recordEvent(.qualityDegraded, details: "\(from.color) → \(newHealth.color)")
+            case .improved: recordEvent(.qualityImproved, details: "\(from.color) → \(newHealth.color)")
+            }
+        } else if underLoad {
+            debugLog("📊 Stability sample under app load — quality/latency not judged (\(AppLoadTracker.shared.activeSources.sorted().joined(separator: ",")))")
         }
     }
 
-    /// Helper: Check if health degraded significantly
-    private func healthDegraded(from old: NetworkHealth, to new: NetworkHealth) -> Bool {
-        let order: [NetworkHealth] = [.excellent, .fair, .poor, .unknown]
+    // MARK: - Quality transition decision (pure, unit-tested)
+
+    enum QualityTransition: Equatable { case degraded, improved }
+
+    struct QualityDecision: Equatable {
+        let record: QualityTransition?
+        let pending: NetworkHealth?
+        let pendingCount: Int
+    }
+
+    /// Decide whether `sample` should be recorded as a quality transition
+    /// against the last RECORDED level. Rules (each is a test):
+    ///  - under app-generated load (or just after it): judge nothing, and
+    ///    discard any pending candidate — samples under load are not evidence.
+    ///  - `unknown` (no reading) is neither better nor worse: ignored.
+    ///  - a >1-step change must be seen on `requiredConsecutiveSamples`
+    ///    consecutive idle samples before it is recorded.
+    nonisolated static func qualityTransition(
+        recorded: NetworkHealth?,
+        pending: NetworkHealth?,
+        pendingCount: Int,
+        sample: NetworkHealth,
+        underLoad: Bool
+    ) -> QualityDecision {
+        if underLoad { return QualityDecision(record: nil, pending: nil, pendingCount: 0) }
+        guard let recorded, sample != .unknown else {
+            return QualityDecision(record: nil, pending: nil, pendingCount: 0)
+        }
+        let degraded = healthDegraded(from: recorded, to: sample)
+        let improved = healthImproved(from: recorded, to: sample)
+        guard degraded || improved else {
+            return QualityDecision(record: nil, pending: nil, pendingCount: 0)   // back within one step: candidate dropped
+        }
+        let count = (pending == sample) ? pendingCount + 1 : 1
+        if count >= requiredConsecutiveSamples {
+            return QualityDecision(record: degraded ? .degraded : .improved, pending: nil, pendingCount: 0)
+        }
+        return QualityDecision(record: nil, pending: sample, pendingCount: count)
+    }
+
+    /// Helper: Check if health degraded significantly.
+    /// Commit 7: `unknown` (no reading) is NOT on the ladder — it used to sit
+    /// after `poor`, so simply losing a reading counted as a degradation.
+    nonisolated static func healthDegraded(from old: NetworkHealth, to new: NetworkHealth) -> Bool {
+        let order: [NetworkHealth] = [.excellent, .fair, .poor]
         guard let oldIndex = order.firstIndex(of: old),
               let newIndex = order.firstIndex(of: new) else { return false }
         return newIndex > oldIndex + 1  // Degraded by more than 1 step
     }
 
     /// Helper: Check if health improved significantly
-    private func healthImproved(from old: NetworkHealth, to new: NetworkHealth) -> Bool {
-        let order: [NetworkHealth] = [.excellent, .fair, .poor, .unknown]
+    nonisolated static func healthImproved(from old: NetworkHealth, to new: NetworkHealth) -> Bool {
+        let order: [NetworkHealth] = [.excellent, .fair, .poor]
         guard let oldIndex = order.firstIndex(of: old),
               let newIndex = order.firstIndex(of: new) else { return false }
         return newIndex < oldIndex - 1  // Improved by more than 1 step

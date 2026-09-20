@@ -183,12 +183,38 @@ struct AdvancedDiagnosticSummary: Sendable, Codable {
     // NEW: Intelligent diagnosis
     let networkDiagnosis: NetworkDiagnosisResult?
 
+    /// Commit 7 (design §B): which Deep Scan checks ran, failed, or did not
+    /// apply. nil only for summaries decoded from before this field existed.
+    var coverage: Coverage? = nil
+
+    /// The two checks the threat level is computed from.
+    static let threatChecks: [CheckID] = [.dnsHijack, .vpnLeak]
+
+    /// True when at least one threat-relevant check actually completed.
+    var threatChecksCompleted: Bool {
+        guard let coverage else { return true }   // legacy summary: no coverage data, keep old behaviour
+        return Self.threatChecks.contains { coverage.record($0)?.status.didRun == true }
+    }
+
+    /// Coverage-aware (Commit 7): a threat level is computed only over checks
+    /// that ran. If neither threat check completed, the level is `.unknown` —
+    /// a DNS-hijack timeout used to fall back to an empty result (= "all
+    /// normal"), a VPN-leak timeout to a synthesized "not leaked", and the
+    /// resulting score of 0 read as "Secure".
     var overallThreatLevel: ThreatLevel {
+        Self.threatLevel(dnsBehavior: dnsBehaviorType,
+                         vpnLeaked: vpnLeakResult?.leaked == true,
+                         anyThreatCheckCompleted: threatChecksCompleted)
+    }
+
+    /// Pure rubric (unit-tested).
+    static func threatLevel(dnsBehavior: DNSBehaviorType, vpnLeaked: Bool, anyThreatCheckCompleted: Bool) -> ThreatLevel {
+        guard anyThreatCheckCompleted else { return .unknown }
         var threatScore = 0
 
         // FIXED: Use region-aware DNS logic (must match summaryText logic)
         // Only count DNS issues that are actual threats, not normal ISP behavior
-        switch dnsBehaviorType {
+        switch dnsBehavior {
         case .dnsConfigurationIssue:
             threatScore += 25  // User-caused, not critical
         case .abnormalDNSBehavior:
@@ -199,7 +225,7 @@ struct AdvancedDiagnosticSummary: Sendable, Codable {
         }
 
         // VPN leak is always a real security threat
-        if vpnLeakResult?.leaked == true { threatScore += 50 }
+        if vpnLeaked { threatScore += 50 }
 
         // Return appropriate threat level
         if threatScore == 0 { return .secure }
@@ -289,6 +315,13 @@ struct AdvancedDiagnosticSummary: Sendable, Codable {
         }
 
         if issues.isEmpty {
+            // Commit 7: only claim the checks that completed.
+            if overallThreatLevel == .unknown {
+                return "Couldn't judge security — the threat checks didn't complete"
+            }
+            if let coverage, !coverage.failed.isEmpty {
+                return "No security threats found in the checks that completed"
+            }
             return "✓ No security threats detected"
         } else {
             return "⚠️ \(issues.joined(separator: ", "))"

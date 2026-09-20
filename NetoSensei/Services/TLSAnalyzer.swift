@@ -32,11 +32,58 @@ struct TLSAnalysisResult: Identifiable {
     /// MITM attack on the open internet.
     var vpnActive: Bool = false
 
-    var isSecure: Bool {
-        issues.filter { $0.severity == .critical || $0.severity == .high }.isEmpty
+    /// Commit 7: was the TLS configuration actually ASSESSED? A host that timed
+    /// out, was reset, or presented a chain iOS doesn't trust (on this network:
+    /// interception or a blocked host) has NOT been assessed and gets no grade.
+    var assessment: Assessment = .completed
+
+    enum Assessment: Equatable {
+        case completed
+        case unavailable(UnavailableReason)
+
+        var isCompleted: Bool { self == .completed }
     }
 
-    var securityRating: SecurityRating {
+    enum UnavailableReason: Equatable {
+        /// -1001 / -1004 / -1005 / no TLS handshake and no certificates.
+        case unreachable(code: Int?)
+        /// Chain retrieved but iOS trust evaluation failed and no known proxy
+        /// CA explains it — the connection was intercepted or blocked before
+        /// the real server; the site's own TLS could not be seen.
+        case interceptedOrBlocked
+
+        /// Plain language, same register as the Phase 2.1/3 captions.
+        var text: String {
+            switch self {
+            case .unreachable(let code):
+                let suffix = code.map { " (error \($0))" } ?? ""
+                return "Couldn't assess — host unreachable from this network\(suffix)"
+            case .interceptedOrBlocked:
+                return "Couldn't assess — connection intercepted or blocked before reaching the site"
+            }
+        }
+    }
+
+    var unavailableReason: UnavailableReason? {
+        if case .unavailable(let r) = assessment { return r }
+        return nil
+    }
+
+    var isSecure: Bool {
+        assessment.isCompleted && issues.filter { $0.severity == .critical || $0.severity == .high }.isEmpty
+    }
+
+    /// nil when the assessment could not be completed — grades come only from
+    /// completed assessments (Commit 7). Renders as "Couldn't assess".
+    var securityRating: SecurityRating? {
+        guard assessment.isCompleted else { return nil }
+        return completedRating
+    }
+
+    /// The grade label as the UI shows it — a band word, or the unavailable reason.
+    var ratingText: String { securityRating?.rawValue ?? "Couldn't assess" }
+
+    private var completedRating: SecurityRating {
         let criticalCount = issues.filter { $0.severity == .critical }.count
         let highCount = issues.filter { $0.severity == .high }.count
         let mediumCount = issues.filter { $0.severity == .medium }.count
@@ -211,7 +258,7 @@ class TLSAnalyzer: ObservableObject {
                 return await self.performAnalyzeHost(host, port: port)
             },
             resultFormatter: { result in
-                "Security: \(result.securityRating.rawValue)"
+                result.unavailableReason.map { "\($0.text)" } ?? "Security: \(result.ratingText)"
             }
         )
     }
@@ -234,32 +281,55 @@ class TLSAnalyzer: ObservableObject {
         // Step 1: TLS handshake via NWConnection (for TLS version/cipher)
         currentStep = "Checking TLS version..."
         progress = 0.2
-        let (tlsVersion, cipherSuite) = await detectTLSVersion(host: cleanHost, port: port)
+        let (tlsVersion, cipherSuite, handshakeError) = await detectTLSVersion(host: cleanHost, port: port)
 
         // Step 2: Certificate chain via URLSession delegate
         currentStep = "Retrieving certificates..."
         progress = 0.4
-        let (chain, isTrusted, handshakeMs) = await fetchCertificateChain(host: cleanHost, port: port)
+        let (chain, isTrusted, handshakeMs, fetchErrorCode) = await fetchCertificateChain(host: cleanHost, port: port)
 
-        // Step 3: Analyze for issues
+        // Step 3: Was the site's TLS actually assessed? (Commit 7)
         currentStep = "Analyzing security..."
         progress = 0.8
-        let issues = analyzeIssues(
-            host: cleanHost,
-            tlsVersion: tlsVersion,
+        let proxyMITM = isProxyMITMCert(chain)
+        let assessment = Self.classifyAssessment(
             chain: chain,
-            isTrusted: isTrusted
+            isTrusted: isTrusted,
+            isProxyMITM: proxyMITM,
+            fetchErrorCode: fetchErrorCode ?? (handshakeError != nil ? -1 : nil)
         )
+
+        let issues: [TLSIssue]
+        if case .unavailable(let reason) = assessment {
+            // Not assessed: one explanatory, non-graded issue. No "Certificate
+            // Not Trusted — possible MITM" and no "No Certificates Retrieved"
+            // alarms for a host we never actually reached.
+            issues = [TLSIssue(
+                title: "Couldn't assess this site",
+                description: reason.text + ".",
+                severity: .info,
+                recommendation: reason == .interceptedOrBlocked
+                    ? "Retry with your VPN on (or off) to see whether the site itself answers. If it still fails everywhere, the site may genuinely be presenting an untrusted certificate."
+                    : "Retry later or on another network. Unreachable is not the same as insecure."
+            )]
+            debugLog("🔐 TLS \(cleanHost): \(reason.text)")
+        } else {
+            issues = analyzeIssues(
+                host: cleanHost,
+                tlsVersion: tlsVersion,
+                chain: chain,
+                isTrusted: isTrusted
+            )
+        }
 
         progress = 1.0
         currentStep = "Complete"
 
         // FIX (Issue 4): pass proxy-MITM and VPN context to the result so
         // securityRating can soften when these are the only signals.
-        let proxyMITM = isProxyMITMCert(chain)
         let vpnIsActive = NetworkMonitorService.shared.currentStatus.vpn.isActive
 
-        let analysisResult = TLSAnalysisResult(
+        var analysisResult = TLSAnalysisResult(
             host: cleanHost,
             port: port,
             tlsVersion: tlsVersion,
@@ -271,6 +341,7 @@ class TLSAnalyzer: ObservableObject {
             isProxyMITM: proxyMITM,
             vpnActive: vpnIsActive
         )
+        analysisResult.assessment = assessment
 
         result = analysisResult
 
@@ -285,6 +356,33 @@ class TLSAnalyzer: ObservableObject {
 
         isAnalyzing = false
         return analysisResult
+    }
+
+    // MARK: - Assessment classification (pure, unit-tested — Commit 7)
+
+    /// Decide whether an analysis actually assessed the site's TLS.
+    ///  (a) handshake completed OR a chain was retrieved and trusted, or a
+    ///      known proxy CA explains the untrusted chain → completed.
+    ///  (b) chain retrieved, trust failed, no proxy CA → interceptedOrBlocked
+    ///      (on this network: a middlebox answered instead of the site).
+    ///  (c) no handshake and no chain → unreachable(code) (-1001 timeout,
+    ///      -1004 can't connect, -1005 connection lost, …).
+    nonisolated static func classifyAssessment(
+        chain: [CertificateInfo],
+        isTrusted: Bool,
+        isProxyMITM: Bool,
+        fetchErrorCode: Int?
+    ) -> TLSAnalysisResult.Assessment {
+        if chain.isEmpty {
+            // Nothing came back from the site. A negotiated TLS version alone
+            // (NWConnection reached .ready) is still not an assessment of the
+            // certificate the site presents.
+            return .unavailable(.unreachable(code: fetchErrorCode))
+        }
+        if isTrusted || isProxyMITM {
+            return .completed
+        }
+        return .unavailable(.interceptedOrBlocked)
     }
 
     // MARK: - Detect TLS Version via NWConnection
@@ -302,13 +400,15 @@ class TLSAnalyzer: ObservableObject {
         }
     }
 
-    private nonisolated func detectTLSVersion(host: String, port: UInt16) async -> (TLSVersionInfo, String?) {
-        await withCheckedContinuation { (continuation: CheckedContinuation<(TLSVersionInfo, String?), Never>) in
+    /// Third element (Commit 7): the handshake failure, when the connection
+    /// did not reach `.ready` — surfaced so the assessment can say WHY.
+    private nonisolated func detectTLSVersion(host: String, port: UInt16) async -> (TLSVersionInfo, String?, NWError?) {
+        await withCheckedContinuation { (continuation: CheckedContinuation<(TLSVersionInfo, String?, NWError?), Never>) in
             let tlsOptions = NWProtocolTLS.Options()
             let params = NWParameters(tls: tlsOptions)
 
             guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-                continuation.resume(returning: (.unknown, nil))
+                continuation.resume(returning: (.unknown, nil, nil))
                 return
             }
 
@@ -343,18 +443,23 @@ class TLSAnalyzer: ObservableObject {
                         }
 
                         connection.cancel()
-                        continuation.resume(returning: (version, cipher))
+                        continuation.resume(returning: (version, cipher, nil))
                     }
 
-                case .failed, .cancelled:
+                case .failed(let error):
                     if flag.claim() {
-                        continuation.resume(returning: (.unknown, nil))
+                        continuation.resume(returning: (.unknown, nil, error))
                     }
 
-                case .waiting:
+                case .cancelled:
+                    if flag.claim() {
+                        continuation.resume(returning: (.unknown, nil, nil))
+                    }
+
+                case .waiting(let error):
                     if flag.claim() {
                         connection.cancel()
-                        continuation.resume(returning: (.unknown, nil))
+                        continuation.resume(returning: (.unknown, nil, error))
                     }
 
                 default:
@@ -367,7 +472,7 @@ class TLSAnalyzer: ObservableObject {
             DispatchQueue.global().asyncAfter(deadline: .now() + 8) {
                 if flag.claim() {
                     connection.cancel()
-                    continuation.resume(returning: (.unknown, nil))
+                    continuation.resume(returning: (.unknown, nil, nil))   // nil error = our own 8 s timeout
                 }
             }
         }
@@ -388,7 +493,9 @@ class TLSAnalyzer: ObservableObject {
 
     // MARK: - Fetch Certificate Chain via URLSession
 
-    private nonisolated func fetchCertificateChain(host: String, port: UInt16) async -> ([CertificateInfo], Bool, Double?) {
+    /// Fourth element (Commit 7): the URLSession error code (URLError.Code raw
+    /// value) when the request failed — nil on success.
+    private nonisolated func fetchCertificateChain(host: String, port: UInt16) async -> ([CertificateInfo], Bool, Double?, Int?) {
         let delegate = TLSCertificateDelegate(targetHost: host)
 
         let config = URLSessionConfiguration.ephemeral
@@ -400,24 +507,29 @@ class TLSAnalyzer: ObservableObject {
             ? "https://\(host)/"
             : "https://\(host):\(port)/"
         guard let url = URL(string: urlString) else {
-            return ([], false, nil)
+            return ([], false, nil, nil)
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
 
         let startTime = CFAbsoluteTimeGetCurrent()
+        var errorCode: Int?
 
         do {
             let (_, _) = try await session.data(for: request)
         } catch {
-            // Connection may fail but delegate still captures certs
+            // Connection may fail but delegate still captures certs.
+            // Commit 7: keep the code so the assessment can name the reason.
+            errorCode = (error as? URLError)?.code.rawValue ?? (error as NSError).code
         }
 
-        let handshakeMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+        // Commit 7: a handshake time is only a measurement when the request
+        // completed — a 10 s timeout is not a 10 000 ms handshake.
+        let handshakeMs: Double? = errorCode == nil ? (CFAbsoluteTimeGetCurrent() - startTime) * 1000 : nil
         session.invalidateAndCancel()
 
-        return (delegate.certificates, delegate.isTrusted, handshakeMs)
+        return (delegate.certificates, delegate.isTrusted, handshakeMs, errorCode)
     }
 
     // MARK: - Analyze Issues

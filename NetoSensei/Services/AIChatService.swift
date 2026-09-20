@@ -265,7 +265,7 @@ struct AIDataCollector {
             var sites: [String] = []
             var issues: [String] = data.tlsIssues ?? []
             for r in tlsResults {
-                let rating = r.securityRating.rawValue
+                let rating = r.ratingText   // Commit 7: "Couldn't assess" when not assessed
                 sites.append("\(r.host) (\(r.tlsVersion.version), \(rating))")
                 for issue in r.issues {
                     issues.append("\(r.host): \(issue.title) [\(issue.severity.rawValue)]")

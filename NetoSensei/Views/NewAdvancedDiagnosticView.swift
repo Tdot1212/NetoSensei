@@ -248,6 +248,11 @@ struct NewAdvancedDiagnosticView: View {
 
             Text(summary.summaryText)
                 .font(.subheadline)
+
+            // Commit 7 (design §B): the same coverage line the Quick Check shows.
+            if let coverage = summary.coverage {
+                CoverageLine(coverage: coverage)
+            }
         }
         .padding()
         .background(Color(uiColor: .secondarySystemBackground))
@@ -1187,6 +1192,7 @@ struct NewAdvancedDiagnosticView: View {
 
     private func threatLevelIcon(_ level: ThreatLevel) -> String {
         switch level {
+        case .unknown: return "questionmark.diamond"
         case .secure: return "checkmark.shield.fill"
         case .low: return "checkmark.shield.fill"
         case .medium: return "exclamationmark.shield.fill"
@@ -1197,6 +1203,7 @@ struct NewAdvancedDiagnosticView: View {
 
     private func threatLevelColor(_ level: ThreatLevel) -> Color {
         switch level {
+        case .unknown: return .gray
         case .secure: return .green
         case .low: return .green
         case .medium: return .yellow

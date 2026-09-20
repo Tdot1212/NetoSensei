@@ -20,6 +20,8 @@ enum CheckID: String, Codable, Sendable, CaseIterable {
          domesticReach, vpnState, throughput, packetLoss, jitter
     // Privacy domain (producers land post-trip; IDs reserved so coverage lines are stable)
     case dnsHijack, vpnLeak, ipv6Leak, captivePortal, certTrust, dnsEncryption, wifiSafety
+    // Deep Scan (Commit 7)
+    case traceroute, performance
 
     /// Plain name for coverage lines. No jargon.
     var plainName: String {
@@ -42,6 +44,8 @@ enum CheckID: String, Codable, Sendable, CaseIterable {
         case .certTrust: return "certificate check"
         case .dnsEncryption: return "encrypted-DNS check"
         case .wifiSafety: return "Wi-Fi safety check"
+        case .traceroute: return "route trace"
+        case .performance: return "performance test"
         }
     }
 }

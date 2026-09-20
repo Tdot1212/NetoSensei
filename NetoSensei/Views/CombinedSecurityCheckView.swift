@@ -89,7 +89,8 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
     func runFullCheck() async {
         isRunning = true
         error = nil
-        defer { isRunning = false }
+        AppLoadTracker.shared.begin("securityCheck")         // Commit 7: cert fetches to blocked hosts are self-load
+        defer { isRunning = false; AppLoadTracker.shared.end("securityCheck") }
 
         // Refresh VPN detection ONCE up front and capture the result. We pass
         // it into `runVPNLeakTest` so it doesn't force-refresh again — that
@@ -237,7 +238,7 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
 
         // Certificate inspector — only surface .critical / .warning entries.
         // .info (proxy MITM expected) doesn't generate a recommendation.
-        for cert in certs where cert.severity != .info {
+        for cert in certs where cert.severity != .info && cert.severity != .unavailable {   // Commit 7: unassessed = no recommendation
             items.append("\(cert.hostname): \(cert.summary)")
         }
 
@@ -648,6 +649,7 @@ struct CombinedSecurityCheckSheet: View {
         case .info: return "checkmark.circle.fill"
         case .warning: return "exclamationmark.triangle.fill"
         case .critical: return "xmark.circle.fill"
+        case .unavailable: return "minus.circle"
         }
     }
 
@@ -656,6 +658,7 @@ struct CombinedSecurityCheckSheet: View {
         case .info: return .green
         case .warning: return .yellow
         case .critical: return .red
+        case .unavailable: return .yellow   // neutral: the network is not at fault
         }
     }
 

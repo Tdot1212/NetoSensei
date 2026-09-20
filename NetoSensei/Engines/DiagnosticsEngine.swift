@@ -105,19 +105,29 @@ actor DiagnosticsEngine {
         var vpnLeakResult: VPNLeakResult?
         var routingInterpretation: RoutingInterpretation?
         var performanceMetrics: PerformanceMetrics?
+        // Commit 7 (design §B): every step records whether it ran, failed, or
+        // did not apply. A timed-out check is a FAILED record, never a
+        // synthesized "clean" result.
+        var records: [CheckRecord] = []
 
         // 1. DNS Hijacking Test (25%) - 3s timeout
         onProgress?(0.25, "Checking for DNS hijacking...")
         debugLog("🔧 [DiagnosticsEngine] About to call SecurityEngine.shared.runDNSHijackTest()...")
         let dnsTestResult = await withHardTimeout(
             seconds: 3,
-            fallback: Result<[DNSHijackResult], DiagnosticError>.success([])
+            fallback: Result<[DNSHijackResult], DiagnosticError>.failure(.timeout)
         ) {
             await SecurityEngine.shared.runDNSHijackTest()
         }
         debugLog("🔧 [DiagnosticsEngine] DNS hijack test returned with \(dnsTestResult)")
-        if case .success(let results) = dnsTestResult {
+        switch dnsTestResult {
+        case .success(let results) where !results.isEmpty:
             dnsHijackResults = results
+            records.append(.ran(.dnsHijack, Double(results.count), unit: ""))
+        case .success:
+            records.append(.failed(.dnsHijack, .error("returned no results")))
+        case .failure(let e):
+            records.append(.failed(.dnsHijack, Self.reason(for: e)))
         }
 
         // 2. VPN Leak Test (50%) - 3s timeout
@@ -125,31 +135,39 @@ actor DiagnosticsEngine {
         debugLog("🔧 [DiagnosticsEngine] About to call SecurityEngine.shared.runVPNLeakTest()...")
         let vpnLeakTestResult = await withHardTimeout(
             seconds: 3,
-            fallback: Result<VPNLeakResult, DiagnosticError>.success(VPNLeakResult(
-                realIP: nil,
-                vpnIP: "Test timed out",
-                leaked: false,
-                leakType: .noLeak,
-                timestamp: Date()
-            ))
+            fallback: Result<VPNLeakResult, DiagnosticError>.failure(.timeout)
         ) {
             await SecurityEngine.shared.runVPNLeakTest()
         }
         debugLog("🔧 [DiagnosticsEngine] VPN leak test returned with \(vpnLeakTestResult)")
-        if case .success(let result) = vpnLeakTestResult {
+        switch vpnLeakTestResult {
+        case .success(let result) where result.vpnIP == "N/A - No VPN Active":
+            vpnLeakResult = result                       // kept for the UI's "no VPN" row
+            records.append(.notApplicable(.vpnLeak, "no VPN in use"))
+        case .success(let result):
             vpnLeakResult = result
+            records.append(.ran(.vpnLeak, result.leaked ? 1 : 0, unit: ""))
+        case .failure(let e):
+            vpnLeakResult = nil                          // never a synthesized "not leaked"
+            records.append(.failed(.vpnLeak, Self.reason(for: e)))
         }
 
         // 3. Routing Traceroute (70%) - 5s timeout
         onProgress?(0.7, "Running traceroute analysis...")
         let tracerouteResult = await withHardTimeout(
             seconds: 5,
-            fallback: Result<[RoutingHop], DiagnosticError>.success([])
+            fallback: Result<[RoutingHop], DiagnosticError>.failure(.timeout)
         ) {
             await RoutingEngine.shared.runTraceroute(to: targetHost)
         }
-        if case .success(let hops) = tracerouteResult {
+        switch tracerouteResult {
+        case .success(let hops) where !hops.isEmpty:
             routingInterpretation = await RoutingEngine.shared.interpretRoute(hops)
+            records.append(.ran(.traceroute, Double(hops.count), unit: ""))
+        case .success:
+            records.append(.failed(.traceroute, .error("no hops answered")))
+        case .failure(let e):
+            records.append(.failed(.traceroute, Self.reason(for: e)))
         }
 
         // 4. Performance Tests (85%) - 5s timeout
@@ -160,8 +178,12 @@ actor DiagnosticsEngine {
         ) {
             await PerformanceEngine.shared.runPerformanceTest(host: targetHost)
         }
-        if case .success(let metrics) = performanceResult {
+        switch performanceResult {
+        case .success(let metrics):
             performanceMetrics = metrics
+            records.append(.ran(.performance, metrics.throughput, unit: "Mbps"))
+        case .failure(let e):
+            records.append(.failed(.performance, Self.reason(for: e)))
         }
 
         // 5. Intelligent Diagnosis (95%)
@@ -187,10 +209,23 @@ actor DiagnosticsEngine {
             vpnRegionScores: [],
             wifiChannels: [],
             lanDevices: [],
-            networkDiagnosis: networkDiagnosis
+            networkDiagnosis: networkDiagnosis,
+            coverage: Coverage(records: records)
         )
+        debugLog("🔧 [DiagnosticsEngine] Threat level: \(summary.overallThreatLevel.rawValue) — coverage: \(summary.coverage?.line ?? "-")")
 
         return summary
+    }
+
+    /// Map a DiagnosticError to the coverage vocabulary (Commit 7).
+    private static func reason(for error: DiagnosticError) -> FailureReason {
+        switch error {
+        case .timeout: return .timeout
+        case .noResponse, .unreachable: return .error("host unreachable")
+        case .invalidData: return .error("returned invalid data")
+        case .permissionDenied: return .blocked
+        case .unknown(let s): return .error(s)
+        }
     }
 
     // MARK: - Intelligent Diagnosis
@@ -251,18 +286,33 @@ actor DiagnosticsEngine {
         var dnsHijackResults: [DNSHijackResult] = []
         var vpnLeakResult: VPNLeakResult?
 
+        var records: [CheckRecord] = []
+
         // 1. DNS Test (50%)
         onProgress?(0.5, "Testing DNS...")
         let dnsTestResult = await SecurityEngine.shared.runDNSHijackTest()
-        if case .success(let results) = dnsTestResult {
+        switch dnsTestResult {
+        case .success(let results) where !results.isEmpty:
             dnsHijackResults = results
+            records.append(.ran(.dnsHijack, Double(results.count), unit: ""))
+        case .success:
+            records.append(.failed(.dnsHijack, .error("returned no results")))
+        case .failure(let e):
+            records.append(.failed(.dnsHijack, Self.reason(for: e)))
         }
 
         // 2. VPN Leak Test (100%)
         onProgress?(1.0, "Testing VPN...")
         let vpnLeakTestResult = await SecurityEngine.shared.runVPNLeakTest()
-        if case .success(let result) = vpnLeakTestResult {
+        switch vpnLeakTestResult {
+        case .success(let result) where result.vpnIP == "N/A - No VPN Active":
             vpnLeakResult = result
+            records.append(.notApplicable(.vpnLeak, "no VPN in use"))
+        case .success(let result):
+            vpnLeakResult = result
+            records.append(.ran(.vpnLeak, result.leaked ? 1 : 0, unit: ""))
+        case .failure(let e):
+            records.append(.failed(.vpnLeak, Self.reason(for: e)))
         }
 
         return AdvancedDiagnosticSummary(
@@ -275,7 +325,8 @@ actor DiagnosticsEngine {
             vpnRegionScores: [],
             wifiChannels: [],
             lanDevices: [],
-            networkDiagnosis: nil
+            networkDiagnosis: nil,
+            coverage: Coverage(records: records)
         )
     }
 
@@ -321,7 +372,13 @@ actor DiagnosticsEngine {
             vpnRegionScores: [],
             wifiChannels: [],
             lanDevices: [],
-            networkDiagnosis: networkDiagnosis
+            networkDiagnosis: networkDiagnosis,
+            coverage: Coverage(records: [
+                .notRun(.dnsHijack, "security checks not part of the performance test"),
+                .notRun(.vpnLeak, "security checks not part of the performance test"),
+                routingInterpretation != nil ? .ran(.traceroute, 1, unit: "") : .failed(.traceroute, .timeout),
+                performanceMetrics != nil ? .ran(.performance, performanceMetrics!.throughput, unit: "Mbps") : .failed(.performance, .timeout)
+            ])
         )
     }
 }

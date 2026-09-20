@@ -248,6 +248,8 @@ final class AIPreflightCollector: ObservableObject {
         completedCount = 0
         featureFlags = [:]
         featureSkipReasons = [:]
+        AppLoadTracker.shared.begin("aiPreflight")           // Commit 7
+        defer { AppLoadTracker.shared.end("aiPreflight") }
         progress = 0
         steps = Self.initialSteps
 
@@ -481,7 +483,7 @@ final class AIPreflightCollector: ObservableObject {
                 results.append(AINetworkSnapshot.TLSSite(
                     host: host,
                     tlsVersion: tls.tlsVersion.version,
-                    securityRating: tls.securityRating.rawValue,
+                    securityRating: tls.securityRating?.rawValue ?? "unavailable",   // Commit 7: never a grade for an unassessed host
                     issueCount: tls.issues.count,
                     firstIssue: tls.issues.first?.title,
                     firstIssueSeverity: tls.issues.first?.severity.rawValue

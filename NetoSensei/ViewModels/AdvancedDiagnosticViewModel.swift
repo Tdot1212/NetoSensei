@@ -51,6 +51,8 @@ final class AdvancedDiagnosticViewModel: ObservableObject {
             }
 
             debugLog("🔧 [AdvancedDiagnostics] Calling DiagnosticsEngine.runAdvancedDiagnostics()...")
+            await MainActor.run { AppLoadTracker.shared.begin("deepScan") }   // Commit 7
+            defer { Task { @MainActor in AppLoadTracker.shared.end("deepScan") } }
             let result = await DiagnosticsEngine.shared.runAdvancedDiagnostics(
                 targetHost: targetHost,
                 onProgress: { [weak self] progress, task in

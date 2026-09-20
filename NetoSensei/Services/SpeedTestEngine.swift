@@ -38,6 +38,8 @@ class SpeedTestEngine: ObservableObject {
         // Update MainActor state
         self.isRunning = true
         self.progress = 0.0
+        AppLoadTracker.shared.begin("speedTest")            // Commit 7: the monitor must not judge this load
+        defer { AppLoadTracker.shared.end("speedTest") }
 
         // Capture network state (already on MainActor)
         let status = NetworkMonitorService.shared.currentStatus
