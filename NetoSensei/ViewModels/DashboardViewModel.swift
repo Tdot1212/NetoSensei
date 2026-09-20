@@ -173,30 +173,98 @@ class DashboardViewModel: ObservableObject {
 
     // MARK: - Public Methods (STEP 4 Required)
 
-    /// Refresh all network data
-    /// STEP 4 Requirement: Runs all basic network checks
-    /// PART 1: Only auto-refresh once on launch, then manual pull-to-refresh or every 60s max
-    func refresh(forceRefresh: Bool = false) async {
-        // Prevent multiple concurrent refreshes
-        guard !isLoading else {
-            debugLog("🔄 Dashboard refresh already in progress, skipping")
-            return
-        }
+    // MARK: - Refresh policy (Commit 8: manual refresh must re-read the network)
 
-        // FIXED: Only auto-refresh once on launch, or when forced (pull-to-refresh)
-        if !forceRefresh {
-            if hasRefreshedOnLaunch {
-                if let lastTime = lastRefreshTime, Date().timeIntervalSince(lastTime) < minRefreshInterval {
-                    debugLog("🔄 Dashboard refresh() skipped — auto-refresh limited to once per 60s")
-                    return
-                }
+    /// Why a refresh was requested. The policy differs by trigger:
+    ///  - `.automatic` (tab appears): once on launch, then at most every 60 s —
+    ///    this limit exists to stop background churn. Dropped silently when one
+    ///    is already in flight.
+    ///  - `.userInitiated` (pull-to-refresh): never rate-limited, FORCES the
+    ///    monitor to re-evaluate the path, and if a refresh is already running
+    ///    it WAITS for it and then runs again — the in-flight one may have
+    ///    started before the user changed the network (the bug: Wi-Fi turned
+    ///    off, pull lands during the path-change update, pull is dropped, the
+    ///    pre-change status is re-rendered). Coalescing onto the in-flight run
+    ///    would hand the user pre-gesture data; re-running after it guarantees
+    ///    post-gesture data.
+    ///  - `.foreground` (scene became active): same as user-initiated but
+    ///    without the loading overlay.
+    enum RefreshTrigger: Equatable { case automatic, userInitiated, foreground }
+
+    enum RefreshDecision: Equatable { case run, waitForInFlightThenRun, skipRateLimited, skipInFlight }
+
+    /// Pure policy (unit-tested).
+    nonisolated static func refreshDecision(trigger: RefreshTrigger,
+                                            inFlight: Bool,
+                                            hasRefreshedOnLaunch: Bool,
+                                            lastRefreshTime: Date?,
+                                            now: Date,
+                                            minInterval: TimeInterval) -> RefreshDecision {
+        switch trigger {
+        case .userInitiated, .foreground:
+            return inFlight ? .waitForInFlightThenRun : .run
+        case .automatic:
+            if inFlight { return .skipInFlight }
+            if hasRefreshedOnLaunch, let last = lastRefreshTime, now.timeIntervalSince(last) < minInterval {
+                return .skipRateLimited
             }
-            hasRefreshedOnLaunch = true
+            return .run
         }
-        lastRefreshTime = Date()
+    }
 
-        debugLog("🔄 Dashboard refresh() called")
-        isLoading = true
+    /// Whether a trigger must force NetworkMonitorService to re-evaluate the
+    /// path (never just re-render `currentStatus`).
+    nonisolated static func forcesMonitorUpdate(_ trigger: RefreshTrigger) -> Bool {
+        trigger != .automatic
+    }
+
+    /// The refresh currently running, if any — awaited by user-initiated refreshes.
+    private var inFlightRefresh: Task<Void, Never>?
+
+    /// Backward-compatible entry point. `forceRefresh` = pull-to-refresh.
+    func refresh(forceRefresh: Bool = false) async {
+        await refresh(trigger: forceRefresh ? .userInitiated : .automatic)
+    }
+
+    /// Refresh all network data (see RefreshTrigger for the policy).
+    func refresh(trigger: RefreshTrigger) async {
+        let decision = Self.refreshDecision(trigger: trigger,
+                                            inFlight: inFlightRefresh != nil,
+                                            hasRefreshedOnLaunch: hasRefreshedOnLaunch,
+                                            lastRefreshTime: lastRefreshTime,
+                                            now: Date(),
+                                            minInterval: minRefreshInterval)
+        switch decision {
+        case .skipInFlight:
+            debugLog("🔄 Dashboard refresh already in progress, skipping (automatic)")
+            return
+        case .skipRateLimited:
+            debugLog("🔄 Dashboard refresh() skipped — auto-refresh limited to once per 60s")
+            return
+        case .waitForInFlightThenRun:
+            debugLog("🔄 Dashboard refresh (\(trigger)) — waiting for the in-flight refresh, then re-running")
+            while let running = inFlightRefresh { await running.value }
+        case .run:
+            break
+        }
+        if trigger == .automatic { hasRefreshedOnLaunch = true }
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRefresh(trigger: trigger)
+        }
+        inFlightRefresh = task
+        await task.value
+        if inFlightRefresh == task { inFlightRefresh = nil }
+    }
+
+    private func performRefresh(trigger: RefreshTrigger) async {
+        lastRefreshTime = Date()
+        let forceMonitor = Self.forcesMonitorUpdate(trigger)
+        debugLog("🔄 Dashboard refresh() called (\(trigger)\(forceMonitor ? ", forcing a fresh network read" : ""))")
+        // The overlay reflects real work for the two explicit triggers; a
+        // foreground re-read is quiet.
+        isLoading = trigger != .foreground
 
         // Use a timeout to prevent infinite loading
         do {
@@ -212,12 +280,13 @@ class DashboardViewModel: ObservableObject {
                     guard let self = self else { return }
 
                     // Step 1: Force VPN re-detection on manual refresh
-                    if forceRefresh {
+                    if forceMonitor {
                         await self.networkMonitor.forceRefreshVPN()
                     }
 
-                    // Step 2: Update network status
-                    await self.networkMonitor.updateNetworkStatus()
+                    // Step 2: Update network status. Forced = re-evaluate the
+                    // path even if a periodic update is already running.
+                    await self.networkMonitor.updateNetworkStatus(force: forceMonitor)
 
                     // Step 3: Fetch public IP (don't wait if slow)
                     await self.fetchPublicIPWithTimeout()

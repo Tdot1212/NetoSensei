@@ -158,19 +158,39 @@ class NetworkMonitorService: ObservableObject {
 
     // MARK: - Status Update (Non-blocking)
 
-    private func performUpdate() async {
-        // FIXED: Prevent update accumulation - skip if previous update still running
-        guard !isUpdating else {
-            // ISSUE 10 FIX: Only log this once per burst, not every skip
-            return
-        }
-        isUpdating = true
-        defer { isUpdating = false }
+    /// The update currently running, so a FORCED update can wait for it.
+    private var inFlightUpdate: Task<Void, Never>?
 
-        // Run all checks in parallel with individual timeouts
-        let status = await buildStatus()
-        self.currentStatus = status
-        if isInitializing { isInitializing = false }
+    /// - Parameter force: Commit 8 — a user-initiated refresh. If a periodic
+    ///   or path-change update is already running, wait for it and then run
+    ///   again, so the caller always gets a status built AFTER its request.
+    ///   The default (periodic timer) keeps the old skip-if-busy behaviour.
+    private func performUpdate(force: Bool = false) async {
+        if isUpdating {
+            guard force else {
+                // ISSUE 10 FIX: Only log this once per burst, not every skip
+                return
+            }
+            debugLog("[Network] Forced update requested while one is running — waiting, then re-evaluating")
+            // Loop: another update may start while we wait (MainActor hops).
+            while isUpdating { await inFlightUpdate?.value }
+        }
+        if force { debugLog("[Network] Forced update (user refresh) — re-evaluating path") }
+
+        // Claim the slot synchronously (we are on the MainActor) so two forced
+        // callers arriving together cannot both start a build.
+        isUpdating = true
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isUpdating = false }
+            // Run all checks in parallel with individual timeouts
+            let status = await self.buildStatus()
+            self.currentStatus = status
+            if self.isInitializing { self.isInitializing = false }
+        }
+        inFlightUpdate = task
+        await task.value
+        if inFlightUpdate == task { inFlightUpdate = nil }
     }
 
     nonisolated private func buildStatus() async -> NetworkStatus {
@@ -1057,8 +1077,10 @@ class NetworkMonitorService: ObservableObject {
 
     // MARK: - Public API (for ViewModels)
 
-    nonisolated func updateNetworkStatus() async {
-        await performUpdate()
+    /// - Parameter force: see performUpdate(force:). Pull-to-refresh and
+    ///   foregrounding pass true; a forced call never silently no-ops.
+    nonisolated func updateNetworkStatus(force: Bool = false) async {
+        await performUpdate(force: force)
     }
 
     nonisolated func pingHost(_ host: String, timeout: TimeInterval) async -> (Bool, Double?) {

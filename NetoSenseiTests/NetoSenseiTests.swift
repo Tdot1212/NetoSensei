@@ -1141,3 +1141,43 @@ struct DeepScanCoverageTests {
         #expect(summary.coverage == nil && summary.overallThreatLevel == .secure)
     }
 }
+
+// MARK: - Refresh policy (Commit 8)
+
+struct RefreshPolicyTests {
+    typealias VM = DashboardViewModel
+    static let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test func userInitiatedRefresh_isNeverRateLimited() {
+        let d = VM.refreshDecision(trigger: .userInitiated, inFlight: false, hasRefreshedOnLaunch: true,
+                                   lastRefreshTime: Self.now.addingTimeInterval(-5), now: Self.now, minInterval: 60)
+        #expect(d == .run)
+    }
+
+    @Test func automaticRefresh_isRateLimited_afterLaunch() {
+        let limited = VM.refreshDecision(trigger: .automatic, inFlight: false, hasRefreshedOnLaunch: true,
+                                         lastRefreshTime: Self.now.addingTimeInterval(-5), now: Self.now, minInterval: 60)
+        #expect(limited == .skipRateLimited)
+        let due = VM.refreshDecision(trigger: .automatic, inFlight: false, hasRefreshedOnLaunch: true,
+                                     lastRefreshTime: Self.now.addingTimeInterval(-61), now: Self.now, minInterval: 60)
+        #expect(due == .run)
+        let launch = VM.refreshDecision(trigger: .automatic, inFlight: false, hasRefreshedOnLaunch: false,
+                                        lastRefreshTime: nil, now: Self.now, minInterval: 60)
+        #expect(launch == .run)
+    }
+
+    @Test func inFlight_automaticIsDropped_userWaitsThenReruns() {
+        #expect(VM.refreshDecision(trigger: .automatic, inFlight: true, hasRefreshedOnLaunch: true,
+                                   lastRefreshTime: nil, now: Self.now, minInterval: 60) == .skipInFlight)
+        #expect(VM.refreshDecision(trigger: .userInitiated, inFlight: true, hasRefreshedOnLaunch: true,
+                                   lastRefreshTime: nil, now: Self.now, minInterval: 60) == .waitForInFlightThenRun)
+        #expect(VM.refreshDecision(trigger: .foreground, inFlight: true, hasRefreshedOnLaunch: true,
+                                   lastRefreshTime: nil, now: Self.now, minInterval: 60) == .waitForInFlightThenRun)
+    }
+
+    @Test func manualAndForegroundRefresh_forceAMonitorUpdate_automaticDoesNot() {
+        #expect(VM.forcesMonitorUpdate(.userInitiated))
+        #expect(VM.forcesMonitorUpdate(.foreground))
+        #expect(!VM.forcesMonitorUpdate(.automatic))
+    }
+}

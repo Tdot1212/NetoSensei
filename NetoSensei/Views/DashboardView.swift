@@ -19,6 +19,7 @@ struct DashboardView: View {
     @State private var showingAIChat = false
     @State private var showingSettings = false
     @State private var versionTapCount = 0
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationView {
@@ -85,8 +86,10 @@ struct DashboardView: View {
                     .padding()
                 }
                 .refreshable {
-                    // PART 1: Force refresh on pull-to-refresh (bypass 60s limit)
-                    await vm.refresh(forceRefresh: true)
+                    // Commit 8: never rate-limited, forces a fresh network read,
+                    // and waits for + re-runs after any in-flight refresh so
+                    // the gesture always ends with post-gesture data.
+                    await vm.refresh(trigger: .userInitiated)
                 }
 
                 // Loading overlay
@@ -112,7 +115,14 @@ struct DashboardView: View {
             .onAppear {
                 // PART 1: Only refresh once on launch (not on every tab switch)
                 Task {
-                    await vm.refresh()
+                    await vm.refresh(trigger: .automatic)
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                // Commit 8: returning from Settings after toggling Wi-Fi is the
+                // same scenario as pull-to-refresh — re-read the network quietly.
+                if phase == .active {
+                    Task { await vm.refresh(trigger: .foreground) }
                 }
             }
             .sheet(isPresented: $showingIPInfo) {
