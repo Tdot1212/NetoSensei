@@ -55,6 +55,16 @@ struct SpeedTestResult: Codable, Identifiable {
     /// Set when no suitable server was found; the record then carries no measurement
     /// and is NOT saved to history.
     var testUnavailableReason: String? = nil
+    /// Commit 12: set when the selected server declares no upload support.
+    /// uploadSpeed is then 0 and MUST be read through `measuredUploadSpeed`.
+    var uploadUnavailableReason: String? = nil
+
+    /// Upload figure as a measurement: nil when not measured (unsupported or
+    /// failed), never a zero. Phase 3 contract for a field that predates it.
+    var measuredUploadSpeed: Double? {
+        if uploadUnavailableReason != nil { return nil }
+        return uploadSpeed > 0 ? uploadSpeed : nil
+    }
 
     // Performance rating
     var quality: QualityRating
@@ -80,7 +90,7 @@ struct SpeedTestResult: Codable, Identifiable {
         case serverUsed, serverLocation, testDuration
         case connectionType, vpnActive, ipAddress
         case networkSSID, localSubnet, publicCountry
-        case serverRegion, testUnavailableReason
+        case serverRegion, testUnavailableReason, uploadUnavailableReason
         case quality
     }
 
@@ -107,6 +117,7 @@ struct SpeedTestResult: Codable, Identifiable {
         publicCountry = try c.decodeIfPresent(String.self, forKey: .publicCountry)
         serverRegion = try c.decodeIfPresent(String.self, forKey: .serverRegion)
         testUnavailableReason = try c.decodeIfPresent(String.self, forKey: .testUnavailableReason)
+        uploadUnavailableReason = try c.decodeIfPresent(String.self, forKey: .uploadUnavailableReason)
         quality = try c.decode(QualityRating.self, forKey: .quality)
     }
 

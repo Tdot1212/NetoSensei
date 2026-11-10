@@ -35,6 +35,8 @@ class GeoIPService: ObservableObject {
     // FIXED: Cache management - 5 minute cache to prevent rate limit issues
     private var cachedResult: GeoIPInfo?
     private var cacheTimestamp: Date?
+    /// Commit 13: when the current cached result was fetched (nil = none / cleared).
+    var lastFetchAt: Date? { cacheTimestamp }
     private static let cacheDuration: TimeInterval = 300.0  // 5 minutes
 
     private init() {}

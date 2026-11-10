@@ -136,6 +136,10 @@ class NetworkMonitorService: ObservableObject {
                 if let reason = PathIdentity.rebuildReason(from: self.lastPathIdentity, to: identity) {
                     self.lastPathIdentity = identity
                     debugLog("[Network] Path changed (\(reason)) — running full update [\(identity)]")
+                    // Commit 13: this is the event that makes every cached view
+                    // of the exit path wrong. Drop them here, then re-read.
+                    ExitPath.pathIdentityChanged()
+                    await self.forceRefreshVPN()
                     // force: a change during an in-flight rebuild waits for it and
                     // re-runs, so a burst (tunnel negotiation) coalesces into at
                     // most one extra rebuild and the final identity is measured.
@@ -757,6 +761,7 @@ class NetworkMonitorService: ObservableObject {
         Self.lastVPNCheck = .distantPast
         let vpnEngine = await MainActor.run { VPNEngine.shared }
         vpnEngine.invalidateCache()
+        await MainActor.run { SmartVPNDetector.shared.invalidate() }   // Commit 13: the detector's own 30 s cooldown too
         let result = await vpnEngine.getVPNInfo()
         Self.cachedVPNInfo = result
         Self.lastVPNCheck = Date()
@@ -1072,9 +1077,14 @@ class NetworkMonitorService: ObservableObject {
         case .wiredEthernet?: physicalType = .wired
         default: physicalType = .none
         }
-        // Routed through a tunnel = the path uses an .other interface (utun/ipsec)
-        // and does not use the physical type directly.
-        let viaTunnel = path.usesInterfaceType(.other) && !(path.usesInterfaceType(.wifi) || path.usesInterfaceType(.cellular) || path.usesInterfaceType(.wiredEthernet))
+        // Routed through a tunnel = the path's PRIMARY interface (first in
+        // availableInterfaces, the one debugDescription prints) is .other
+        // (utun/ipsec). Commit 13: the Commit 10 form — "uses .other and not a
+        // physical type" — was never true with a VPN up, because the path also
+        // "uses" the cellular/Wi-Fi interface under the tunnel (device log:
+        // identity "…/direct" while the path's interface was utun4[lte]). A VPN
+        // toggle was therefore invisible to the identity gate.
+        let viaTunnel = path.availableInterfaces.first?.type == .other
         let subnet: String? = (physicalType == .wifi || physicalType == .wired) ? NetworkSegment.subnet(of: getLocalIP()) : nil
 
         return PathIdentity(status: status, physical: physicalType, physicalName: carrier?.name, subnet: subnet, viaTunnel: viaTunnel)

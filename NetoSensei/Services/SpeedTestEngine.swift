@@ -41,26 +41,48 @@ class SpeedTestEngine: ObservableObject {
         // Capture network state (already on MainActor)
         let status = NetworkMonitorService.shared.currentStatus
         let connectionType = status.connectionType?.displayName ?? "Unknown"
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
         let ipAddress = status.publicIP
         // Phase 4: network identity for trend segmentation (same key concept
         // as DashboardViewModel.networkIdentityKey). Observed, never guessed.
         let networkSSID = status.wifi.ssid
         let localSubnet = NetworkSegment.subnet(of: status.localIP)
-        // Diagnosis v2 §G / Commit 11: ONE resolver for the exit country (same
-        // source the Home card and history use, so segment keys agree).
-        let publicCountry = ExitPath.country()
-        let isInChina = SmartVPNDetector.shared.detectionResult?.isLikelyInChina ?? false
 
-        // Phase 1: Finding Server (10%) — Commit 11: exit-path candidates,
-        // probe-disqualified, never a silent fallback.
+        // Phase 1: Finding Server (10%) — Commit 13: the exit path (country +
+        // VPN state) is resolved FRESHLY, never read from a pre-switch cache.
+        // Unresolvable → honest "not run".
         self.currentPhase = .findingServer; self.progress = 0.1
+        let publicCountry: String?
+        let vpnActive: Bool
+        switch await ExitPath.resolveFresh() {
+        case .resolved(let c, let v):
+            publicCountry = c
+            vpnActive = v
+        case .unresolved(let reason):
+            debugLog("⛔ Speed test not run — \(reason)")
+            self.isRunning = false
+            self.currentPhase = .idle
+            var unavailable = SpeedTestResult(
+                downloadSpeed: 0, uploadSpeed: 0, ping: nil, jitter: nil, packetLoss: nil,
+                serverUsed: nil, serverLocation: nil, testDuration: 0,
+                connectionType: connectionType, vpnActive: false, ipAddress: ipAddress,
+                networkSSID: networkSSID, localSubnet: localSubnet, publicCountry: nil
+            )
+            unavailable.testUnavailableReason = reason
+            return unavailable
+        }
+        let isInChina = SmartVPNDetector.shared.detectionResult?.isLikelyInChina ?? false
+        // Fresh connections for this run's transfers: URLSession.shared keeps
+        // pooled connections from the PREVIOUS network alive across a switch
+        // (device log: "The network connection was lost" on the first upload).
+        transferSession = Self.makeTransferSession()
+        defer { transferSession?.invalidateAndCancel(); transferSession = nil }
+
         let decision = await selectServer(exitCountry: publicCountry, vpnActive: vpnActive)
         let serverLabel: String
         let serverRegion: SpeedTestServerSelection.Region
         switch decision {
         case .selected(let candidate, let region):
-            selectedServer = candidate.hostname
+            selectedCandidate = candidate
             serverLabel = candidate.label
             serverRegion = region
             debugLog("✅ Server selected: \(candidate.label) (\(region.text))")
@@ -97,10 +119,21 @@ class SpeedTestEngine: ObservableObject {
         }
         self.progress = 0.7
 
-        // Phase 4: Testing Upload (20%) - 20s timeout
+        // Phase 4: Testing Upload (20%) — Commit 12: only if the selected
+        // candidate declares upload support; otherwise nil with a reason.
         self.currentPhase = .testingUpload; self.progress = 0.75
-        let uploadSpeed = await testUploadSpeed(timeout: 20.0)
-        debugLog("✅ Upload: \(uploadSpeed) Mbps")
+        let uploadSpeed: Double
+        let uploadUnavailableReason: String?
+        switch SpeedTestServerSelection.uploadPlan(for: selectedCandidate) {
+        case .measure(let url):
+            uploadSpeed = await testUploadSpeed(to: url)
+            uploadUnavailableReason = nil
+            debugLog("✅ Upload: \(uploadSpeed) Mbps")
+        case .unsupported(let reason):
+            uploadSpeed = 0
+            uploadUnavailableReason = reason
+            debugLog("ℹ️ Upload not measured — \(reason)")
+        }
         self.progress = 0.9
 
         // Phase 5: Measure Packet Loss (10%)
@@ -130,6 +163,7 @@ class SpeedTestEngine: ObservableObject {
             publicCountry: publicCountry
         )
         result.serverRegion = serverRegion.text
+        result.uploadUnavailableReason = uploadUnavailableReason
 
         self.isRunning = false
         self.currentPhase = .idle
@@ -138,27 +172,73 @@ class SpeedTestEngine: ObservableObject {
         return result
     }
 
-    // MARK: - Server Selection (Commit 11: exit-path, probe-disqualified, no silent fallback)
+    // MARK: - Server Selection (Commit 11/12: exit-path candidates, probe-qualified, no silent fallback)
 
-    /// Selected server for current test
-    private var selectedServer: String = SpeedTestServerSelection.cloudflare.hostname
+    /// The candidate the current run measures against.
+    private var selectedCandidate: SpeedTestServerSelection.Candidate = SpeedTestServerSelection.cloudflare
 
-    /// Probe every candidate for the exit country with the same HTTPS-HEAD
-    /// probe the rest of the app uses, then let the pure rules decide.
+    /// Commit 13: per-run session so no pooled pre-switch connection is reused.
+    private var transferSession: URLSession?
+    nonisolated private static func makeTransferSession() -> URLSession {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 60
+        c.timeoutIntervalForResource = 120
+        return URLSession(configuration: c)
+    }
+    private var runSession: URLSession { transferSession ?? URLSession.shared }
+
+    /// Probe every candidate for the exit country in order, then let the pure
+    /// rules decide. Every candidate is probed (not just until the first
+    /// qualifies) so the log — and the "Test Not Run" reason — show all of them.
     private func selectServer(exitCountry: String?, vpnActive: Bool) async -> SpeedTestServerSelection.Decision {
         let candidates = SpeedTestServerSelection.candidates(forExitCountry: exitCountry)
         var probes: [SpeedTestServerSelection.Probe] = []
         for c in candidates {
-            let (ok, rtt) = await NetworkMonitorService.shared.pingHost(c.hostname, timeout: 3.0)
-            let measured = ok ? LatencyValidation.normalize(rtt) : nil
-            debugLog("[SpeedTest] Candidate \(c.label) (\(c.hostname)) exit=\(exitCountry ?? "unknown") vpn=\(vpnActive): \(ok ? "reachable" : "unreachable")\(measured.map { ", probe \(Int($0)) ms" } ?? "")")
-            probes.append(.init(candidate: c, reachable: ok, rttMs: measured))
+            let (ok, rtt) = await Self.probe(c)
+            debugLog("[SpeedTest] Candidate \(c.label) (\(c.hostname)) exit=\(exitCountry ?? "unknown") vpn=\(vpnActive): \(ok ? "reachable" : "unreachable")\(rtt.map { ", probe \(Int($0)) ms" } ?? "")")
+            probes.append(.init(candidate: c, reachable: ok, rttMs: rtt))
         }
         let decision = SpeedTestServerSelection.decide(probes: probes, vpnActive: vpnActive, exitCountry: exitCountry)
         if case .unavailable(let reason) = decision {
             debugLog("[SpeedTest] No suitable server: \(reason)")
         }
         return decision
+    }
+
+    /// Commit 12 probe: GET the candidate's own zero-byte test endpoint on a
+    /// FRESH connection (ephemeral session, no reuse) so the figure is the
+    /// cold 3-RTT exchange the 400 ms rule was derived from; a pooled
+    /// connection would understate distance. 2xx required — a host that
+    /// answers but 404s the test path is not a candidate.
+    nonisolated static let probeTimeoutSeconds: TimeInterval = 4.0
+
+    nonisolated private static func probe(_ c: SpeedTestServerSelection.Candidate) async -> (Bool, Double?) {
+        guard let url = c.probeURL else { return (false, nil) }
+        // Reachability cap, NOT the nearby rule: 4 s so a candidate behind a
+        // VPN (the probe crosses the tunnel; the device run showed Cloudflare
+        // at 1–2 s through one) can still answer. Direct paths are judged by
+        // the 400 ms rule regardless of how long the cap is.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = Self.probeTimeoutSeconds
+        config.timeoutIntervalForResource = Self.probeTimeoutSeconds
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        let start = Date()
+        do {
+            let (_, response) = try await session.data(for: request)
+            let ms = Date().timeIntervalSince(start) * 1000
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return (false, nil)
+            }
+            // NOT LatencyValidation.normalize: that filter discards ≥ 999 ms as a
+            // sentinel, and the whole point here is to report a real 1162 ms.
+            guard ms.isFinite, ms >= 0 else { return (true, nil) }
+            return (true, ms)
+        } catch {
+            return (false, nil)
+        }
     }
 
     // MARK: - Latency Test (Phase 3: sentinel-free, interception-aware)
@@ -257,13 +337,22 @@ class SpeedTestEngine: ObservableObject {
             do {
                 let perTestTimeout = i == 0 ? 20.0 : 45.0
                 let speed = try await withTimeout(seconds: perTestTimeout) {
-                    let server = await MainActor.run { self.selectedServer }
-                    let testURL = "https://\(server)/__down?bytes=\(testSize.bytes)"
-                    guard let url = URL(string: testURL) else { return 0.0 }
+                    let (candidate, session) = await MainActor.run { (self.selectedCandidate, self.runSession) }
+                    guard let url = candidate.downloadURL(bytes: testSize.bytes) else {
+                        throw SpeedTestTransferError.unsupported("download")
+                    }
 
                     let start = Date()
-                    let (data, _) = try await URLSession.shared.data(from: url)
+                    let (data, response) = try await session.data(from: url)
                     let duration = Date().timeIntervalSince(start)
+                    // Commit 12: a measurement needs a 2xx AND (about) the bytes
+                    // asked for. A 200 HTML page or a 404 body is not throughput.
+                    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        throw SpeedTestTransferError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+                    }
+                    guard Double(data.count) >= Double(testSize.bytes) * 0.9 else {
+                        throw SpeedTestTransferError.shortBody(got: data.count, wanted: testSize.bytes)
+                    }
 
                     let megabits = Double(data.count) * 8 / 1_000_000
                     let mbps = megabits / duration
@@ -306,7 +395,7 @@ class SpeedTestEngine: ObservableObject {
     // FIXED: Increased timeout to 60 seconds per test
     // FIXED: Return successful results even if second test times out
 
-    private func testUploadSpeed(timeout: TimeInterval) async -> Double {
+    private func testUploadSpeed(to uploadURL: URL) async -> Double {
         var collectedSpeeds: [Double] = []
 
         // FIXED: Generate 10MB of test data for more accurate upload measurement
@@ -317,18 +406,20 @@ class SpeedTestEngine: ObservableObject {
             do {
                 // Each upload test gets 45 seconds
                 let speed = try await withTimeout(seconds: 45.0) {
-                    let server = await MainActor.run { self.selectedServer }
-                    let testURL = "https://\(server)/__up"
-                    guard let url = URL(string: testURL) else { return 0.0 }
-
-                    var request = URLRequest(url: url)
+                    var request = URLRequest(url: uploadURL)
                     request.httpMethod = "POST"
                     request.httpBody = testData
                     request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
 
+                    let session = await MainActor.run { self.runSession }
                     let start = Date()
-                    let (_, _) = try await URLSession.shared.data(for: request)
+                    let (_, response) = try await session.data(for: request)
                     let duration = Date().timeIntervalSince(start)
+                    // Commit 12: a rejected upload (405/413/…) returns fast and
+                    // would read as a huge figure. Only a 2xx counts.
+                    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        throw SpeedTestTransferError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+                    }
                     let megabits = Double(testData.count) * 8 / 1_000_000
                     let mbps = megabits / duration
 
@@ -416,4 +507,20 @@ class SpeedTestEngine: ObservableObject {
         guard roundsRun > 0, successCount > 0 else { return nil }
         return Double(roundsRun - successCount) / Double(roundsRun) * 100
     }
+}
+
+/// Commit 12: why a transfer did not count as a measurement.
+enum SpeedTestTransferError: LocalizedError, CustomStringConvertible {
+    case unsupported(String)
+    case badStatus(Int)
+    case shortBody(got: Int, wanted: Int)
+
+    var description: String {
+        switch self {
+        case .unsupported(let what): return "candidate does not support \(what)"
+        case .badStatus(let code): return "HTTP \(code)"
+        case .shortBody(let got, let wanted): return "short body (\(got) of \(wanted) bytes)"
+        }
+    }
+    var errorDescription: String? { description }
 }

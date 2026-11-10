@@ -95,9 +95,11 @@ class HistoryManager: ObservableObject {
     }
 
     func getAverageUploadSpeed() -> Double? {
-        guard !speedTestHistory.isEmpty else { return nil }
-        let total = speedTestHistory.reduce(0.0) { $0 + $1.uploadSpeed }
-        return total / Double(speedTestHistory.count)
+        // Commit 12: average only measured uploads — an unsupported or failed
+        // upload is nil, not a zero dragging the mean down.
+        let measured = speedTestHistory.compactMap { $0.measuredUploadSpeed }
+        guard !measured.isEmpty else { return nil }
+        return measured.reduce(0, +) / Double(measured.count)
     }
 
     func getAveragePing() -> Double? {

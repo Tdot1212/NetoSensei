@@ -244,6 +244,13 @@ class SmartVPNDetector: ObservableObject {
 
     // MARK: - Main Detection Entry Point
 
+    /// Commit 13: drop the cooldown so the next detectVPN() runs for real.
+    /// forceRefreshVPN() used to clear only VPNEngine's cache; this 30 s
+    /// cooldown still handed back the pre-switch result.
+    func invalidate() {
+        lastDetectionTime = nil
+    }
+
     func detectVPN(expectedCountry: String? = nil, forceRefresh: Bool = false) async -> VPNDetectionResult {
         // Cache check
         if !forceRefresh,

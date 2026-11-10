@@ -1375,21 +1375,86 @@ struct SpeedTestServerSelectionTests {
     }
 
     @Test func candidatesFollowTheExitCountry_notTheLocale() {
-        // Same host everywhere today, but the CN entry says what it really is:
-        // no candidate is ever labelled a "China PoP" by assertion.
-        let cn = Sel.candidates(forExitCountry: "cn")
-        #expect(cn.count == 1 && cn[0].hostname == "speed.cloudflare.com" && cn[0].label == "Cloudflare")
-        #expect(!cn[0].label.contains("China PoP"))
-        #expect(cn[0].servesFrom.contains("only if the probe is nearby"))
-        #expect(Sel.candidates(forExitCountry: "US") == [Self.cf])
-        #expect(Sel.candidates(forExitCountry: nil) == [Self.cf])
+        // Commit 12: Cloudflare leads every branch, nothing is labelled a
+        // "China PoP" by assertion, and the Western branches have verified
+        // alternates. East Asia deliberately has ONE candidate: no second
+        // backend there could be verified (see candidates(forExitCountry:)).
+        for country in ["cn", "US", "GB", "DE", "JP", nil] {
+            let list = Sel.candidates(forExitCountry: country)
+            #expect(list.first == Self.cf)
+            #expect(!list.contains { $0.label.contains("China PoP") })
+            #expect(Set(list.map(\.hostname)).count == list.count)   // no duplicates
+        }
+        for country in ["US", "GB", "DE", nil] {
+            #expect(Sel.candidates(forExitCountry: country).count >= 2, "\(country ?? "nil") needs a verified alternate")
+        }
+        #expect(Sel.candidates(forExitCountry: "CN") == [Self.cf])
+        #expect(Sel.candidates(forExitCountry: "US") == [Self.cf, Sel.libreSpeedLosAngeles, Sel.libreSpeedNewYork])
     }
 
-    @Test func firstQualifyingCandidateWins_laterOnesNotNeeded() {
-        let far = Sel.Candidate(hostname: "far.example", label: "Far", servesFrom: "elsewhere")
-        let near = Sel.Candidate(hostname: "near.example", label: "Near", servesFrom: "here")
-        let d = Sel.decide(probes: [Self.probe(far, rtt: 900), Self.probe(near, rtt: 120)], vpnActive: false, exitCountry: "CN")
-        #expect(d == .selected(near, .nearby(probeMs: 120)))
+    static let far = Sel.Candidate(label: "Far", backend: .libreSpeed(base: "https://far.example/backend"), servesFrom: "elsewhere", supports: [.download, .upload])
+    static let near = Sel.Candidate(label: "Near", backend: .libreSpeed(base: "https://near.example/backend"), servesFrom: "here", supports: [.download, .upload])
+    static let dlOnly = Sel.Candidate(label: "DownOnly", backend: .cloudflare(host: "down.example"), servesFrom: "here", supports: [.download])
+
+    @Test func firstQualifyingCandidateWins_inListOrder() {
+        // Order is a preference among QUALIFIERS only: an unreachable first and a
+        // far second never block a near third; two nears → the earlier one.
+        let d = Sel.decide(probes: [Self.probe(Self.cf, reachable: false, rtt: nil), Self.probe(Self.far, rtt: 900), Self.probe(Self.near, rtt: 120)],
+                           vpnActive: false, exitCountry: "CN")
+        #expect(d == .selected(Self.near, .nearby(probeMs: 120)))
+        let both = Sel.decide(probes: [Self.probe(Self.far, rtt: 300), Self.probe(Self.near, rtt: 120)], vpnActive: false, exitCountry: "CN")
+        #expect(both == .selected(Self.far, .nearby(probeMs: 300)))   // earlier qualifier wins, not the faster one
+    }
+
+    // MARK: Commit 12 — capabilities and wire shape
+
+    @Test func downloadOnlyCandidate_yieldsNoUploadPlan_withAStatedReason() {
+        #expect(Self.dlOnly.uploadURL == nil)
+        #expect(Self.dlOnly.downloadURL(bytes: 5_000_000)?.absoluteString == "https://down.example/__down?bytes=5000000")
+        guard case .unsupported(let reason) = Sel.uploadPlan(for: Self.dlOnly) else { Issue.record("planned an upload the server does not accept"); return }
+        #expect(reason.contains("DownOnly") && reason.contains("not measured"))
+        #expect(Sel.uploadPlan(for: Self.cf) == .measure(URL(string: "https://speed.cloudflare.com/__up")!))
+    }
+
+    @Test func resultWithUnsupportedUpload_readsNilNeverZero_andRoundTrips() throws {
+        var r = SpeedTestResult(downloadSpeed: 90, uploadSpeed: 0, ping: 30, jitter: 2, packetLoss: 0, testDuration: 0,
+                                connectionType: "WiFi", vpnActive: false)
+        #expect(r.measuredUploadSpeed == nil)                       // failed upload: nil, not 0
+        r.uploadUnavailableReason = "DownOnly accepts no uploads, so upload speed was not measured on this run."
+        #expect(r.measuredUploadSpeed == nil)
+        let back = try JSONDecoder().decode(SpeedTestResult.self, from: JSONEncoder().encode(r))
+        #expect(back.uploadUnavailableReason == r.uploadUnavailableReason && back.measuredUploadSpeed == nil)
+        var ok = r; ok.uploadUnavailableReason = nil; ok.uploadSpeed = 12.5
+        #expect(ok.measuredUploadSpeed == 12.5)
+    }
+
+    @Test func candidateURLs_matchEachBackendsRealSemantics() {
+        // Cloudflare: /__down?bytes=N, POST /__up, probe = zero bytes.
+        #expect(Self.cf.probeURL?.absoluteString == "https://speed.cloudflare.com/__down?bytes=0")
+        #expect(Self.cf.downloadURL(bytes: 25_000_000)?.absoluteString == "https://speed.cloudflare.com/__down?bytes=25000000")
+        // LibreSpeed: garbage.php?ckSize=<MiB, min 4>, POST empty.php, probe = empty.php.
+        let t = Sel.libreSpeedLosAngeles
+        #expect(t.hostname == "la.speedtest.clouvider.net")
+        #expect(t.probeURL?.absoluteString == "https://la.speedtest.clouvider.net/backend/empty.php")
+        #expect(t.downloadURL(bytes: 5_000_000)?.absoluteString == "https://la.speedtest.clouvider.net/backend/garbage.php?ckSize=5")
+        #expect(t.downloadURL(bytes: 25_000_000)?.absoluteString == "https://la.speedtest.clouvider.net/backend/garbage.php?ckSize=24")
+        #expect(t.downloadURL(bytes: 1_000)?.absoluteString.hasSuffix("ckSize=4") == true)   // backend minimum
+        #expect(t.uploadURL?.absoluteString == "https://la.speedtest.clouvider.net/backend/empty.php")
+    }
+
+    @Test func probeCap_isAReachabilityLimit_notTheNearbyRule() {
+        // 4 s lets a VPN-tunnelled candidate answer; the 400 ms rule still decides direct paths.
+        #expect(SpeedTestEngine.probeTimeoutSeconds == 4.0)
+        #expect(Sel.nearbyProbeThresholdMs == 400)
+        // A real 1162 ms figure must survive to the reason text (not be dropped as a ≥999 sentinel).
+        if case .unavailable(let r) = Sel.decide(probes: [Self.probe(rtt: 1162)], vpnActive: false, exitCountry: "CN") { #expect(r.contains("1162 ms")) } else { Issue.record("selected") }
+    }
+
+    @Test func nothingQualifying_stillYieldsTestNotRun_withEveryCandidateNamed() {
+        // Commit 12 lists more candidates; all far or silent → still no test, all named.
+        let d = Sel.decide(probes: [Self.probe(Self.cf, rtt: 1162), Self.probe(Sel.libreSpeedLosAngeles, rtt: 640)], vpnActive: false, exitCountry: nil)
+        guard case .unavailable(let reason) = d else { Issue.record("selected a distant server"); return }
+        #expect(reason.contains("Cloudflare is 1162 ms") && reason.contains("LibreSpeed Los Angeles (Clouvider) is 640 ms"))
     }
 
     // MARK: Result contract
@@ -1428,5 +1493,69 @@ struct SpeedTestServerSelectionTests {
         #expect(unresolved?.downloadMbps == nil)   // "-" ≠ "CN": still no match — by design
         let otherSIM = ConnectionCards.cellularCard(status: s, generation: "5G", smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: record, publicCountry: "US")
         #expect(otherSIM?.downloadMbps == nil)
+    }
+}
+
+// MARK: - Commit 13: the speed test reads the CURRENT network's exit path
+
+@Suite("Commit 13 — exit-path freshness")
+struct ExitPathFreshnessTests {
+    static let change = Date(timeIntervalSince1970: 1_000_000)
+    static let before = change.addingTimeInterval(-40)     // observed on the previous network
+    static let after  = change.addingTimeInterval(+3)
+
+    @Test func staleExitCountry_doesNotDriveSelection_afterAPathChange() {
+        // GeoIP still says CN from the pre-switch network (300 s cache); the
+        // detector re-ran after the switch and sees a US exit through the VPN.
+        let s = ExitPath.Snapshot(geoCountry: "CN", geoObservedAt: Self.before,
+                                  detectorCountry: "US", detectorVPNActive: true, detectorObservedAt: Self.after)
+        #expect(ExitPath.resolution(s, lastPathChange: Self.change) == .resolved(country: "US", vpnActive: true))
+        // Candidate list follows the fresh country, not the stale one.
+        if case .resolved(let c, _) = ExitPath.resolution(s, lastPathChange: Self.change) {
+            #expect(SpeedTestServerSelection.candidates(forExitCountry: c) == SpeedTestServerSelection.candidates(forExitCountry: "US"))
+        }
+    }
+
+    @Test func freshGeoIP_winsOverTheDetector_whenBothAreCurrent() {
+        let s = ExitPath.Snapshot(geoCountry: "cn", geoObservedAt: Self.after,
+                                  detectorCountry: "US", detectorVPNActive: false, detectorObservedAt: Self.after)
+        #expect(ExitPath.resolution(s, lastPathChange: Self.change) == .resolved(country: "CN", vpnActive: false))
+    }
+
+    @Test func staleVPNState_isUnresolved_neverAssumedOff() {
+        // The VPN judgement picks the nearby-vs-VPN rule; a pre-switch one is not usable.
+        let s = ExitPath.Snapshot(geoCountry: "US", geoObservedAt: Self.after,
+                                  detectorCountry: "US", detectorVPNActive: false, detectorObservedAt: Self.before)
+        guard case .unresolved(let r) = ExitPath.resolution(s, lastPathChange: Self.change) else { Issue.record("used a pre-switch VPN state"); return }
+        #expect(r == ExitPath.unresolvedReason && r.contains("Try again in a moment"))
+        // A detector result frozen from an earlier run ("[cached]") is equally unusable, whatever its timestamp.
+        let frozen = ExitPath.Snapshot(geoCountry: nil, geoObservedAt: nil, detectorCountry: "CN", detectorVPNActive: false,
+                                       detectorObservedAt: Self.after, detectorIsStale: true)
+        if case .resolved = ExitPath.resolution(frozen, lastPathChange: Self.change) { Issue.record("used a frozen detector result") }
+        // Nothing observed at all → unresolved, not "no VPN, no country".
+        if case .resolved = ExitPath.resolution(ExitPath.Snapshot(), lastPathChange: Self.change) { Issue.record("resolved from nothing") }
+    }
+
+    @Test func unknownCountry_withFreshVPNState_stillResolves_toTheGlobalList() {
+        // The probe rule protects the global list; only the VPN state is mandatory.
+        let s = ExitPath.Snapshot(geoCountry: nil, geoObservedAt: nil, detectorCountry: "", detectorVPNActive: false, detectorObservedAt: Self.after)
+        #expect(ExitPath.resolution(s, lastPathChange: Self.change) == .resolved(country: nil, vpnActive: false))
+        #expect(SpeedTestServerSelection.candidates(forExitCountry: nil).first == SpeedTestServerSelection.cloudflare)
+    }
+
+    @Test func rulesFromCommits11And12_areUnchanged() {
+        #expect(SpeedTestServerSelection.nearbyProbeThresholdMs == 400)
+        #expect(SpeedTestEngine.probeTimeoutSeconds == 4.0)
+        #expect(SpeedTestServerSelection.candidates(forExitCountry: "CN") == [SpeedTestServerSelection.cloudflare])
+        #expect(SpeedTestServerSelection.candidates(forExitCountry: "US") == [SpeedTestServerSelection.cloudflare, SpeedTestServerSelection.libreSpeedLosAngeles, SpeedTestServerSelection.libreSpeedNewYork])
+    }
+
+    @Test func vpnToggle_isAnIdentityChange() {
+        // Commit 13 fixed viaTunnel to the path's primary interface; the identity
+        // rule itself (Commit 10) must still report the toggle as a rebuild.
+        let direct = PathIdentity(status: .satisfied, physical: .cellular, physicalName: "pdp_ip0", subnet: nil, viaTunnel: false)
+        let tunnel = PathIdentity(status: .satisfied, physical: .cellular, physicalName: "pdp_ip0", subnet: nil, viaTunnel: true)
+        #expect(PathIdentity.rebuildReason(from: direct, to: tunnel) == "VPN tunnel now carrying traffic")
+        #expect(PathIdentity.rebuildReason(from: tunnel, to: direct) == "VPN tunnel no longer carrying traffic")
     }
 }

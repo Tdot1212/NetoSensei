@@ -82,7 +82,7 @@ enum ConnectionCards {
         var download: Double?, upload: Double?, loss: Double?, jitter: Double?
         if let s = recentSpeedTest, s.segmentKey == segment, now.timeIntervalSince(s.timestamp) < speedTestFreshness {
             download = s.downloadSpeed > 0 ? s.downloadSpeed : nil
-            upload = s.uploadSpeed > 0 ? s.uploadSpeed : nil
+            upload = s.measuredUploadSpeed          // Commit 12: nil when unsupported or failed
             loss = s.packetLoss
             jitter = s.jitter
         }

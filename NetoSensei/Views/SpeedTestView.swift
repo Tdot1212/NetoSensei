@@ -221,6 +221,13 @@ struct SpeedTestContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, UIConstants.spacingS)
             }
+            if let reason = result.uploadUnavailableReason {
+                Text(reason)
+                    .font(.caption2)
+                    .foregroundColor(AppColors.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, UIConstants.spacingS)
+            }
         }
     }
 
@@ -363,9 +370,16 @@ struct SpeedTestContentView: View {
                         Text("Upload")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
-                        Text(result.uploadSpeed < 0.1 ? "Failed" : String(format: "%.1f Mbps", result.uploadSpeed))
-                            .font(.headline)
-                            .foregroundColor(result.uploadSpeed < 0.1 ? AppColors.textSecondary : AppColors.textPrimary)
+                        // Commit 12: "Not measured" (server declares no upload) is
+                        // distinct from "Failed" (server accepts uploads, none succeeded).
+                        if let up = result.measuredUploadSpeed {
+                            Text(String(format: "%.1f Mbps", up))
+                                .font(.headline)
+                        } else {
+                            Text(result.uploadUnavailableReason == nil ? "Failed" : "Not measured")
+                                .font(.headline)
+                                .foregroundColor(result.uploadUnavailableReason == nil ? AppColors.textSecondary : AppColors.yellow)
+                        }
                     }
 
                     VStack {
@@ -540,11 +554,12 @@ struct SpeedTestContentView: View {
                         percent: downloadPct
                     )
 
-                    if ispPlanUpload > 0 {
-                        let uploadPct = (result.uploadSpeed / ispPlanUpload) * 100
+                    // Commit 12: no upload measurement → no plan comparison (0 % would be a claim).
+                    if ispPlanUpload > 0, let up = result.measuredUploadSpeed {
+                        let uploadPct = (up / ispPlanUpload) * 100
                         ispPlanRow(
                             label: "Upload",
-                            actual: result.uploadSpeed,
+                            actual: up,
                             plan: ispPlanUpload,
                             percent: uploadPct
                         )
