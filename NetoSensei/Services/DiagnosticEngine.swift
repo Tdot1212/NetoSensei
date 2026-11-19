@@ -153,7 +153,7 @@ class DiagnosticEngine: ObservableObject {
         return DiagnosticTest(
             name: "DNS Lookup",
             result: success ? .pass : .fail,
-            latency: latency,
+            latency: success ? latency : nil,
             details: success ? "DNS resolution successful (\(String(format: "%.0f", latency))ms)" : "DNS lookup failed",
             timestamp: Date()
         )
@@ -180,11 +180,10 @@ class DiagnosticEngine: ObservableObject {
                 timestamp: Date()
             )
         } catch {
-            let latency = Date().timeIntervalSince(start) * 1000
             return DiagnosticTest(
                 name: "HTTP GET Test",
                 result: .fail,
-                latency: latency,
+                latency: nil,
                 details: "Request failed: \(error.localizedDescription)",
                 timestamp: Date()
             )
@@ -508,23 +507,6 @@ class DiagnosticEngine: ObservableObject {
     }
 
     nonisolated private func performDNSLookup(_ hostname: String) async -> Bool {
-        return await withCheckedContinuation { continuation in
-            var hints = addrinfo(
-                ai_flags: AI_DEFAULT,
-                ai_family: AF_UNSPEC,
-                ai_socktype: SOCK_STREAM,
-                ai_protocol: 0,
-                ai_addrlen: 0,
-                ai_canonname: nil,
-                ai_addr: nil,
-                ai_next: nil
-            )
-
-            var result: UnsafeMutablePointer<addrinfo>?
-            let status = getaddrinfo(hostname, nil, &hints, &result)
-            freeaddrinfo(result)
-
-            continuation.resume(returning: status == 0)
-        }
+        await SystemDNSResolver.resolve(hostname) != nil
     }
 }

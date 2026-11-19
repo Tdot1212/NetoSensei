@@ -64,7 +64,7 @@ struct PortScanView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Port Scanner")
                     .font(.headline)
-                Text("Find open ports and services")
+                Text("Check TCP port reachability")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -86,7 +86,7 @@ struct PortScanView: View {
 
             VStack(spacing: 8) {
                 // Router
-                let gatewayIP = NetworkMonitorService.shared.currentStatus.router.gatewayIP ?? "192.168.1.1"
+                let gatewayIP = NetworkMonitorService.shared.currentStatus.router.gatewayIP ?? ""
                 PortScanDeviceRow(
                     icon: "wifi.router",
                     title: "Router / Gateway",
@@ -284,6 +284,7 @@ struct PortScanView: View {
             // Scan info
             HStack {
                 Text("Scanned in \(String(format: "%.1fs", result.scanDuration))")
+                Text("TCP connections only. Port numbers suggest common services; they do not prove service identity, encryption, vulnerabilities, or Internet exposure.").font(.caption).foregroundStyle(.secondary)
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -301,7 +302,7 @@ struct PortScanView: View {
             HStack {
                 Image(systemName: "info.circle")
                     .foregroundColor(.blue)
-                Text("Port Risk Levels")
+                Text("Port review hints")
                     .font(.subheadline.bold())
             }
 
@@ -310,8 +311,8 @@ struct PortScanView: View {
                                   description: "Should not be exposed (RDP, databases, Telnet)")
                 PortRiskLegendRow(color: .orange, title: "Caution",
                                   description: "Review if intentional (FTP, email, UPnP)")
-                PortRiskLegendRow(color: .green, title: "Safe",
-                                  description: "Normal encrypted services (HTTPS)")
+                PortRiskLegendRow(color: .green, title: "Review",
+                                  description: "Port commonly assigned to an encrypted service; encryption is unverified")
                 PortRiskLegendRow(color: .blue, title: "Info",
                                   description: "Standard services (HTTP, SSH, DNS)")
             }
@@ -329,7 +330,7 @@ struct PortScanView: View {
         let ip: String
         switch device {
         case "router":
-            ip = NetworkMonitorService.shared.currentStatus.router.gatewayIP ?? "192.168.1.1"
+            ip = NetworkMonitorService.shared.currentStatus.router.gatewayIP ?? ""
         case "localhost":
             ip = "127.0.0.1"
         case "custom":

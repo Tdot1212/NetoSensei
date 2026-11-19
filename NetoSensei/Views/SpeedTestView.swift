@@ -215,7 +215,7 @@ struct SpeedTestContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, UIConstants.spacingS)
             if result.vpnActive {
-                Text("With a VPN on, the server sits near your tunnel's exit; its distance from the phone can't be judged from here. The number is what you get through the VPN.")
+                Text("The server selection probe is used to choose a test server. Its timing differs from remote delay and does not identify the server’s distance from your phone.")
                     .font(.caption2)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -464,7 +464,7 @@ struct SpeedTestContentView: View {
                     Text("Testing Through VPN")
                         .font(.subheadline.bold())
 
-                    Text("This measures your speed through the VPN tunnel. Your actual WiFi/cellular speed is likely faster.")
+                    Text("These speeds describe the route used by this test. A direct comparison requires a separate run.")
                         .font(.caption)
                         .foregroundColor(AppColors.textSecondary)
 
@@ -473,7 +473,7 @@ struct SpeedTestContentView: View {
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
                     } else {
-                        Text("Direct ping couldn't be measured through the VPN/proxy — it answers the probe locally. Throughput above is real.")
+                        Text("Remote delay was unavailable on this route. Throughput was measured separately.")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
                     }
@@ -488,12 +488,12 @@ struct SpeedTestContentView: View {
         CardView {
             VStack(alignment: .leading, spacing: UIConstants.spacingM) {
                 HStack {
-                    Text("Network Quality")
+                    Text("Speed test rating")
                         .font(.headline)
 
                     Spacer()
 
-                    Text(result.qualityDescription)
+                    Text(result.ping == nil || result.packetLoss == nil ? "Based on available metrics" : result.quality.rawValue)
                         .font(.headline.bold())
                         .foregroundColor(qualityColor(result.quality, vpnActive: result.vpnActive))
                 }
@@ -681,6 +681,7 @@ struct SpeedTestContentView: View {
     private func activityRow(icon: String, activity: String, requirement: String, rating: ActivityRating) -> some View {
         let tint: Color = {
             switch rating {
+            case .unknown: return .secondary
             case .excellent, .good: return AppColors.green
             case .degraded: return AppColors.yellow
             case .poor: return AppColors.red
@@ -712,9 +713,8 @@ struct SpeedTestContentView: View {
                     .font(.headline)
 
                 if result.vpnActive {
-                    tipRow(number: 1, tip: "Switch VPN server", detail: "A server closer to you or less crowded could double your speed.")
-                    tipRow(number: 2, tip: "Try WireGuard protocol", detail: "WireGuard is usually the fastest VPN protocol. Check your VPN app settings.")
-                    tipRow(number: 3, tip: "Test without VPN", detail: "Disconnect VPN and run the test again to see your actual internet speed.")
+                    tipRow(number: 1, tip: "Switch VPN server", detail: "In your VPN app, pick another server you trust. Stay on the same Wi-Fi and repeat the check before keeping the change.")
+                    tipRow(number: 2, tip: "Compare routes on trusted Wi-Fi", detail: "If your network policy permits, briefly disconnect the VPN, rerun the test, then reconnect it. Compare the two runs on the same Wi-Fi.")
                 } else {
                     // FIXED: Check quality rating, not just download speed
                     // Prevents saying "Your speed is good" when quality is "Poor" due to latency
@@ -822,9 +822,9 @@ struct SpeedTestContentView: View {
         // Phase 3: ping is optional — explain honestly when unmeasurable.
         guard let ping = result.ping else {
             if result.latencyIntercepted || result.vpnActive {
-                return "Ping unavailable — a local VPN/proxy answers the latency probe on-device, so direct network ping can't be measured while it's active. Download/upload above still reflect real throughput through the tunnel."
+                return "Remote delay unavailable. The VPN or proxy may affect the probe."
             }
-            return "Ping unavailable — the latency probes were blocked. A successful download still proves the connection works."
+            return "Remote delay unavailable. The test server did not produce usable delay samples."
         }
 
         if result.vpnActive {
@@ -844,7 +844,7 @@ struct SpeedTestContentView: View {
         let download = result.downloadSpeed
 
         if download >= 25 {
-            return "Your speed supports 4K streaming on Netflix, YouTube, and other services."
+            return "Measured bandwidth meets the app’s general 4K estimate. Verify playback in the app you use."
         } else if download >= 8 {
             return "Your speed supports 1080p HD streaming. For 4K, you'd need about \(Int(25 - download)) Mbps more."
         } else if download >= 3 {

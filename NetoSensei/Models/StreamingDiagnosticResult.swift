@@ -57,7 +57,7 @@ struct StreamingDiagnosticResult {
     var cdnRoutingIssue: Bool
 
     // Network Factors
-    var wifiStrength: Int  // RSSI in dBm
+    var wifiStrength: Int?  // RSSI in dBm
     var routerLatency: Double?
     var jitter: Double?
     var packetLoss: Double?
@@ -75,7 +75,7 @@ struct StreamingDiagnosticResult {
     var historicalCongestionPattern: String?
 
     // DNS Performance
-    var dnsLatency: Double
+    var dnsLatency: Double?
     var dnsProvider: String?
 
     // IPv6 Fallback
@@ -98,7 +98,7 @@ struct StreamingDiagnosticResult {
         case cdn = "CDN Routing"
         case dns = "DNS Resolution"
         case device = "Device Limitation"
-        case none = "No Issues Detected"
+        case none = "No Cause Established"
     }
 
     /// FIX (Speed Issue 4): The user-visible label for the primary bottleneck.
@@ -145,7 +145,7 @@ struct StreamingDiagnosticResult {
 
     // ISSUE 9 FIX: Detect geo-restriction when CDN unreachable + VPN active
     var isLikelyGeoBlocked: Bool {
-        !cdnReachable && vpnActive
+        false // No explicit service rejection is collected by these probes.
     }
 
     // Human-readable summary
@@ -160,7 +160,9 @@ struct StreamingDiagnosticResult {
         }
 
         guard hasIssues else {
-            return "Your \(platform.rawValue) streaming should work perfectly. Estimated quality: \(estimatedVideoQuality.description)."
+            return cdnReachable
+                ? "A service endpoint responded. Playback, video quality and congestion were not verified."
+                : "Service endpoint checks were inconclusive. This does not establish an outage or VPN block."
         }
 
         var summary = ""
@@ -204,7 +206,7 @@ struct StreamingDiagnosticResult {
             }
 
         case .dns:
-            summary = "DNS resolution is slow (\(Int(dnsLatency))ms). "
+            summary = dnsLatency.map { "DNS resolution took \(Int($0))ms. " } ?? "DNS latency was not measured. "
 
         case .device:
             summary = "Your device may have limitations affecting streaming. "

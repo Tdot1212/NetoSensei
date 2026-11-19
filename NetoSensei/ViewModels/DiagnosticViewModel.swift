@@ -206,14 +206,14 @@ class DiagnosticViewModel: ObservableObject {
 
                 // FIXED: Save history AFTER UI update completes, in background task
                 // This prevents @Published property updates from triggering cascading refreshes
-                let gatewayLatency = gateway.latency ?? 0
-                let dnsLatency = dns.latency ?? 0
+                let gatewayLatency = gateway.latency
+                let dnsLatency = dns.latency
                 let externalLatency = external.latency  // Phase 4: nil stays nil (unmeasured), never 0
                 let vpnActive = vpn.details.contains("active")
                 let connectionType = networkSnapshot.connectionType?.displayName ?? "Unknown"
                 // History keeps a 0–100 number; an unscored verdict (coverage floor unmet) is stored as 0
                 // only because NetworkHistoryEntry.healthScore is non-optional (post-trip cleanup).
-                let healthScore = composed.score?.value ?? 0
+                let healthScore = composed.score?.value
                 let rootCause = composed.primary?.headline ?? (composed.state == .working ? "No Issues" : composed.headline)
 
                 // NEW: Capture WiFi and VPN context for history

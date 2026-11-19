@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Darwin
 
 // @MainActor required: SwiftUI views (IPInfoView) and view models (DashboardViewModel)
 // observe this as an @ObservedObject and read @Published properties directly. The
@@ -33,6 +34,7 @@ class GeoIPService: ObservableObject {
     private var isFetching = false
 
     // FIXED: Cache management - 5 minute cache to prevent rate limit issues
+    private var cacheRevision = 0
     private var cachedResult: GeoIPInfo?
     private var cacheTimestamp: Date?
     /// Commit 13: when the current cached result was fetched (nil = none / cleared).
@@ -58,6 +60,7 @@ class GeoIPService: ObservableObject {
             return await existingTask.value
         }
 
+        let requestRevision = cacheRevision
         isFetching = true
         isLoading = true
         debugLog("🌍 GeoIP: Starting fresh fetch...")
@@ -105,6 +108,10 @@ class GeoIPService: ObservableObject {
         let result = await task.value
 
         // Update state and cache
+        guard requestRevision == cacheRevision else {
+            isLoading = false; currentFetchTask = nil; isFetching = false
+            return .empty
+        }
         currentGeoIP = result
         isLoading = false
         currentFetchTask = nil
@@ -122,6 +129,9 @@ class GeoIPService: ObservableObject {
 
     /// Clear the cache (call when network changes significantly)
     func clearCache() {
+        cacheRevision += 1
+        currentFetchTask?.cancel()
+        currentGeoIP = .empty
         cachedResult = nil
         cacheTimestamp = nil
         debugLog("🌍 GeoIP: Cache cleared")
@@ -155,6 +165,7 @@ class GeoIPService: ObservableObject {
             }
 
             let decoded = try JSONDecoder().decode(IPAPICoResponse.self, from: data)
+            guard Self.validIPAddress(decoded.ip) else { return nil }
 
             return GeoIPInfo(
                 publicIP: decoded.ip,
@@ -238,6 +249,7 @@ class GeoIPService: ObservableObject {
             }
 
             let decoded = try JSONDecoder().decode(IPWhoIsResponse.self, from: data)
+            guard let ip = decoded.ip, Self.validIPAddress(ip) else { return nil }
 
             guard decoded.success == true else {
                 debugLog("⚠️ ipwho.is returned success=false")
@@ -299,6 +311,7 @@ class GeoIPService: ObservableObject {
             }
 
             let decoded = try JSONDecoder().decode(IPInfoResponse.self, from: data)
+            guard Self.validIPAddress(decoded.ip) else { return nil }
 
             // Parse location
             var lat: Double?
@@ -313,7 +326,7 @@ class GeoIPService: ObservableObject {
 
             return GeoIPInfo(
                 publicIP: decoded.ip,
-                ipVersion: "IPv4",
+                ipVersion: decoded.ip.contains(":") ? "IPv6" : "IPv4",
                 country: decoded.country,
                 countryCode: decoded.country,
                 region: decoded.region,
@@ -343,23 +356,17 @@ class GeoIPService: ObservableObject {
         }
     }
 
+    nonisolated static func validIPAddress(_ value: String) -> Bool {
+        var v4 = in_addr(), v6 = in6_addr()
+        return (inet_pton(AF_INET, value, &v4) == 1 && value != "0.0.0.0") ||
+               (inet_pton(AF_INET6, value, &v6) == 1 && value != "::")
+    }
+
     // MARK: - CGNAT Detection
 
-    private func detectCGNAT(ip: String) -> Bool {
-        // Check if IP is in CGNAT range (100.64.0.0/10)
-        let components = ip.split(separator: ".")
-        guard components.count == 4,
-              let first = Int(components[0]),
-              let second = Int(components[1]) else {
-            return false
-        }
-
-        // CGNAT range: 100.64.0.0 - 100.127.255.255
-        if first == 100 && second >= 64 && second <= 127 {
-            return true
-        }
-
-        return false
+    private func detectCGNAT(ip: String) -> Bool? {
+        // Egress GeoIP alone cannot determine the subscriber's WAN NAT topology.
+        nil
     }
 
     // MARK: - Quick IP Lookup

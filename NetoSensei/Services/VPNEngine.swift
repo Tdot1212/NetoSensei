@@ -94,7 +94,7 @@ class VPNEngine: ObservableObject {
         let (tunnelReachable, latency) = await testTunnelReachability()
 
         if !tunnelReachable {
-            issues.append("VPN tunnel is active but not passing traffic")
+            issues.append("A test endpoint did not respond while VPN was detected; the cause is unverified")
             recommendations.append("Reconnect VPN or switch servers")
         }
 
@@ -106,7 +106,7 @@ class VPNEngine: ObservableObject {
         }
 
         if let lat = latency, lat > 150 {
-            issues.append("High VPN latency: \(String(format: "%.0f", lat))ms")
+            issues.append("High endpoint response time while VPN active: \(String(format: "%.0f", lat))ms")
             recommendations.append("Connect to a closer server")
         }
 
@@ -131,33 +131,7 @@ class VPNEngine: ObservableObject {
     }
 
     private func testPacketLoss() async -> Double? {
-        // Race 3 probe targets per iteration so one VPN-blocked host doesn't poison the metric.
-        // Real packet loss affects ALL targets simultaneously; only count loss when all 3 fail.
-        let targets = ["apple.com", "1.1.1.1", "www.baidu.com"]
-        var successCount = 0
-        let totalPings = 3
-
-        for _ in 0..<totalPings {
-            async let r1 = NetworkMonitorService.shared.pingHost(targets[0], timeout: 2.0)
-            async let r2 = NetworkMonitorService.shared.pingHost(targets[1], timeout: 2.0)
-            async let r3 = NetworkMonitorService.shared.pingHost(targets[2], timeout: 2.0)
-            let results = await [r1, r2, r3]
-            if results.contains(where: { $0.0 == true }) {
-                successCount += 1
-            }
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-
-        // Phase 3 consistency rule: loss is only measurable on a path at least
-        // one probe reached. Zero successes = "probes blocked" (the tunnel is up
-        // and passing traffic — testTunnelReachability covers that), NOT 100%
-        // loss. Return nil rather than a self-refuting 100%.
-        guard successCount > 0 else {
-            debugLog("[VPNEngine] Packet loss unmeasurable — 0/\(totalPings) probe rounds got through → probes blocked, not 100% loss")
-            return nil
-        }
-
-        return Double(totalPings - successCount) / Double(totalPings) * 100
+        nil // HTTP/TCP attempt failure ratios do not measure IP packet loss.
     }
 
     // MARK: - VPN Information

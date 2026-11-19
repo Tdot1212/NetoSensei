@@ -24,7 +24,7 @@ class SignalStrengthTracker: ObservableObject {
 
     private let maxSamples = 120  // 1 hour at 30s intervals
 
-    private init() {}
+    init() {}
 
     func recordSample(strength: Double, ssid: String?) {
         // FIX (Issue 5): NEHotspotNetwork returns 0.0 when iOS does NOT actually
@@ -34,11 +34,13 @@ class SignalStrengthTracker: ObservableObject {
         //   - the UI can render "Signal data unavailable" instead of "0% Poor"
         //   - the rolling average isn't dragged toward 0
         //   - the samples count doesn't grow with garbage
-        guard strength > 0 else {
+        guard strength.isFinite, strength > 0, strength <= 1 else {
             // Don't update currentStrength; keep showing the last real reading
             // (or nil if there hasn't been one).
+            currentStrength = nil
             return
         }
+        if samples.last?.ssid != ssid { samples.removeAll() }
 
         let quality = WiFiInfo.SignalQuality(from: strength)
 
@@ -59,10 +61,12 @@ class SignalStrengthTracker: ObservableObject {
         }
     }
 
+    func clearCurrent() { currentStrength = nil }
+
     var averageStrength: Double? {
         // Defensive filter — even if a 0.0 ever sneaks past recordSample, the
         // average should not include it. (See recordSample for why 0.0 is bogus.)
-        let valid = samples.map(\.strength).filter { $0 > 0 }
+        let valid = samples.map(\.strength).filter { $0.isFinite && $0 > 0 && $0 <= 1 }
         guard !valid.isEmpty else { return nil }
         return valid.reduce(0, +) / Double(valid.count)
     }

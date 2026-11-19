@@ -175,7 +175,7 @@ struct AIChatView: View {
             VStack(spacing: 6) {
                 ProgressView(value: preflight.progress)
                     .progressViewStyle(.linear)
-                Text("\(Int(preflight.progress * 100))%  •  Running every diagnostic so the AI has the full picture")
+                Text("\(Int(preflight.progress * 100))%  •  Collecting available observations")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -249,7 +249,7 @@ struct AIChatView: View {
                                 .foregroundColor(.green)
                                 .frame(width: 32)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Full Network Scan")
+                                Text("Analyze with speed test")
                                     .font(.subheadline.bold())
                                     .foregroundColor(.primary)
                                 Text("Speed test + diagnostics + AI analysis")
@@ -273,7 +273,7 @@ struct AIChatView: View {
                                 .foregroundColor(.blue)
                                 .frame(width: 32)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Quick Scan")
+                                Text("Analyze connection")
                                     .font(.subheadline.bold())
                                     .foregroundColor(.primary)
                                 Text("Diagnostics + AI analysis (skip speed test)")
@@ -496,8 +496,8 @@ struct AIChatView: View {
     /// Ensures we have a fresh diagnostic snapshot for the current session.
     /// Returns the serialized JSON or nil if collection failed entirely.
     @discardableResult
-    private func ensureSnapshot(forceRefresh: Bool = false, skipSpeedTest: Bool = false) async -> String? {
-        if !forceRefresh, let existing = sessionSnapshotJSON {
+    private func ensureSnapshot(forceRefresh: Bool = false, skipSpeedTest: Bool = true) async -> String? {
+        if !forceRefresh, preflight.isSnapshotFresh(), let existing = sessionSnapshotJSON {
             return existing
         }
         let snapshot = await preflight.collectAllData(forceRefresh: forceRefresh, skipSpeedTest: skipSpeedTest)
@@ -512,7 +512,7 @@ struct AIChatView: View {
     }
 
     private func useRecentSnapshot() {
-        guard let cached = preflight.lastSnapshot else { return }
+        guard preflight.isSnapshotFresh(), let cached = preflight.lastSnapshot else { return }
         ensureSession()
         sessionSnapshotJSON = preflight.snapshotJSON(cached)
         chatService.markDiagnosticContextAttached()
@@ -537,15 +537,15 @@ struct AIChatView: View {
 
     private func generateInitialAnalysis(snapshotJSON: String, runSpeedTest: Bool) async {
         let displayText = runSpeedTest
-            ? "📊 Full network scan completed — analyze my network"
-            : "⚡ Quick scan completed — analyze my network"
+            ? "📊 Connection measurements collected — help me troubleshoot"
+            : "⚡ Connection checks collected — help me troubleshoot"
 
         let aiPrompt = """
         Analyze this network data. Format your response as:
-        1. One-sentence verdict (is my network OK or not?)
+        1. What the strongest measurement shows and what it cannot establish
         2. Key findings (2-3 items, use ✅ ℹ️ ⚠️ 🔴 icons, 1-2 sentences each)
-        3. Recommendations (only if something needs action, specific steps)
-        Total response under 400 words. Do not repeat raw numbers I can see in the app.
+        3. One specific action or follow-up test, where to do it, and how to verify the result
+        Use up to 130 words. Cite only the relevant measured figures.
         """
 
         chatService.addMessageToCurrentSession(ChatMessage(role: "user", content: displayText))

@@ -23,18 +23,12 @@ struct TLSAnalysisResult: Identifiable {
     let cipherSuite: String?
     let handshakeLatencyMs: Double?
     let timestamp: Date
-    /// FIX (Issue 4): true when the cert chain shows a known proxy MITM CA
-    /// (Surge/Shadowrocket/etc). Used to soften the rating and suppress
-    /// duplicate "Self-Signed Certificate" alarms.
+    /// Issuer-name hint only; never establishes trust or user consent.
     var isProxyMITM: Bool = false
-    /// FIX (Issue 4): captured at analysis time so the rating logic can
-    /// distinguish "proxy MITM under VPN" (user's own tunnel) from a real
-    /// MITM attack on the open internet.
+    /// VPN context does not relax certificate trust validation.
     var vpnActive: Bool = false
 
-    /// Commit 7: was the TLS configuration actually ASSESSED? A host that timed
-    /// out, was reset, or presented a chain iOS doesn't trust (on this network:
-    /// interception or a blocked host) has NOT been assessed and gets no grade.
+    /// A presented chain is assessed even when system trust fails. Missing chains remain unavailable.
     var assessment: Assessment = .completed
 
     enum Assessment: Equatable {
@@ -70,7 +64,7 @@ struct TLSAnalysisResult: Identifiable {
     }
 
     var isSecure: Bool {
-        assessment.isCompleted && issues.filter { $0.severity == .critical || $0.severity == .high }.isEmpty
+        assessment.isCompleted && tlsVersion.isSecure && !certificateChain.isEmpty && certificateChain.allSatisfy(\.isTrusted) && issues.filter { $0.severity == .critical || $0.severity == .high }.isEmpty
     }
 
     /// nil when the assessment could not be completed — grades come only from
@@ -87,22 +81,6 @@ struct TLSAnalysisResult: Identifiable {
         let criticalCount = issues.filter { $0.severity == .critical }.count
         let highCount = issues.filter { $0.severity == .high }.count
         let mediumCount = issues.filter { $0.severity == .medium }.count
-
-        // FIX (Issue 4): when proxy MITM is the ONLY cause of high/critical
-        // issues AND VPN is active, downgrade to "Fair". The user is seeing
-        // their own proxy app's behavior, not a real attack — "Poor" with
-        // a red shield X is misleading.
-        if isProxyMITM && vpnActive {
-            let nonProxyCritical = issues.filter {
-                $0.severity == .critical && !$0.isProxyArtifact
-            }.count
-            let nonProxyHigh = issues.filter {
-                $0.severity == .high && !$0.isProxyArtifact
-            }.count
-            if nonProxyCritical == 0 && nonProxyHigh == 0 {
-                return .fair
-            }
-        }
 
         if criticalCount > 0 { return .critical }
         if highCount > 0 { return .poor }
@@ -131,7 +109,7 @@ struct TLSAnalysisResult: Identifiable {
     }
 }
 
-struct TLSVersionInfo: Equatable {
+struct TLSVersionInfo: Equatable, Sendable {
     let version: String
     let isSecure: Bool
     let isModern: Bool
@@ -149,7 +127,7 @@ struct TLSVersionInfo: Equatable {
     static let unknown = TLSVersionInfo(version: "Unknown", isSecure: false, isModern: false)
 }
 
-struct CertificateInfo: Identifiable {
+struct CertificateInfo: Identifiable, Sendable {
     let id = UUID()
     let subject: String
     let issuer: String
@@ -171,13 +149,13 @@ struct CertificateInfo: Identifiable {
         return Date() < validFrom
     }
 
-    var expiresInDays: Int {
-        guard let validTo = validTo else { return 999 }
+    var expiresInDays: Int? {
+        guard let validTo = validTo else { return nil }
         return Calendar.current.dateComponents([.day], from: Date(), to: validTo).day ?? 0
     }
 
     var isExpiringSoon: Bool {
-        expiresInDays <= 30 && expiresInDays > 0
+        expiresInDays.map { $0 <= 30 && $0 > 0 } ?? false
     }
 
     var displaySubject: String {
@@ -246,7 +224,20 @@ class TLSAnalyzer: ObservableObject {
         ("alipay.com", "Alipay"),
     ]
 
-    private init() {}
+    struct Capture: Sendable {
+        let chain: [CertificateInfo]
+        let trusted: Bool
+        let handshakeMs: Double?
+        let errorCode: Int?
+        let version: TLSVersionInfo
+        let cipher: String?
+    }
+    private let capture: @Sendable (String, UInt16) async -> Capture
+    private var activeAnalyses = 0
+    init(capture: (@Sendable (String, UInt16) async -> Capture)? = nil) {
+        self.capture = capture ?? { host, port in await TLSAnalyzer.fetchCertificateChain(host: host, port: port) }
+    }
+
 
     // MARK: - Analyze Single Host
 
@@ -264,9 +255,11 @@ class TLSAnalyzer: ObservableObject {
     }
 
     private func performAnalyzeHost(_ host: String, port: UInt16 = 443) async -> TLSAnalysisResult {
-        isAnalyzing = true
-        progress = 0
-        error = nil
+        activeAnalyses += 1; isAnalyzing = true
+        let loadID = "tlsAnalysis-" + UUID().uuidString
+        AppLoadTracker.shared.begin(loadID)
+        defer { activeAnalyses -= 1; isAnalyzing = activeAnalyses > 0; AppLoadTracker.shared.end(loadID) }
+        progress = 0; error = nil
 
         var cleanHost = host
             .replacingOccurrences(of: "https://", with: "")
@@ -278,15 +271,11 @@ class TLSAnalyzer: ObservableObject {
         currentStep = "Connecting to \(cleanHost)..."
         progress = 0.1
 
-        // Step 1: TLS handshake via NWConnection (for TLS version/cipher)
-        currentStep = "Checking TLS version..."
-        progress = 0.2
-        let (tlsVersion, cipherSuite, handshakeError) = await detectTLSVersion(host: cleanHost, port: port)
-
-        // Step 2: Certificate chain via URLSession delegate
-        currentStep = "Retrieving certificates..."
-        progress = 0.4
-        let (chain, isTrusted, handshakeMs, fetchErrorCode) = await fetchCertificateChain(host: cleanHost, port: port)
+        // Version, cipher, certificate and handshake duration describe one
+        // connection. Redirects are not followed during inspection.
+        let captured = await capture(cleanHost, port)
+        let (chain, isTrusted, handshakeMs, fetchErrorCode, tlsVersion, cipherSuite) =
+            (captured.chain, captured.trusted, captured.handshakeMs, captured.errorCode, captured.version, captured.cipher)
 
         // Step 3: Was the site's TLS actually assessed? (Commit 7)
         currentStep = "Analyzing security..."
@@ -296,7 +285,7 @@ class TLSAnalyzer: ObservableObject {
             chain: chain,
             isTrusted: isTrusted,
             isProxyMITM: proxyMITM,
-            fetchErrorCode: fetchErrorCode ?? (handshakeError != nil ? -1 : nil)
+            fetchErrorCode: fetchErrorCode
         )
 
         let issues: [TLSIssue]
@@ -325,8 +314,7 @@ class TLSAnalyzer: ObservableObject {
         progress = 1.0
         currentStep = "Complete"
 
-        // FIX (Issue 4): pass proxy-MITM and VPN context to the result so
-        // securityRating can soften when these are the only signals.
+        // Preserve context without weakening trust requirements.
         let vpnIsActive = NetworkMonitorService.shared.currentStatus.vpn.isActive
 
         var analysisResult = TLSAnalysisResult(
@@ -354,19 +342,12 @@ class TLSAnalyzer: ObservableObject {
             }
         }
 
-        isAnalyzing = false
         return analysisResult
     }
 
     // MARK: - Assessment classification (pure, unit-tested — Commit 7)
 
-    /// Decide whether an analysis actually assessed the site's TLS.
-    ///  (a) handshake completed OR a chain was retrieved and trusted, or a
-    ///      known proxy CA explains the untrusted chain → completed.
-    ///  (b) chain retrieved, trust failed, no proxy CA → interceptedOrBlocked
-    ///      (on this network: a middlebox answered instead of the site).
-    ///  (c) no handshake and no chain → unreachable(code) (-1001 timeout,
-    ///      -1004 can't connect, -1005 connection lost, …).
+    /// A presented chain permits reporting trust failures; no chain means unavailable.
     nonisolated static func classifyAssessment(
         chain: [CertificateInfo],
         isTrusted: Bool,
@@ -379,10 +360,7 @@ class TLSAnalyzer: ObservableObject {
             // certificate the site presents.
             return .unavailable(.unreachable(code: fetchErrorCode))
         }
-        if isTrusted || isProxyMITM {
-            return .completed
-        }
-        return .unavailable(.interceptedOrBlocked)
+        return .completed // A presented but untrusted chain is an assessed failure, not missing evidence.
     }
 
     // MARK: - Detect TLS Version via NWConnection
@@ -400,102 +378,11 @@ class TLSAnalyzer: ObservableObject {
         }
     }
 
-    /// Third element (Commit 7): the handshake failure, when the connection
-    /// did not reach `.ready` — surfaced so the assessment can say WHY.
-    private nonisolated func detectTLSVersion(host: String, port: UInt16) async -> (TLSVersionInfo, String?, NWError?) {
-        await withCheckedContinuation { (continuation: CheckedContinuation<(TLSVersionInfo, String?, NWError?), Never>) in
-            let tlsOptions = NWProtocolTLS.Options()
-            let params = NWParameters(tls: tlsOptions)
-
-            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-                continuation.resume(returning: (.unknown, nil, nil))
-                return
-            }
-
-            let connection = NWConnection(
-                host: NWEndpoint.Host(host),
-                port: nwPort,
-                using: params
-            )
-            let flag = OnceFlag()
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if flag.claim() {
-                        var version = TLSVersionInfo.unknown
-                        var cipher: String?
-
-                        if let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata {
-                            let proto = metadata.securityProtocolMetadata
-
-                            let tlsVer = sec_protocol_metadata_get_negotiated_tls_protocol_version(proto)
-                            switch tlsVer {
-                            case .TLSv13: version = .tls13
-                            case .TLSv12: version = .tls12
-                            case .TLSv11: version = .tls11
-                            case .TLSv10: version = .tls10
-                            default: version = .unknown
-                            }
-
-                            let cs = sec_protocol_metadata_get_negotiated_tls_ciphersuite(proto)
-                            cipher = Self.cipherSuiteName(cs)
-                        }
-
-                        connection.cancel()
-                        continuation.resume(returning: (version, cipher, nil))
-                    }
-
-                case .failed(let error):
-                    if flag.claim() {
-                        continuation.resume(returning: (.unknown, nil, error))
-                    }
-
-                case .cancelled:
-                    if flag.claim() {
-                        continuation.resume(returning: (.unknown, nil, nil))
-                    }
-
-                case .waiting(let error):
-                    if flag.claim() {
-                        connection.cancel()
-                        continuation.resume(returning: (.unknown, nil, error))
-                    }
-
-                default:
-                    break
-                }
-            }
-
-            connection.start(queue: .global(qos: .userInitiated))
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + 8) {
-                if flag.claim() {
-                    connection.cancel()
-                    continuation.resume(returning: (.unknown, nil, nil))   // nil error = our own 8 s timeout
-                }
-            }
-        }
-    }
-
-    private nonisolated static func cipherSuiteName(_ cipher: tls_ciphersuite_t) -> String {
-        switch cipher {
-        case .RSA_WITH_AES_128_GCM_SHA256: return "RSA_AES_128_GCM_SHA256"
-        case .RSA_WITH_AES_256_GCM_SHA384: return "RSA_AES_256_GCM_SHA384"
-        case .ECDHE_RSA_WITH_AES_128_GCM_SHA256: return "ECDHE_RSA_AES_128_GCM"
-        case .ECDHE_RSA_WITH_AES_256_GCM_SHA384: return "ECDHE_RSA_AES_256_GCM"
-        case .AES_128_GCM_SHA256: return "TLS_AES_128_GCM_SHA256"
-        case .AES_256_GCM_SHA384: return "TLS_AES_256_GCM_SHA384"
-        case .CHACHA20_POLY1305_SHA256: return "TLS_CHACHA20_POLY1305"
-        default: return "Cipher \(cipher.rawValue)"
-        }
-    }
-
     // MARK: - Fetch Certificate Chain via URLSession
 
     /// Fourth element (Commit 7): the URLSession error code (URLError.Code raw
     /// value) when the request failed — nil on success.
-    private nonisolated func fetchCertificateChain(host: String, port: UInt16) async -> ([CertificateInfo], Bool, Double?, Int?) {
+    nonisolated private static func fetchCertificateChain(host: String, port: UInt16) async -> Capture {
         let delegate = TLSCertificateDelegate(targetHost: host)
 
         let config = URLSessionConfiguration.ephemeral
@@ -507,13 +394,12 @@ class TLSAnalyzer: ObservableObject {
             ? "https://\(host)/"
             : "https://\(host):\(port)/"
         guard let url = URL(string: urlString) else {
-            return ([], false, nil, nil)
+            return Capture(chain: [], trusted: false, handshakeMs: nil, errorCode: URLError.badURL.rawValue, version: .unknown, cipher: nil)
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
 
-        let startTime = CFAbsoluteTimeGetCurrent()
         var errorCode: Int?
 
         do {
@@ -526,10 +412,9 @@ class TLSAnalyzer: ObservableObject {
 
         // Commit 7: a handshake time is only a measurement when the request
         // completed — a 10 s timeout is not a 10 000 ms handshake.
-        let handshakeMs: Double? = errorCode == nil ? (CFAbsoluteTimeGetCurrent() - startTime) * 1000 : nil
         session.invalidateAndCancel()
 
-        return (delegate.certificates, delegate.isTrusted, handshakeMs, errorCode)
+        return Capture(chain: delegate.certificates, trusted: delegate.isTrusted, handshakeMs: delegate.handshakeMs, errorCode: errorCode, version: delegate.version, cipher: delegate.cipher)
     }
 
     // MARK: - Analyze Issues
@@ -568,37 +453,15 @@ class TLSAnalyzer: ObservableObject {
             ))
         }
 
-        // Trust evaluation
         if !isTrusted && !chain.isEmpty {
-            if isProxyMITM {
-                // ISSUE 8 FIX: Proxy MITM cert — this is local debugging/routing, not an attack
-                issues.append(TLSIssue(
-                    title: "TLS Intercepted by Local Proxy",
-                    description: "A local proxy app (Surge, Shadowrocket, etc.) is intercepting TLS for traffic routing. This is normal when MITM debugging is enabled.",
-                    severity: .low,
-                    recommendation: "This is expected behavior for proxy apps with MITM enabled. Disable MITM in your proxy app's settings if you don't need HTTPS decryption.",
-                    isProxyArtifact: true
-                ))
-            } else {
-                // No proxy detected — could be genuine MITM or cert mismatch through VPN
-                let vpnInfo = NetworkMonitorService.shared.currentStatus.vpn
-                if vpnInfo.isActive {
-                    issues.append(TLSIssue(
-                        title: "Certificate Mismatch Through VPN",
-                        description: "The certificate chain failed trust evaluation while VPN is active. This may be caused by your VPN/proxy intercepting HTTPS traffic.",
-                        severity: .medium,
-                        recommendation: "Check your VPN/proxy MITM settings. If you have HTTPS decryption enabled, add this host to the bypass list or install the proxy's CA certificate.",
-                        isProxyArtifact: true
-                    ))
-                } else {
-                    issues.append(TLSIssue(
-                        title: "Certificate Not Trusted",
-                        description: "The certificate chain failed system trust evaluation.",
-                        severity: .critical,
-                        recommendation: "Do not trust this connection. This could indicate a MITM attack."
-                    ))
-                }
-            }
+            issues.append(TLSIssue(title: "Certificate Not Trusted",
+                description: "System trust evaluation failed for this hostname. A VPN or proxy-like issuer name does not override this failure.",
+                severity: .critical, recommendation: "Review the certificate and hostname. Do not bypass trust validation."))
+        }
+        if isProxyMITM {
+            issues.append(TLSIssue(title: "Proxy-like Certificate Name",
+                description: "A certificate name resembles a debugging proxy. Names alone do not establish who controls the certificate or whether decryption was authorized.",
+                severity: .medium, recommendation: "Review locally installed roots and proxy settings.", isProxyArtifact: true))
         }
 
         // Leaf certificate checks
@@ -624,7 +487,7 @@ class TLSAnalyzer: ObservableObject {
             if leaf.isExpiringSoon {
                 issues.append(TLSIssue(
                     title: "Certificate Expiring Soon",
-                    description: "The certificate expires in \(leaf.expiresInDays) days.",
+                    description: leaf.expiresInDays.map { "The certificate expires in \($0) days." } ?? "Certificate expiration unavailable.",
                     severity: .medium,
                     recommendation: "The server administrator should renew the certificate soon."
                 ))
@@ -690,14 +553,44 @@ class TLSAnalyzer: ObservableObject {
 
 // MARK: - URLSession Delegate for Certificate Capture
 
-private class TLSCertificateDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+final class TLSCertificateDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     let targetHost: String
     var certificates: [CertificateInfo] = []
     var isTrusted = false
+    var version: TLSVersionInfo = .unknown
+    var cipher: String?
+    var handshakeMs: Double?
 
     init(targetHost: String) {
         self.targetHost = targetHost
         super.init()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil) // Inspect exactly the requested host, not a redirected site's certificate.
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        guard let transaction = metrics.transactionMetrics.last else { return }
+        version = Self.protocolVersion(transaction.negotiatedTLSProtocolVersion?.rawValue)
+        if let identifier = transaction.negotiatedTLSCipherSuite?.rawValue {
+            cipher = String(format: "TLS cipher 0x%04X", identifier)
+        }
+        if let start = transaction.secureConnectionStartDate, let end = transaction.secureConnectionEndDate {
+            let duration = end.timeIntervalSince(start)*1000
+            handshakeMs = duration.isFinite && duration >= 0 ? duration : nil
+        }
+    }
+
+    static func protocolVersion(_ value: UInt16?) -> TLSVersionInfo {
+        switch value {
+        case 0x0304: return .tls13
+        case 0x0303: return .tls12
+        case 0x0302: return .tls11
+        case 0x0301: return .tls10
+        default: return .unknown
+        }
     }
 
     func urlSession(
@@ -718,223 +611,14 @@ private class TLSCertificateDelegate: NSObject, URLSessionDelegate, @unchecked S
         var cfError: CFError?
         isTrusted = SecTrustEvaluateWithError(serverTrust, &cfError)
 
-        // Extract certificate chain (iOS 15+: SecTrustCopyCertificateChain)
-        if let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate] {
-            let total = certChain.count
-            for (index, cert) in certChain.enumerated() {
-                let info = parseCertificate(cert, index: index, total: total)
-                certificates.append(info)
-            }
+        if let chain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate] {
+            certificates = chain.map { CertificateDER.info($0, trusted: isTrusted) }
         }
-
-        let credential = URLCredential(trust: serverTrust)
-        completionHandler(.useCredential, credential)
-    }
-
-    private func parseCertificate(_ cert: SecCertificate, index: Int, total: Int) -> CertificateInfo {
-        let summary = SecCertificateCopySubjectSummary(cert) as String? ?? "Unknown"
-        let certData = SecCertificateCopyData(cert) as Data
-
-        // CLEANUP 7: extract issuer via SecCertificateCopyNormalizedIssuerSequence,
-        // not by searching DER for known CA brand names. Final fallback is
-        // "Unknown issuer" — never the subject CN, which produced nonsense like
-        // "Issuer: apple.com" for proxy-intercepted certs.
-        let issuer = extractIssuer(from: cert, fallback: summary)
-
-        // Extract serial number (first 20 bytes after sequence headers, simplified)
-        let serialHex = certData.prefix(20).map { String(format: "%02X", $0) }.joined(separator: ":")
-
-        // Extract validity dates by searching for known OID patterns in DER
-        let (validFrom, validTo) = extractValidityDates(from: certData)
-
-        // Detect key type from DER (look for OID markers)
-        let publicKeyInfo = detectPublicKeyInfo(from: certData)
-
-        // CLEANUP 7: compare normalized subject + issuer DER bytes directly,
-        // not the summary strings (which dropped to subject when issuer parsing
-        // failed, making every cert look self-signed).
-        let isSelfSigned: Bool = {
-            if let subjectSeq = SecCertificateCopyNormalizedSubjectSequence(cert) as Data?,
-               let issuerSeq = SecCertificateCopyNormalizedIssuerSequence(cert) as Data? {
-                return subjectSeq == issuerSeq
-            }
-            return index == total - 1  // fallback: root cert is always self-signed
-        }()
-        let isRootCA = index == total - 1
-
-        return CertificateInfo(
-            subject: summary,
-            issuer: issuer,
-            serialNumber: serialHex,
-            validFrom: validFrom,
-            validTo: validTo,
-            publicKeyInfo: publicKeyInfo,
-            isSelfSigned: isSelfSigned,
-            isRootCA: isRootCA,
-            isTrusted: true
-        )
-    }
-
-    /// CLEANUP 7: extract Issuer CN via SecCertificateCopyNormalizedIssuerSequence
-    /// + minimal ASN.1 parsing. Falls back to brand-string DER scan when the
-    /// modern API returns nil/malformed data. Final fallback is "Unknown issuer"
-    /// (NOT the subject CN — that was the original bug).
-    /// `fallback` is unused in the success path; retained on the signature so
-    /// call-site shape doesn't change.
-    private func extractIssuer(from cert: SecCertificate, fallback: String) -> String {
-        // 1. Modern API: get the normalized issuer DN sequence and parse out CN.
-        if let issuerData = SecCertificateCopyNormalizedIssuerSequence(cert) as Data?,
-           let cn = parseCommonName(from: issuerData) {
-            return cn
-        }
-
-        // 2. Brand-string DER scan — safety net for cases where the modern
-        //    API returns malformed or empty data (rare but observed for some
-        //    proxy-generated certs).
-        let certData = SecCertificateCopyData(cert) as Data
-        if let dataString = String(data: certData, encoding: .ascii) {
-            let knownCAs = [
-                "Let's Encrypt", "DigiCert", "Cloudflare", "Google Trust Services",
-                "Amazon", "GlobalSign", "Sectigo", "GeoTrust", "Comodo",
-                "Baltimore", "Apple", "Microsoft", "GoDaddy", "Entrust",
-                "Starfield", "VeriSign", "Thawte", "RapidSSL",
-            ]
-            for ca in knownCAs where dataString.contains(ca) {
-                return ca
-            }
-        }
-
-        _ = fallback  // intentionally unused — see doc comment above
-        return "Unknown issuer"
-    }
-
-    /// Minimal ASN.1 DER parser for an X.500 Name (issuer/subject sequence).
-    /// Searches for the CommonName OID (2.5.4.3 → DER bytes 06 03 55 04 03)
-    /// and extracts the following AttributeValue string. Handles common
-    /// string types (UTF8/Printable/IA5/T61/BMP) plus short and long-form
-    /// length encoding. Returns nil if no CN is present or parsing fails.
-    private func parseCommonName(from sequenceData: Data) -> String? {
-        let bytes = [UInt8](sequenceData)
-        // CN OID: 2.5.4.3 → DER tag/length/value: 06 03 55 04 03
-        let cnOID: [UInt8] = [0x06, 0x03, 0x55, 0x04, 0x03]
-        guard let oidRange = bytes.firstRange(of: cnOID) else { return nil }
-
-        // The AttributeValue follows the OID: tag + length + content.
-        let tagIndex = oidRange.upperBound
-        guard tagIndex + 1 < bytes.count else { return nil }
-        let tag = bytes[tagIndex]
-        let lengthByte = bytes[tagIndex + 1]
-
-        // ASN.1 length encoding: short form (top bit 0) holds length directly;
-        // long form (top bit 1) means the lower 7 bits give the byte count of
-        // the actual length.
-        var length = Int(lengthByte)
-        var contentStart = tagIndex + 2
-        if lengthByte & 0x80 != 0 {
-            let numLenBytes = Int(lengthByte & 0x7F)
-            guard numLenBytes > 0, numLenBytes <= 4,
-                  contentStart + numLenBytes <= bytes.count else { return nil }
-            length = 0
-            for i in 0..<numLenBytes {
-                length = (length << 8) | Int(bytes[contentStart + i])
-            }
-            contentStart += numLenBytes
-        }
-
-        guard length > 0, contentStart + length <= bytes.count else { return nil }
-        let valueBytes = Array(bytes[contentStart..<(contentStart + length)])
-
-        switch tag {
-        case 0x0C, // UTF8String
-             0x13, // PrintableString
-             0x16, // IA5String
-             0x14: // T61String / TeletexString
-            return String(bytes: valueBytes, encoding: .utf8)
-        case 0x1E: // BMPString — UTF-16 BE
-            return String(bytes: valueBytes, encoding: .utf16BigEndian)
-        default:
-            // Unknown string type — best-effort UTF-8.
-            return String(bytes: valueBytes, encoding: .utf8)
+        if isTrusted {
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        } else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
         }
     }
 
-    private func extractValidityDates(from data: Data) -> (Date?, Date?) {
-        // DER-encoded certificates use UTCTime (0x17) or GeneralizedTime (0x18)
-        // for validity dates. Search for these tags and parse.
-        // Simplified heuristic: find date-like strings in the data.
-
-        let bytes = [UInt8](data)
-        var dates: [Date] = []
-        let formatter = DateFormatter()
-
-        for i in 0..<bytes.count {
-            if bytes[i] == 0x17 && i + 1 < bytes.count {
-                // UTCTime: YYMMDDHHmmSSZ (13 bytes)
-                let length = Int(bytes[i + 1])
-                if length == 13 && i + 2 + length <= bytes.count {
-                    let dateBytes = Array(bytes[(i + 2)..<(i + 2 + length)])
-                    if let dateStr = String(bytes: dateBytes, encoding: .ascii) {
-                        formatter.dateFormat = "yyMMddHHmmss'Z'"
-                        formatter.timeZone = TimeZone(identifier: "UTC")
-                        if let date = formatter.date(from: dateStr) {
-                            dates.append(date)
-                        }
-                    }
-                }
-            } else if bytes[i] == 0x18 && i + 1 < bytes.count {
-                // GeneralizedTime: YYYYMMDDHHmmSSZ (15 bytes)
-                let length = Int(bytes[i + 1])
-                if length == 15 && i + 2 + length <= bytes.count {
-                    let dateBytes = Array(bytes[(i + 2)..<(i + 2 + length)])
-                    if let dateStr = String(bytes: dateBytes, encoding: .ascii) {
-                        formatter.dateFormat = "yyyyMMddHHmmss'Z'"
-                        formatter.timeZone = TimeZone(identifier: "UTC")
-                        if let date = formatter.date(from: dateStr) {
-                            dates.append(date)
-                        }
-                    }
-                }
-            }
-        }
-
-        // First two dates in a cert are NotBefore and NotAfter
-        let validFrom = dates.count >= 1 ? dates[0] : nil
-        let validTo = dates.count >= 2 ? dates[1] : nil
-        return (validFrom, validTo)
-    }
-
-    private func detectPublicKeyInfo(from data: Data) -> String {
-        let dataString = String(data: data, encoding: .ascii) ?? ""
-
-        if dataString.contains("EC Public Key") || dataString.contains("prime256v1") || dataString.contains("secp384r1") {
-            return "ECDSA 256-bit"
-        }
-        if dataString.contains("RSA") {
-            return "RSA 2048-bit"
-        }
-
-        // Check DER for RSA OID (1.2.840.113549.1.1.1)
-        let rsaOID: [UInt8] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01]
-        let ecOID: [UInt8] = [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01]
-        let bytes = [UInt8](data)
-
-        if containsSequence(bytes, rsaOID) {
-            return "RSA"
-        }
-        if containsSequence(bytes, ecOID) {
-            return "ECDSA"
-        }
-
-        return "Unknown"
-    }
-
-    private func containsSequence(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
-        guard needle.count <= haystack.count else { return false }
-        for i in 0...(haystack.count - needle.count) {
-            if Array(haystack[i..<(i + needle.count)]) == needle {
-                return true
-            }
-        }
-        return false
-    }
 }

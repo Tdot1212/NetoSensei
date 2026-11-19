@@ -96,43 +96,17 @@ final class KillSwitchAdvisor {
     // MARK: - Per-app guidance
 
     private func guidanceFor(_ app: String?) -> String {
-        switch app {
-        case "Surge":
-            return "Surge → Profile → enable “Use kill switch when VPN connection fails”. Also enable “Always Real IP” for the strictest fallback behaviour."
-        case "Shadowrocket":
-            return "Shadowrocket → Settings → Connection → set “On Demand” to ON, and enable “Anonymous Connection on Wi-Fi”. The On-Demand profile prevents traffic when the proxy isn’t connected."
-        case "Quantumult":
-            return "Quantumult X → Settings → enable “VPN On-Demand”. Configure the rule so the tunnel always re-establishes after a drop."
-        case "Clash":
-            return "Clash for iOS / ClashX → enable On-Demand in the iOS VPN profile (Settings → VPN → [profile] → Connect On Demand). Clash itself doesn’t expose a separate kill switch."
-        case "Loon":
-            return "Loon → General → Connection → enable “Connect On Demand”. Optionally enable “Disconnect on Sleep: OFF” to avoid silent drops."
-        case "Stash":
-            return "Stash → Settings → enable On-Demand. Stash exposes per-rule kill behaviour in advanced settings."
-        case "mitmproxy", "Charles", "Proxyman", "Fiddler":
-            return "You appear to be running a debugging proxy (\(app ?? "")). These tools don’t provide kill-switch guarantees — they’re for inspection, not protection. Disable HTTPS interception when you’re done debugging."
-        case "IPSec tunnel":
-            return """
-                Detected an IPSec tunnel. Common apps that use IPSec: built-in iOS VPN profiles, Shadowrocket, Quantumult X. For kill-switch verification:
-
-                • Built-in iOS VPN profile: Settings → VPN → [your profile] → enable “Connect On Demand”.
-                • Shadowrocket: Settings → Connection → set “On Demand” to ON, and enable “Anonymous Connection on Wi-Fi”.
-                • Quantumult X: Settings → enable “VPN On-Demand”. Configure the rule so the tunnel always re-establishes after a drop.
-                """
-        case .none:
-            return "We couldn’t identify your VPN/proxy app. If you use the system VPN profile: Settings → VPN → [your profile] → enable “Connect On Demand”. If you use a third-party VPN app, look for settings labelled “kill switch”, “block connections without VPN”, or “on-demand”."
-        default:
-            return "Check your VPN/proxy app for a setting labelled “kill switch”, “block connections without VPN”, or “on-demand”."
-        }
+        let hint = app.map { "Possible app/interface hint: \($0). This is not verification of its settings. " } ?? "The VPN/proxy app could not be identified. "
+        return hint + "Check the provider's current documentation for block-without-VPN protection. Automatic reconnect or On-Demand alone does not prove traffic is blocked during tunnel failure."
     }
 
     // MARK: - Standard manual test
 
     private let standardManualTest: [String] = [
-        "Open Safari and load any HTTPS page (e.g. https://www.cloudflare.com). Confirm it loads.",
-        "Switch to your VPN/proxy app and disconnect or pause it.",
-        "Return to Safari and reload the page (or load https://1.1.1.1).",
-        "If the page FAILS to load: kill-switch is working — traffic is blocked when the tunnel is down.",
-        "If the page LOADS via your real ISP: kill-switch is NOT enforcing — your real IP is exposed during VPN drops. Re-enable kill-switch / On-Demand in your proxy app settings.",
+        "Read the VPN provider's documented kill-switch test. Automatic reconnection and traffic blocking are different capabilities.",
+        "Use a trusted network and non-sensitive test requests. Record normal VPN egress before the test.",
+        "Follow the provider's controlled tunnel-failure procedure and observe fresh remote requests and public egress, including IPv6.",
+        "A failed page alone is inconclusive: offline connectivity, filtering or server failure can cause it. Cached content is also inconclusive.",
+        "Restore the original connection. Protection remains unverified unless observations establish the expected fail-closed routing."
     ]
 }

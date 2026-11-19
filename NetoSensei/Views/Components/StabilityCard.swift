@@ -18,7 +18,7 @@ struct StabilityCard: View {
                     Image(systemName: "chart.line.uptrend.xyaxis")
                         .font(.system(size: UIConstants.iconSizeM))
                         .foregroundColor(AppColors.textSecondary)
-                    Text("Connection Stability")
+                    Text("Observed Connection Stability")
                         .font(.headline)
                 }
 
@@ -26,7 +26,7 @@ struct StabilityCard: View {
                 HStack(spacing: UIConstants.spacingL) {
                     // Uptime streak
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Uptime")
+                        Text("Observed streak")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
                         Text(stabilityMonitor.uptimeStreakFormatted)
@@ -36,7 +36,7 @@ struct StabilityCard: View {
 
                     // Drops in last 24h
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Drops (24h)")
+                        Text("Observed drops (24h)")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
                         Text("\(stabilityMonitor.dropsLast24h)")
@@ -74,7 +74,7 @@ struct StabilityCard: View {
 
                 ForEach(0..<buckets.count, id: \.self) { index in
                     Circle()
-                        .fill(buckets[index] ? AppColors.green : AppColors.red)
+                        .fill(buckets[index].map { $0 ? AppColors.green : AppColors.red } ?? Color.secondary.opacity(0.25))
                         .frame(width: 6, height: 6)
                 }
             }

@@ -77,7 +77,7 @@ struct NetworkHistoryView: View {
 
                         // Baseline comparison
                         if let baseline = historyManager.baseline,
-                           let latest = filteredEntries.first {
+                           let latest = filteredEntries.first(where: { $0.entryType == .diagnostic && $0.healthScore != nil }) {
                             baselineComparisonCard(latest: latest, baseline: baseline)
                         }
 
@@ -193,16 +193,16 @@ struct NetworkHistoryView: View {
 
                 HStack(spacing: UIConstants.spacingXL) {
                     VStack(alignment: .leading) {
-                        Text("Uptime")
+                        Text("Observed streak")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
                         Text(stabilityMonitor.uptimeStreakFormatted)
                             .font(.title3.bold())
-                            .foregroundColor(AppColors.green)
+                            .foregroundColor(stabilityMonitor.uptimeStreakFormatted == "N/A" ? .secondary : AppColors.textPrimary)
                     }
 
                     VStack(alignment: .leading) {
-                        Text("Drops (24h)")
+                        Text("Observed drops (24h)")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
                         Text("\(stabilityMonitor.dropsLast24h)")
@@ -232,7 +232,7 @@ struct NetworkHistoryView: View {
 
     private var timelineVisualization: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Last 24 hours")
+            Text("Last 24 hours · Gray: unsampled · Red: failed check")
                 .font(.caption)
                 .foregroundColor(AppColors.textSecondary)
 
@@ -241,7 +241,7 @@ struct NetworkHistoryView: View {
 
                 ForEach(0..<buckets.count, id: \.self) { index in
                     Circle()
-                        .fill(buckets[index] ? AppColors.green : AppColors.red)
+                        .fill(buckets[index].map { $0 ? AppColors.green : AppColors.red } ?? Color.secondary.opacity(0.25))
                         .frame(width: 8, height: 8)
                 }
             }
@@ -302,28 +302,18 @@ struct NetworkHistoryView: View {
                     ForEach(filteredEntries) { entry in
                         switch selectedMetric {
                         case .healthScore:
-                            LineMark(
-                                x: .value("Time", entry.timestamp),
-                                y: .value("Health", entry.healthScore)
-                            )
-                            .foregroundStyle(AppColors.accent)
-
+                            if entry.entryType == .diagnostic, let score = entry.healthScore {
                             PointMark(
                                 x: .value("Time", entry.timestamp),
-                                y: .value("Health", entry.healthScore)
+                                y: .value("Health", score)
                             )
-                            .foregroundStyle(healthColor(entry.healthScore))
+                            .foregroundStyle(healthColor(score))
 
+                            }
                         case .latency:
                             // Phase 4: unmeasured latency is nil — skip the
                             // point rather than plot a fake 0 ms.
                             if let latency = entry.latency {
-                                LineMark(
-                                    x: .value("Time", entry.timestamp),
-                                    y: .value("Latency", latency)
-                                )
-                                .foregroundStyle(latencyColor(latency))
-
                                 PointMark(
                                     x: .value("Time", entry.timestamp),
                                     y: .value("Latency", latency)
@@ -369,7 +359,8 @@ struct NetworkHistoryView: View {
         }
     }
 
-    private func healthZoneLabel(_ score: Int) -> String {
+    private func healthZoneLabel(_ score: Int?) -> String {
+        guard let score else { return "Unscored" }
         switch score {
         case 70...: return "Good"
         case 40..<70: return "Fair"
@@ -403,7 +394,7 @@ struct NetworkHistoryView: View {
                             Text("Avg Health")
                                 .font(.caption)
                                 .foregroundColor(AppColors.textSecondary)
-                            Text("\(Int(filteredEntries.map { Double($0.healthScore) }.reduce(0, +) / Double(filteredEntries.count)))")
+                            Text(MeasurementStatistics.mean(filteredEntries.filter { $0.entryType == .diagnostic }.map { $0.healthScore.map(Double.init) }).map { String(Int($0.rounded())) } ?? "—")
                                 .font(.title3.bold())
                         }
 
@@ -456,14 +447,10 @@ struct NetworkHistoryView: View {
                     )
                 }
 
-                // Gateway comparison
-                comparisonRow(
-                    label: "Gateway",
-                    current: "\(Int(latest.gatewayLatency))ms",
-                    baseline: baseline.gatewayLatency,
-                    currentValue: latest.gatewayLatency,
-                    isHigherBetter: false
-                )
+                if let gateway = latest.gatewayLatency, let reference = baseline.gatewayLatency {
+                    comparisonRow(label: "Gateway", current: "\(Int(gateway))ms", baseline: reference,
+                                  currentValue: gateway, isHigherBetter: false)
+                }
 
                 Divider()
 
@@ -516,7 +503,8 @@ struct NetworkHistoryView: View {
     }
 
     private func analyzeComparison(latest: NetworkHistoryEntry, baseline: NetworkHistoryEntry) -> String {
-        let gatewayDiff = abs(latest.gatewayLatency - baseline.gatewayLatency)
+        guard let latestGateway = latest.gatewayLatency, let baselineGateway = baseline.gatewayLatency else { return "Not enough measured gateway data to compare." }
+        let gatewayDiff = abs(latestGateway - baselineGateway)
         // Phase 4: the ISP-vs-local verdict needs a measured external latency
         // on both sides; without it, only the gateway comparison is claimed.
         guard let latestLatency = latest.latency, let baselineLatency = baseline.latency else {
@@ -552,7 +540,7 @@ struct NetworkHistoryView: View {
                     Text("Insights")
                         .font(.headline)
                     Spacer()
-                    Text("\(insights.entryCount) measurements")
+                    Text(insights.entryCount == 1 ? "1 measurement" : "\(insights.entryCount) measurements")
                         .font(.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -731,11 +719,12 @@ struct NetworkHistoryView: View {
     }
 
     private func entryRow(_ entry: NetworkHistoryEntry) -> some View {
-        HStack {
+        let score = entry.entryType == .diagnostic ? entry.healthScore : nil
+        return HStack {
             // Bookmark indicator + health dot
             ZStack(alignment: .topTrailing) {
                 Circle()
-                    .fill(healthColor(entry.healthScore))
+                    .fill(healthColor(score))
                     .frame(width: 12, height: 12)
                 if entry.isBookmarked {
                     Image(systemName: "bookmark.fill")
@@ -765,18 +754,18 @@ struct NetworkHistoryView: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 2) {
-                Text("\(entry.healthScore)")
-                    .font(.subheadline.bold())
-                    .foregroundColor(healthColor(entry.healthScore))
                 if let speed = entry.downloadSpeed {
                     Text("\(String(format: "%.1f", speed)) Mbps")
-                        .font(.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                } else if entry.vpnActive, let loc = entry.vpnServerLocation {
-                    Text("VPN: \(loc)")
-                        .font(.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                        .lineLimit(1)
+                        .font(.subheadline.bold())
+                } else {
+                    Text(score.map(String.init) ?? "Unscored")
+                        .font(.subheadline)
+                        .foregroundColor(healthColor(score))
+                    if entry.vpnActive, let loc = entry.vpnServerLocation {
+                        Text("VPN: \(loc)")
+                            .font(.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
                 }
             }
         }
@@ -805,8 +794,9 @@ struct NetworkHistoryView: View {
 
     // MARK: - Helpers
 
-    private func healthColor(_ score: Int) -> Color {
-        NetworkColors.forHealthScore(score)
+    private func healthColor(_ score: Int?) -> Color {
+        guard let score else { return .secondary }
+        return NetworkColors.forHealthScore(score)
     }
 
     private func latencyColor(_ latency: Double) -> Color {

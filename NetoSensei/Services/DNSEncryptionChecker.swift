@@ -56,13 +56,13 @@ final class DNSEncryptionChecker {
         let recommendation: String = {
             switch (dohReachable, dotReachable) {
             case (true, true):
-                return "Both DoH and DoT endpoints are reachable from this network. Whether your system is CONFIGURED to use them is not detectable from third-party apps on iOS. To verify or enable: Settings → General → VPN, DNS & Device Management → DNS → check active profile. Or install a DNS profile (NextDNS, Cloudflare 1.1.1.1 app, AdGuard)."
+                return "Both transport tests returned validated DNS replies. Current DNS configuration is not verified. Review the active system DNS profile or your VPN app’s DNS settings."
             case (true, false):
-                return "DoH (port 443) reachable; DoT (port 853) is blocked on this network. Use a DoH-based DNS profile rather than DoT here."
+                return "A DoH test returned a validated DNS reply. No DoT test completed successfully; blocking and system DNS configuration are unverified."
             case (false, true):
-                return "DoT (port 853) reachable; DoH endpoints unreachable — unusual. Check if HTTPS to 1.1.1.1 / dns.google is blocked."
+                return "A DoT test returned a validated DNS reply. No DoH test completed successfully; cause and system DNS configuration are unverified."
             case (false, false):
-                return "Neither DoH nor DoT endpoints reachable. This network may block encrypted DNS — your queries will fall back to plaintext. Consider a VPN to tunnel DNS."
+                return "No tested endpoint returned a validated encrypted-DNS reply. This does not establish blocking, plaintext fallback, or the transport used by other apps. Check the configured DNS profile."
             }
         }()
 
@@ -84,16 +84,16 @@ final class DNSEncryptionChecker {
         // RFC 8484 GET form: /dns-query?dns=<base64url(query)> with
         // Accept: application/dns-message. Build a minimal A-record query for
         // example.com — small, well-known, every public resolver answers it.
-        let query = buildDNSQuery(domain: "example.com")
+        guard let query = try? DNSWireCodec.query(domain: "example.com", id: 0) else { return false }
         let base64 = query.base64URLEncodedString()
 
-        async let r1 = probeOneDoH(endpoint: dohEndpoints[0], dnsParam: base64)
-        async let r2 = probeOneDoH(endpoint: dohEndpoints[1], dnsParam: base64)
+        async let r1 = probeOneDoH(endpoint: dohEndpoints[0], dnsParam: base64, query: query)
+        async let r2 = probeOneDoH(endpoint: dohEndpoints[1], dnsParam: base64, query: query)
         let (a, b) = await (r1, r2)
         return a || b
     }
 
-    private func probeOneDoH(endpoint: String, dnsParam: String) async -> Bool {
+    private func probeOneDoH(endpoint: String, dnsParam: String, query: Data) async -> Bool {
         guard var components = URLComponents(string: endpoint) else { return false }
         components.queryItems = [URLQueryItem(name: "dns", value: dnsParam)]
         guard let url = components.url else { return false }
@@ -116,7 +116,7 @@ final class DNSEncryptionChecker {
             // Sanity-check the response is a DNS message: RFC 8484 §6 says
             // body MUST start with the 2-byte transaction ID followed by
             // flags. At minimum it should have the 12-byte DNS header.
-            return data.count >= 12
+            return Self.validDoHResponse(data: data, response: http, query: query)
         } catch {
             return false
         }
@@ -124,9 +124,7 @@ final class DNSEncryptionChecker {
 
     // MARK: - DoT probe
 
-    /// Returns true if ANY DoT endpoint completes a TLS handshake on port 853.
-    /// We don't send a query — just verifying the port is open + TLS works
-    /// is enough to know "DoT is reachable from this network".
+    /// Requires a validated DNS reply over the same system-trusted TLS connection.
     private func probeAllDoT() async -> Bool {
         await withTaskGroup(of: Bool.self) { group in
             for endpoint in dotEndpoints {
@@ -143,68 +141,48 @@ final class DNSEncryptionChecker {
     }
 
     private func probeOneDoT(host: String, port: UInt16) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-                continuation.resume(returning: false)
-                return
-            }
-            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
-            let connection = NWConnection(to: endpoint, using: .tls)
+        guard let query = try? DNSWireCodec.query(domain: "example.com", id: 0),
+              let nwPort = NWEndpoint.Port(rawValue: port) else { return false }
+        return await withCheckedContinuation { continuation in
+            let connection = NWConnection(to: .hostPort(host: NWEndpoint.Host(host), port: nwPort), using: .tls)
             let flag = OnceFlag()
-
+            let finish: @Sendable (Bool) -> Void = { success in
+                if flag.claim() { connection.cancel(); continuation.resume(returning: success) }
+            }
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    if flag.claim() {
-                        connection.cancel()
-                        continuation.resume(returning: true)
-                    }
-                case .failed, .cancelled, .waiting:
-                    if flag.claim() {
-                        connection.cancel()
-                        continuation.resume(returning: false)
-                    }
-                default:
-                    break
+                    let framed = Data([UInt8(query.count >> 8),UInt8(query.count & 255)]) + query
+                    connection.send(content: framed, completion: .contentProcessed { error in
+                        guard error == nil else { finish(false); return }
+                        connection.receive(minimumIncompleteLength: 2, maximumLength: 2) { prefix,_,_,_ in
+                            guard let prefix, prefix.count == 2 else { finish(false); return }
+                            let size = Int(prefix[prefix.startIndex])*256 + Int(prefix[prefix.startIndex+1])
+                            guard size >= 12 else { finish(false); return }
+                            connection.receive(minimumIncompleteLength: size, maximumLength: size) { body,_,_,_ in
+                                finish(body.map { Self.validDoTResponse(prefix: prefix, body: $0, query: query) } ?? false)
+                            }
+                        }
+                    })
+                case .failed, .cancelled, .waiting: finish(false)
+                default: break
                 }
             }
             connection.start(queue: .global(qos: .userInitiated))
-            DispatchQueue.global().asyncAfter(deadline: .now() + 4) {
-                if flag.claim() {
-                    connection.cancel()
-                    continuation.resume(returning: false)
-                }
-            }
+            DispatchQueue.global().asyncAfter(deadline: .now()+4) { finish(false) }
         }
     }
 
-    // MARK: - Minimal DNS query builder
+    nonisolated static func validDoTResponse(prefix: Data, body: Data, query: Data) -> Bool {
+        guard prefix.count == 2, body.count == Int(prefix[prefix.startIndex])*256 + Int(prefix[prefix.startIndex+1]),
+              let reply = try? DNSWireCodec.parse(body, matching: query) else { return false }
+        return reply.code == 0 && !reply.addresses.isEmpty
+    }
 
-    /// Builds an A-record DNS query for `domain` per RFC 1035. Just enough to
-    /// be a valid DoH payload — no compression, no EDNS.
-    private func buildDNSQuery(domain: String) -> Data {
-        var data = Data()
-        // Header: random ID, standard query, recursion desired.
-        let id = UInt16.random(in: 1...UInt16.max)
-        data.append(UInt8(id >> 8))
-        data.append(UInt8(id & 0xFF))
-        data.append(contentsOf: [0x01, 0x00])  // flags: RD=1
-        data.append(contentsOf: [0x00, 0x01])  // QDCOUNT=1
-        data.append(contentsOf: [0x00, 0x00])  // ANCOUNT=0
-        data.append(contentsOf: [0x00, 0x00])  // NSCOUNT=0
-        data.append(contentsOf: [0x00, 0x00])  // ARCOUNT=0
-
-        // QNAME: each label prefixed by length byte, terminated by 0x00.
-        for label in domain.split(separator: ".") {
-            let bytes = Array(label.utf8)
-            data.append(UInt8(bytes.count))
-            data.append(contentsOf: bytes)
-        }
-        data.append(0x00)
-
-        data.append(contentsOf: [0x00, 0x01])  // QTYPE=A
-        data.append(contentsOf: [0x00, 0x01])  // QCLASS=IN
-        return data
+    nonisolated static func validDoHResponse(data: Data, response: HTTPURLResponse, query: Data) -> Bool {
+        guard response.statusCode == 200, response.mimeType?.lowercased() == "application/dns-message" else { return false }
+        guard let reply = try? DNSWireCodec.parse(data, matching: query) else { return false }
+        return reply.code == 0 && !reply.addresses.isEmpty
     }
 
     // MARK: - Once-guard for NWConnection callbacks

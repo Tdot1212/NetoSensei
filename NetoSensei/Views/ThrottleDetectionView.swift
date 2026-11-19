@@ -15,7 +15,7 @@ struct ThrottleDetectionView: View {
     var body: some View {
         NavigationView {
             ThrottleDetectionContentView(vm: vm)
-                .navigationTitle("ISP Throttle Test")
+                .navigationTitle("Endpoint Speed Comparison")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) {
@@ -69,10 +69,10 @@ struct ThrottleDetectionContentView: View {
                 .foregroundColor(AppColors.accent)
 
             VStack(spacing: UIConstants.spacingM) {
-                Text("ISP Throttle Test")
+                Text("Endpoint Speed Comparison")
                     .font(.largeTitle.bold())
 
-                Text("Detect if your ISP is throttling specific services. We'll compare download speeds from multiple CDNs to identify selective throttling.")
+                Text("Compare actual download samples from several endpoints over the current route. Differences do not establish an ISP policy or a Wi-Fi radio fault.")
                     .multilineTextAlignment(.center)
                     .foregroundColor(AppColors.textSecondary)
                     .padding(.horizontal)
@@ -88,7 +88,7 @@ struct ThrottleDetectionContentView: View {
                             .font(.headline)
                     }
 
-                    Text("ISP throttling is when your internet provider intentionally slows down specific types of traffic (like streaming or gaming) while keeping other traffic fast. This test compares speeds to different services to detect this behavior.")
+                    Text("ISP throttling is when your internet provider intentionally slows down specific types of traffic (like streaming or gaming) while keeping other traffic fast. These endpoint samples cannot establish that behavior; server location, routing and load can also produce differences.")
                         .font(.subheadline)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -115,7 +115,7 @@ struct ThrottleDetectionContentView: View {
             }) {
                 HStack {
                     Image(systemName: "play.circle.fill")
-                    Text("Start Throttle Test")
+                    Text("Compare Endpoint Speeds")
                         .font(.headline)
                 }
                 .frame(maxWidth: .infinity)
@@ -211,12 +211,12 @@ struct ThrottleDetectionContentView: View {
                     }
 
                     HStack(spacing: UIConstants.spacingM) {
-                        if result.baselineSpeed > 0 {
+                        if let baseline = result.baselineSpeed, baseline > 0 {
                             VStack {
-                                Text("Baseline")
+                                Text("Fastest sample")
                                     .font(.caption)
                                     .foregroundColor(AppColors.textSecondary)
-                                Text("\(String(format: "%.1f", result.baselineSpeed)) Mbps")
+                                Text(result.baselineSpeed.map { String(format: "%.1f Mbps", $0) } ?? "Unavailable")
                                     .font(.subheadline.bold())
                             }
                         }
@@ -230,7 +230,7 @@ struct ThrottleDetectionContentView: View {
                         }
 
                         VStack {
-                            Text("Confidence")
+                            Text("Sample coverage")
                                 .font(.caption)
                                 .foregroundColor(AppColors.textSecondary)
                             Text(result.confidence.rawValue)
@@ -262,7 +262,7 @@ struct ThrottleDetectionContentView: View {
                     }
 
                     ForEach(result.results.sorted(by: { ($0.speedMbps ?? -1) > ($1.speedMbps ?? -1) })) { endpoint in
-                        endpointRow(endpoint: endpoint, baseline: result.baselineSpeed)
+                        endpointRow(endpoint: endpoint)
                         if endpoint.id != result.results.last?.id {
                             Divider()
                         }
@@ -287,7 +287,7 @@ struct ThrottleDetectionContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("VPN Active")
                         .font(.subheadline.bold())
-                    Text("Your traffic is encrypted. Speed differences are likely due to server locations, not ISP throttling.")
+                    Text("VPN detected. Results include its current route; encryption and per-app routing are not established by these downloads.")
                         .font(.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -335,7 +335,7 @@ struct ThrottleDetectionContentView: View {
 
     // MARK: - Endpoint Row
 
-    private func endpointRow(endpoint: ThrottleResult, baseline: Double) -> some View {
+    private func endpointRow(endpoint: ThrottleResult) -> some View {
         HStack {
             Image(systemName: endpoint.statusIcon)
                 .foregroundColor(statusColor(endpoint.statusColor))
@@ -366,7 +366,7 @@ struct ThrottleDetectionContentView: View {
                             Text("\(Int(percent))% slower")
                                 .foregroundColor(AppColors.textSecondary)
                         } else {
-                            Text("Normal speed")
+                            Text("Measured sample")
                                 .foregroundColor(AppColors.green)
                         }
                     case .endpointError:

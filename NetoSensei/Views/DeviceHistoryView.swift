@@ -21,10 +21,10 @@ struct DeviceHistoryView: View {
 
     enum DeviceFilter: String, CaseIterable {
         case all = "All"
-        case connected = "Connected"
+        case connected = "Observed"
         case new = "New"
-        case untrusted = "Untrusted"
-        case trusted = "Trusted"
+        case untrusted = "Not labeled familiar"
+        case trusted = "Labeled familiar"
     }
 
     var body: some View {
@@ -140,7 +140,7 @@ struct DeviceHistoryView: View {
                 color: .blue
             )
             DeviceHistoryStatBox(
-                title: "Connected",
+                title: "Observed",
                 value: "\(historyManager.connectedDevices.count)",
                 color: .green
             )
@@ -150,7 +150,7 @@ struct DeviceHistoryView: View {
                 color: .orange
             )
             DeviceHistoryStatBox(
-                title: "Untrusted",
+                title: "Not labeled familiar",
                 value: "\(historyManager.untrustedDevices.count)",
                 color: historyManager.untrustedDevices.isEmpty ? .secondary : .red
             )

@@ -11,6 +11,7 @@ import SwiftUI
 
 struct DiagnoseTabView: View {
     @StateObject private var diagnosticVM = DiagnosticViewModel()
+    @State private var showingWiFiAssistant = false
     @State private var showingAdvanced = false
     @State private var showingDNSBenchmark = false
     @State private var showingThrottleTest = false
@@ -29,6 +30,13 @@ struct DiagnoseTabView: View {
                 VStack(spacing: 20) {
                     // Main Diagnostic Card
                     mainDiagnosticCard
+
+                    Button { showingWiFiAssistant = true } label: {
+                        Label("Wi-Fi Assistant", systemImage: "wifi")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
 
                     // Quick Tools Section
                     quickToolsSection
@@ -70,6 +78,9 @@ struct DiagnoseTabView: View {
                         }
                     }
                 }
+            }
+            .sheet(isPresented: $showingWiFiAssistant) {
+                WiFiAssistantView()
             }
             .sheet(isPresented: $showingAdvanced) {
                 NewAdvancedDiagnosticView()
@@ -145,7 +156,7 @@ struct DiagnoseTabView: View {
 
                     Spacer()
 
-                    Text("~5s")
+                    Text("Run")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.8))
                 }
@@ -166,16 +177,16 @@ struct DiagnoseTabView: View {
                     Image(systemName: "waveform.badge.magnifyingglass")
                         .font(.title2)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Deep Scan")
+                        Text("Detailed Checks")
                             .font(.headline)
-                        Text("DNS hijacking • TLS certs • Traceroute • Security")
+                        Text("Performance • DNS • TLS • Endpoint checks")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.8))
                     }
 
                     Spacer()
 
-                    Text("~30s")
+                    Text("Tools")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.8))
                 }
@@ -190,6 +201,7 @@ struct DiagnoseTabView: View {
                 .cornerRadius(12)
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("detailedChecks")
 
             // Running indicator
             if diagnosticVM.isRunning {
@@ -287,8 +299,8 @@ struct DiagnoseTabView: View {
                     // Throttle Detection
                     ToolButton(
                         icon: "gauge.with.dots.needle.bottom.50percent",
-                        title: "Throttle Test",
-                        subtitle: "Detect ISP throttling",
+                        title: "Endpoint Speeds",
+                        subtitle: "Compare endpoint throughput",
                         color: .orange
                     ) {
                         showingThrottleTest = true
@@ -297,8 +309,8 @@ struct DiagnoseTabView: View {
                     // Network Path (Traceroute)
                     ToolButton(
                         icon: "point.topleft.down.to.point.bottomright.curvepath",
-                        title: "Network Path",
-                        subtitle: "Trace route to destination",
+                        title: "Endpoint Checks",
+                        subtitle: "Compare endpoint responses",
                         color: .purple
                     ) {
                         showingTraceroute = true
@@ -308,7 +320,7 @@ struct DiagnoseTabView: View {
                     ToolButton(
                         icon: "lock.shield",
                         title: "DNS Analyzer",
-                        subtitle: "DNS security & leaks",
+                        subtitle: "Observed resolver information",
                         color: .green
                     ) {
                         showingDNSAnalyzer = true

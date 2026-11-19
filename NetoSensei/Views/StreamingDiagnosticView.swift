@@ -40,6 +40,7 @@ struct StreamingDiagnosticView: View {
 /// Streaming diagnostic content view (reusable in tabs or sheets)
 struct StreamingDiagnosticContentView: View {
     @ObservedObject var vm: StreamingDiagnosticViewModel
+    var currentSpeed: SpeedTestResult? = nil
 
     var body: some View {
         ZStack {
@@ -195,7 +196,7 @@ struct StreamingDiagnosticContentView: View {
                 Text("Streaming Capability")
                     .font(.headline)
 
-                if let lastSpeed = HistoryManager.shared.speedTestHistory.first {
+                if let lastSpeed = currentSpeed, lastSpeed.timestamp >= ExitPath.lastPathChange {
                     let capability = lastSpeed.streamingCapability
                     // FIX (Speed Issue 1/6): the "Max Quality" line now reads
                     // from ConnectionCapabilityAnalyzer, the same source the
@@ -208,32 +209,15 @@ struct StreamingDiagnosticContentView: View {
                     HStack {
                         Image(systemName: "play.tv.fill")
                             .foregroundColor(AppColors.accent)
-                        Text("Max Quality: \(unifiedCapability.maxStreamingQuality.rawValue)")
+                        Text("Bandwidth estimate: \(unifiedCapability.maxStreamingQuality.rawValue)")
                             .font(.title3.bold())
                     }
 
                     Divider()
 
-                    // Platform-specific capabilities
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(capability.supportedPlatforms, id: \.platform) { platform in
-                            HStack {
-                                Text(platform.platform)
-                                    .frame(width: 80, alignment: .leading)
-                                Text(platform.maxQuality.rawValue)
-                                    .font(.caption)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
-                                    .background(qualityColor(platform.maxQuality).opacity(0.2))
-                                    .foregroundColor(qualityColor(platform.maxQuality))
-                                    .cornerRadius(4)
-                                Spacer()
-                                Text(platform.expectedBuffering.rawValue)
-                                    .font(.caption)
-                                    .foregroundColor(AppColors.textSecondary)
-                            }
-                        }
-                    }
+                    Text("Applies to the measured connection. Individual services may buffer or restrict playback.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
 
                     Divider()
 
@@ -267,7 +251,7 @@ struct StreamingDiagnosticContentView: View {
                     }
 
                     // Source info
-                    Text("Based on speed test: \(String(format: "%.1f", lastSpeed.downloadSpeed)) Mbps down, \(String(format: "%.1f", lastSpeed.uploadSpeed)) Mbps up, \(lastSpeed.ping.map { "\(Int($0))ms" } ?? "ping unavailable")")
+                    Text("Based on speed test: \(String(format: "%.1f", lastSpeed.downloadSpeed)) Mbps down, \(lastSpeed.measuredUploadSpeed.map { String(format: "%.1f Mbps up", $0) } ?? "upload unavailable"), \(lastSpeed.ping.map { "\(Int($0))ms" } ?? "ping unavailable")")
                         .font(.caption2)
                         .foregroundColor(AppColors.textSecondary)
                         .padding(.top, 4)
@@ -294,6 +278,7 @@ struct StreamingDiagnosticContentView: View {
     // don't see "HD video calls" in one place and "SD video calls" in another.
     private func unifiedVideoCallText(_ rating: ActivityRating) -> String {
         switch rating {
+        case .unknown: return "Not fully measured"
         case .excellent: return "HD video calls with screen sharing"
         case .good: return "HD video calls"
         case .degraded: return "Audio-only recommended"
@@ -303,6 +288,7 @@ struct StreamingDiagnosticContentView: View {
 
     private func unifiedGamingText(_ rating: ActivityRating) -> String {
         switch rating {
+        case .unknown: return "Not fully measured"
         case .excellent: return "Competitive gaming ready"
         case .good: return "Casual gaming"
         case .degraded: return "Single player only"
@@ -328,7 +314,7 @@ struct StreamingDiagnosticContentView: View {
 
                 HStack(spacing: UIConstants.spacingXL) {
                     VStack {
-                        Text("CDN Ping")
+                        Text("HTTPS response")
                             .font(.caption)
                             .foregroundColor(AppColors.textSecondary)
                         Text(result.cdnPing.map { "\(Int($0))ms" } ?? "—")
@@ -353,7 +339,7 @@ struct StreamingDiagnosticContentView: View {
     private func bottleneckCard(result: StreamingDiagnosticResult) -> some View {
         CardView {
             VStack(alignment: .leading, spacing: UIConstants.spacingM) {
-                Text("Primary Bottleneck")
+                Text("Cause of playback issues")
                     .font(.headline)
 
                 // FIX (Speed Issue 4): use VPN-aware display label so the
@@ -361,7 +347,7 @@ struct StreamingDiagnosticContentView: View {
                 // misleading "CDN Routing" when the user is on a VPN.
                 Text(result.primaryBottleneckDisplay)
                     .font(.title3.bold())
-                    .foregroundColor(AppColors.red)
+                    .foregroundStyle(.secondary)
 
                 if !result.secondaryFactors.isEmpty {
                     Text("Contributing Factors:")
@@ -434,23 +420,8 @@ struct StreamingDiagnosticContentView: View {
     // FIXED: Show streaming capability when throughput test fails
     // The capability is calculated from the last speed test result
     private func throughputDisplayText(_ throughput: Double) -> String {
-        if throughput < 0 {
-            // CDN blocked - show capability based on speed test
-            if let lastSpeed = HistoryManager.shared.speedTestHistory.first {
-                let capability = lastSpeed.streamingCapability
-                return capability.maxVideoQuality.rawValue
-            }
-            return "CDN blocked"
-        } else if throughput < 0.1 {
-            // Test failed - show capability based on speed test
-            if let lastSpeed = HistoryManager.shared.speedTestHistory.first {
-                let capability = lastSpeed.streamingCapability
-                return capability.maxVideoQuality.rawValue
-            }
-            return "Run speed test"
-        } else {
-            return String(format: "%.1f Mbps", throughput)
-        }
+        guard throughput.isFinite, throughput > 0 else { return "Unmeasured" }
+        return String(format: "%.1f Mbps", throughput)
     }
 
     private func throughputDisplayColor(_ throughput: Double) -> Color {

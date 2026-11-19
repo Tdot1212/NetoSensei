@@ -306,7 +306,7 @@ struct SecurityFlagsCard: View {
                 }
             }
 
-            if geoIP.isCGNAT {
+            if geoIP.isCGNAT == true {
                 Text("CGNAT may affect certain online services and peer-to-peer connections.")
                     .font(.caption)
                     .foregroundColor(.secondary)

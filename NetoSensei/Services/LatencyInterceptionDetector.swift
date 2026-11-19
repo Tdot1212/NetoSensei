@@ -1,33 +1,7 @@
-//
-//  LatencyInterceptionDetector.swift
-//  NetoSensei
-//
-//  Detects when a local TUN-mode proxy/VPN (V2BOX, Shadowrocket, Clash, etc.)
-//  has INTERCEPTED the external latency probe instead of measuring the real
-//  network path.
-//
-//  WHY THIS EXISTS:
-//  TUN-mode proxies — the norm for this app's mainland-China audience —
-//  terminate outbound TCP handshakes LOCALLY. The on-device proxy stub ACKs
-//  the SYN itself and establishes the real upstream connection asynchronously,
-//  so a BSD connect()/handshake to an external host completes in ~1-4ms (the
-//  cost of a localhost round-trip) regardless of the real network distance.
-//  Displaying that number as "Latency" is fabricated data.
-//
-//  CALIBRATION DATA (measured 2026-06-12, Guangzhou, CMCC):
-//    V2BOX ON:  TCP connect 223.5.5.5 = 1.5ms, 1.1.1.1 = 3.6ms   ← FAKE (local stub)
-//    V2BOX OFF: TCP connect 223.5.5.5 = 14.8ms                   ← REAL
-//    iPhone gateway handshake (device log) ~8.5ms                ← REAL (LAN, unproxied)
-//    TUN proxies also drop ICMP entirely (100% ping loss both targets, VPN on)
-//
-//  The gateway handshake stays honest even with a proxy active: LAN / private-IP
-//  traffic is not routed through the tunnel, so the gateway RTT is our physical
-//  reference floor.
-//
-//  This detector is a PURE function so the speed-test phase (which sees the same
-//  fake "Ping 999ms / 100% loss" alongside working throughput) can reuse it.
-//
-
+// Conservative probe-reliability heuristic. Gateway management-plane response
+// time is not a physical lower bound on forwarded packets. A flagged result
+// means the TCP timing may be affected by a proxy or measurement conditions;
+// it does not prove malicious interception or identify a network route.
 import Foundation
 
 enum LatencyInterception {
@@ -86,7 +60,7 @@ enum LatencyInterception {
                 return Result(
                     intercepted: true,
                     reason: String(format:
-                        "external %.1fms < gateway %.1fms − margin %.1fms (physically impossible; vpnActive=%@)",
+                        "external %.1fms < gateway %.1fms − margin %.1fms (probe reliability uncertain; vpnActive=%@)",
                         externalRTTms, gateway, gatewayMarginMs, vpnActive ? "yes" : "no"))
             }
             // Gateway reference satisfied → honest path. Do NOT also apply the

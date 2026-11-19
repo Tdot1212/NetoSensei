@@ -220,7 +220,8 @@ enum LatencyValidation {
         // 999 / 9999 are "test failed/timed out" sentinels used throughout the
         // engines (see DNSBenchmark, GatewaySecurityScanner, etc.). They are not
         // real measurements and must never be shown to the user.
-        if l >= 999 { return nil }
+        // Legacy sentinels are removed at record migration. A live slow RTT
+        // can legitimately exceed 999 ms and must not be discarded.
         return l
     }
 
@@ -313,7 +314,7 @@ struct NetworkStatus {
     var publicIP: String?
     var localIP: String?
     var ipv6Address: String?
-    var isCGNAT: Bool
+    var isCGNAT: Bool?
     var isProxyDetected: Bool
 
     // Device network mode
@@ -500,7 +501,7 @@ struct NetworkStatus {
             internet: InternetInfo(isReachable: false, externalPingSuccess: false, httpTestSuccess: false, cdnReachable: false),
             dns: DNSInfo(lookupSuccess: false),
             vpn: VPNInfo(),
-            isCGNAT: false,
+            isCGNAT: nil,
             isProxyDetected: false,
             isIPv4Enabled: true,
             isIPv6Enabled: false,

@@ -927,7 +927,7 @@ class SmartVPNDetector: ObservableObject {
                     return VPNDetectionResult.MethodResult(
                         method: "IPv6 Check",
                         detected: false,
-                        detail: "Native ISP IPv6 present (\(ipv6.prefix(12))...) — not VPN"
+                        detail: "Local IPv6 address observed (\(ipv6.prefix(12))...). VPN routing unverified."
                     )
                 }
             }
@@ -989,7 +989,7 @@ class SmartVPNDetector: ObservableObject {
             return VPNDetectionResult.MethodResult(
                 method: "Connectivity",
                 detected: false,
-                detail: "Not in China locale — skipped",
+                detail: "Regional reachability check skipped",
                 isInformational: true
             )
         }

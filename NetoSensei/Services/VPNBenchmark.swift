@@ -28,7 +28,8 @@ class VPNBenchmark: ObservableObject {
         // labeled everything > 400ms "Very Slow" and turned the whole table
         // red.
         var qualityRating: String {
-            guard let latency = latencyMs else { return "Unreachable" }
+            guard let latency = latencyMs else { return "Unavailable" }
+            if let code = httpStatus, code >= 400 { return "HTTP \(code)" }
             switch latency {
             case ..<500: return "Fast"
             case ..<1000: return "Normal"
@@ -54,7 +55,7 @@ class VPNBenchmark: ObservableObject {
             case .google: return "https://www.google.com/generate_204"
             case .youtube: return "https://www.youtube.com/favicon.ico"
             case .twitter: return "https://x.com/favicon.ico"
-            case .chatgpt: return "https://chat.openai.com/favicon.ico"
+            case .chatgpt: return "https://chatgpt.com/"
             case .github: return "https://github.com/favicon.ico"
             case .instagram: return "https://www.instagram.com/favicon.ico"
             case .whatsapp: return "https://web.whatsapp.com/favicon.ico"
@@ -86,18 +87,37 @@ class VPNBenchmark: ObservableObject {
     @Published var isRunning = false
     @Published var progress: Double = 0
 
+    private let injectedSession: URLSession?
+    private let clock: @Sendable () -> TimeInterval
+    init(session: URLSession? = nil, clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        injectedSession = session; self.clock = clock
+    }
+
     func runBenchmark(destinations: [Destination] = Destination.allCases) async {
+        guard !isRunning else { return }
         isRunning = true
+        defer { isRunning = false }
         results = []
         progress = 0
 
-        for (index, dest) in destinations.enumerated() {
-            let result = await testDestination(dest)
-            results.append(result)
-            progress = Double(index + 1) / Double(destinations.count)
+        let destinationsByPosition = Array(destinations.enumerated())
+        for offset in stride(from: 0, to: destinations.count, by: 3) {
+            guard !Task.isCancelled else { return }
+            let batch = destinationsByPosition[offset..<min(offset + 3, destinations.count)]
+            let measured = await withTaskGroup(of: (Int, BenchmarkResult).self) { group in
+                for (index, destination) in batch {
+                    group.addTask { @MainActor in
+                        (index, await self.testDestination(destination))
+                    }
+                }
+                var values: [(Int, BenchmarkResult)] = []
+                for await result in group { values.append(result) }
+                return values.sorted { $0.0 < $1.0 }.map { $0.1 }
+            }
+            guard !Task.isCancelled else { return }
+            results.append(contentsOf: measured)
+            progress = Double(results.count) / Double(destinations.count)
         }
-
-        isRunning = false
     }
 
     private func testDestination(_ destination: Destination) async -> BenchmarkResult {
@@ -111,40 +131,40 @@ class VPNBenchmark: ObservableObject {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 10
         config.timeoutIntervalForResource = 10
-        let session = URLSession(configuration: config)
+        let session = injectedSession ?? URLSession(configuration: config)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = clock()
 
         do {
             let (_, response) = try await session.data(from: url)
-            let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
-            let httpResponse = response as? HTTPURLResponse
+            let elapsed = (clock() - start) * 1000
+            guard let httpResponse = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
 
             return BenchmarkResult(
                 destination: destination,
                 latencyMs: elapsed,
                 reachable: true,
-                httpStatus: httpResponse?.statusCode,
+                httpStatus: httpResponse.statusCode,
                 responseTimeMs: elapsed,
                 error: nil,
                 timestamp: Date()
             )
         } catch {
-            let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
+            let elapsed = (clock() - start) * 1000
 
             let errorDesc: String
             let nsError = error as NSError
             switch nsError.code {
-            case -1001: errorDesc = "Timeout (likely blocked or geo-restricted)"
+            case -1001: errorDesc = "Request timed out; cause unknown"
             case -1003: errorDesc = "Cannot find host"
             case -1004: errorDesc = "Cannot connect"
-            case -1200: errorDesc = "TLS/SSL error (proxy may be intercepting)"
+            case -1200: errorDesc = "HTTPS trust or handshake error"
             default: errorDesc = error.localizedDescription
             }
 
             return BenchmarkResult(
                 destination: destination,
-                latencyMs: elapsed > 9500 ? nil : elapsed,
+                latencyMs: nil,
                 reachable: false,
                 httpStatus: nil,
                 responseTimeMs: nil,

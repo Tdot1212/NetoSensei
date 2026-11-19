@@ -137,33 +137,24 @@ enum RoutingProblemType: String, Sendable, Codable {
 // MARK: - Performance Metrics
 
 struct PerformanceMetrics: Sendable, Codable {
-    let packetLoss: Double  // %
-    let jitter: Int  // ms
-    let throughput: Double  // Mbps
+    let packetLoss: Double?
+    let jitter: Int?
+    let throughput: Double?
     let timestamp: Date
 
     var qualityRating: String {
-        if packetLoss < 1 && jitter < 20 && throughput > 25 {
-            return "Excellent"
-        } else if packetLoss < 3 && jitter < 50 && throughput > 10 {
-            return "Good"
-        } else if packetLoss < 5 && jitter < 100 {
-            return "Fair"
-        } else {
-            return "Poor"
-        }
+        guard let packetLoss, let jitter, let throughput else { return "Incomplete measurements" }
+        if packetLoss < 1 && jitter < 20 && throughput > 25 { return "Excellent" }
+        if packetLoss < 3 && jitter < 50 && throughput > 10 { return "Good" }
+        if packetLoss < 5 && jitter < 100 { return "Fair" }
+        return "Poor"
     }
 
     var userFriendlyDescription: String {
-        let speedText: String
-        if throughput < 0 {
-            speedText = "Test blocked/interrupted"
-        } else if throughput < 0.1 {
-            speedText = "Connection severely throttled (< 0.1 Mbps)"
-        } else {
-            speedText = String(format: "%.1f Mbps", throughput)
-        }
-        return "Quality: \(qualityRating) - Loss: \(String(format: "%.1f", packetLoss))%, Jitter: \(jitter)ms, Speed: \(speedText)"
+        let loss = packetLoss.map { String(format: "%.1f%%", $0) } ?? "Unmeasured"
+        let variation = jitter.map { "\($0)ms" } ?? "Unmeasured"
+        let speed = throughput.map { String(format: "%.1f Mbps", $0) } ?? "Unmeasured"
+        return "Loss: \(loss), Jitter: \(variation), Speed: \(speed)"
     }
 }
 

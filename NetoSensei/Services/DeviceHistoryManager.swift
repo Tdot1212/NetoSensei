@@ -23,6 +23,7 @@ struct HistoricalDevice: Identifiable, Codable, Equatable {
     var isCurrentlyConnected: Bool
     var customName: String?
     var notes: String?
+    var typeWasUserAssigned: Bool? = nil
     var networkSSID: String?
 
     var displayName: String {
@@ -33,7 +34,7 @@ struct HistoricalDevice: Identifiable, Codable, Equatable {
     }
 
     var isNew: Bool {
-        firstSeen.timeIntervalSinceNow > -86400
+        firstSeen.timeIntervalSinceNow <= 0 && firstSeen.timeIntervalSinceNow > -86400
     }
 
     var daysSinceLastSeen: Int {
@@ -41,7 +42,7 @@ struct HistoricalDevice: Identifiable, Codable, Equatable {
     }
 
     var connectionHistory: String {
-        if isCurrentlyConnected { return "Connected now" }
+        if isCurrentlyConnected { return "Observed in latest scan" }
         let d = daysSinceLastSeen
         if d == 0 { return "Seen today" }
         if d == 1 { return "Seen yesterday" }
@@ -159,7 +160,10 @@ class DeviceHistoryManager: ObservableObject {
     private let maxEvents = 500
     private let maxAlerts = 100
 
-    private init() {
+    private let defaults: UserDefaults
+    private let clock: () -> Date
+    init(defaults: UserDefaults = .standard, clock: @escaping () -> Date = Date.init) {
+        self.defaults = defaults; self.clock = clock
         loadData()
         loadSettings()
     }
@@ -180,11 +184,16 @@ class DeviceHistoryManager: ObservableObject {
     ) {
         guard trackDeviceHistory else { return }
 
-        let now = Date()
+        let now = clock()
+        let unknownScope = UUID().uuidString
         let currentIPs = Set(discoveredDevices.map { $0.ipAddress })
 
         // Mark devices not in current scan as disconnected
         for i in devices.indices {
+            if currentSSID == nil || devices[i].networkSSID != currentSSID {
+                devices[i].isCurrentlyConnected = false
+                continue
+            }
             if devices[i].isCurrentlyConnected && !currentIPs.contains(devices[i].ipAddress) {
                 devices[i].isCurrentlyConnected = false
                 addEvent(DeviceEvent(
@@ -198,12 +207,14 @@ class DeviceHistoryManager: ObservableObject {
 
         // Process each discovered device
         for discovered in discoveredDevices {
-            let deviceId = stableId(ip: discovered.ipAddress, hostname: discovered.hostname)
+            let deviceId = Self.observationID(ip: discovered.ipAddress, hostname: discovered.hostname, ssid: currentSSID, unknownScope: unknownScope)
 
-            if let idx = devices.firstIndex(where: { $0.id == deviceId }) {
+            if let idx = devices.firstIndex(where: { $0.id == deviceId ||
+                ($0.networkSSID != nil && $0.networkSSID == currentSSID && $0.ipAddress == discovered.ipAddress && $0.hostname == discovered.hostname) }) {
                 // Update existing device
                 let wasConnected = devices[idx].isCurrentlyConnected
                 let oldIP = devices[idx].ipAddress
+                let daysAway = max(0, Int(now.timeIntervalSince(devices[idx].lastSeen)/86400))
 
                 devices[idx].lastSeen = now
                 devices[idx].seenCount += 1
@@ -220,18 +231,18 @@ class DeviceHistoryManager: ObservableObject {
                 }
 
                 // Returning device alert
-                if !wasConnected && devices[idx].daysSinceLastSeen > 7 && alertOnNewDevices {
+                if !wasConnected && daysAway > 7 && alertOnNewDevices {
                     addEvent(DeviceEvent(deviceId: deviceId, eventType: .joined,
                                          ipAddress: discovered.ipAddress, networkSSID: currentSSID))
                     addAlert(NetworkAlert(
                         type: .deviceReturned, deviceId: deviceId,
                         deviceName: devices[idx].displayName,
-                        message: "\(devices[idx].displayName) reconnected after \(devices[idx].daysSinceLastSeen) days"
+                        message: "\(devices[idx].displayName) observed again after \(daysAway) days"
                     ))
                 }
             } else {
                 // New device
-                let category = categorize(hostname: discovered.hostname, vendor: nil)
+                let category: HistoricalDevice.DeviceCategory = discovered.isGateway ? .router : categorize(hostname: discovered.hostname, vendor: nil)
                 let newDevice = HistoricalDevice(
                     id: deviceId,
                     ipAddress: discovered.ipAddress,
@@ -239,7 +250,7 @@ class DeviceHistoryManager: ObservableObject {
                     vendor: nil,
                     deviceType: category,
                     firstSeen: now, lastSeen: now, seenCount: 1,
-                    isTrusted: discovered.isGateway,
+                    isTrusted: false,
                     isCurrentlyConnected: true,
                     customName: nil, notes: nil,
                     networkSSID: currentSSID
@@ -276,17 +287,13 @@ class DeviceHistoryManager: ObservableObject {
     ) {
         guard trackDeviceHistory else { return }
 
+        guard let currentSSID else { return }
         for bonjour in bonjourDevices {
-            let deviceId = stableId(ip: nil, hostname: bonjour.displayName)
-
-            if let idx = devices.firstIndex(where: { $0.id == deviceId }) {
-                if devices[idx].hostname == nil {
-                    devices[idx].hostname = bonjour.displayName
-                }
-                devices[idx].deviceType = categorizeBonjour(bonjour)
-                devices[idx].lastSeen = Date()
-                devices[idx].isCurrentlyConnected = true
-            }
+            let matches = devices.indices.filter { devices[$0].networkSSID == currentSSID && devices[$0].hostname?.lowercased() == bonjour.displayName.lowercased() }
+            guard matches.count == 1, let idx = matches.first else { continue }
+            if devices[idx].typeWasUserAssigned != true { devices[idx].deviceType = categorizeBonjour(bonjour) }
+            devices[idx].lastSeen = clock()
+            devices[idx].isCurrentlyConnected = true
         }
         saveData()
     }
@@ -320,6 +327,7 @@ class DeviceHistoryManager: ObservableObject {
     func setDeviceType(_ deviceId: String, type: HistoricalDevice.DeviceCategory) {
         guard let i = devices.firstIndex(where: { $0.id == deviceId }) else { return }
         devices[i].deviceType = type
+        devices[i].typeWasUserAssigned = true
         saveData()
     }
 
@@ -381,7 +389,7 @@ class DeviceHistoryManager: ObservableObject {
     // MARK: - Settings
 
     func saveSettings() {
-        let d = UserDefaults.standard
+        let d = defaults
         d.set(alertOnNewDevices, forKey: "\(settingsPrefix)_alertNew")
         d.set(alertOnUnknownDevices, forKey: "\(settingsPrefix)_alertUnknown")
         d.set(trackDeviceHistory, forKey: "\(settingsPrefix)_track")
@@ -389,11 +397,9 @@ class DeviceHistoryManager: ObservableObject {
 
     // MARK: - Private — ID Generation
 
-    private func stableId(ip: String?, hostname: String?) -> String {
-        if let h = hostname, !h.isEmpty {
-            return h.lowercased().replacingOccurrences(of: " ", with: "_")
-        }
-        return ip ?? UUID().uuidString
+    nonisolated static func observationID(ip: String, hostname: String?, ssid: String?, unknownScope: String) -> String {
+        let parts = [ssid ?? "unidentified-"+unknownScope, ip, hostname?.lowercased() ?? ""]
+        return parts.map { "\($0.utf8.count):\($0)" }.joined(separator: "|")
     }
 
     // MARK: - Private — Device Categorization
@@ -460,7 +466,7 @@ class DeviceHistoryManager: ObservableObject {
     // MARK: - Private — Persistence
 
     private func loadData() {
-        let d = UserDefaults.standard
+        let d = defaults
         if let data = d.data(forKey: devicesKey),
            let decoded = try? JSONDecoder().decode([HistoricalDevice].self, from: data) {
             devices = decoded
@@ -477,14 +483,14 @@ class DeviceHistoryManager: ObservableObject {
     }
 
     private func saveData() {
-        let d = UserDefaults.standard
+        let d = defaults
         if let enc = try? JSONEncoder().encode(devices) { d.set(enc, forKey: devicesKey) }
         if let enc = try? JSONEncoder().encode(events) { d.set(enc, forKey: eventsKey) }
         if let enc = try? JSONEncoder().encode(alerts) { d.set(enc, forKey: alertsKey) }
     }
 
     private func loadSettings() {
-        let d = UserDefaults.standard
+        let d = defaults
         alertOnNewDevices = d.object(forKey: "\(settingsPrefix)_alertNew") as? Bool ?? true
         alertOnUnknownDevices = d.object(forKey: "\(settingsPrefix)_alertUnknown") as? Bool ?? true
         trackDeviceHistory = d.object(forKey: "\(settingsPrefix)_track") as? Bool ?? true

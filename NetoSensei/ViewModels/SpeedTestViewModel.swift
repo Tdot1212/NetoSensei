@@ -85,6 +85,11 @@ class SpeedTestViewModel: ObservableObject {
 
     // MARK: - Run Speed Test (FIXED: Proper async pattern with cancellation support)
 
+    func runSpeedTestAndWait() async {
+        runSpeedTest()
+        await currentSpeedTestTask?.value
+    }
+
     func runSpeedTest() {
         debugLog("🚀 SpeedTestViewModel: Starting speed test")
 
@@ -180,12 +185,12 @@ class SpeedTestViewModel: ObservableObject {
                     downloadSpeed: final.downloadSpeed,
                     uploadSpeed: final.uploadSpeed,
                     latency: final.ping,
-                    gatewayLatency: networkStatus.router.latency ?? 0,
-                    dnsLatency: networkStatus.dns.latency ?? 0,
+                    gatewayLatency: networkStatus.router.displayableLatency,
+                    dnsLatency: networkStatus.dns.displayableLatency,
                     jitter: final.jitter,
                     packetLoss: final.packetLoss,
                     vpnActive: networkStatus.vpn.isActive,
-                    vpnOverhead: networkStatus.vpn.tunnelLatency,
+                    vpnOverhead: nil,
                     rootCause: "Speed Test",
                     connectionType: networkStatus.connectionType?.displayName ?? "Unknown",
                     wifiSSID: networkStatus.wifi.ssid,
@@ -238,13 +243,13 @@ class SpeedTestViewModel: ObservableObject {
     }
 
     var downloadSpeedFormatted: String {
-        guard let result = result else { return "0.0 Mbps" }
+        guard let result = result else { return "—" }
         return String(format: "%.1f Mbps", result.downloadSpeed)
     }
 
     var uploadSpeedFormatted: String {
-        guard let result = result else { return "0.0 Mbps" }
-        return String(format: "%.1f Mbps", result.uploadSpeed)
+        guard let result = result else { return "—" }
+        return result.measuredUploadSpeed.map { String(format: "%.1f Mbps", $0) } ?? "—"
     }
 
     var pingFormatted: String {
@@ -266,19 +271,12 @@ class SpeedTestViewModel: ObservableObject {
     /// when ping is present. Wording mirrors the Phase 2.1 dashboard.
     var pingUnavailableReason: String? {
         guard let result = result, result.ping == nil else { return nil }
-        if result.latencyIntercepted || result.vpnActive {
-            return "Unavailable — VPN/proxy answers test probes on-device"
-        }
-        return "Unavailable — test probes were blocked"
+        return "Remote delay unavailable on this route"
     }
 
-    /// Short, honest caption for why packet loss is unavailable (nil).
     var packetLossUnavailableReason: String? {
-        guard let result = result, result.packetLoss == nil else { return nil }
-        if result.vpnActive {
-            return "Unavailable — VPN/proxy blocks test probes (a working download proves the path is up)"
-        }
-        return "Unavailable — test probes were blocked"
+        guard let result, result.packetLoss == nil else { return nil }
+        return "Packet loss was not measured on this route."
     }
 
     var qualityRating: SpeedTestResult.QualityRating {

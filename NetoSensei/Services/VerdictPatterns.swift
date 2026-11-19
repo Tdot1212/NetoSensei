@@ -75,14 +75,14 @@ enum VerdictPatterns {
         guard ctx.latencyIntercepted else { return nil }
         return Finding(
             kind: .proxyInterception, severity: .fair,
-            confidence: Confidence(level: .high, reason: "The delay probe was answered faster than the router can be reached — only an on-device proxy can do that"),
-            headline: "A VPN or proxy on this phone is answering the delay test",
+            confidence: Confidence(level: .medium, reason: "The observed timing may reflect a local response."),
+            headline: "Internet delay could not be measured",
             evidence: [],
-            cause: "A VPN or proxy app running on this phone replies to the delay probe itself, so the number would describe the app, not the network. Speed tests still measure real throughput through the tunnel.",
-            action: .notFixable(
-                why: "This is how on-device tunnels work; nothing is broken.",
-                expect: "No delay number while the proxy is on. Speed, dropped-data and steadiness readings are still real.",
-                workarounds: ["Turn the proxy off for a moment to measure the raw network, then turn it back on"]),
+            cause: "A VPN or proxy can affect this probe. The result is withheld because it may not describe the time to a remote server.",
+            action: .userFixable(steps: [
+                "Open Speed and tap Run all checks to measure throughput and website response on this connection.",
+                "If a site still lags, switch to a different server in your VPN app. Stay on the same Wi-Fi, then repeat the checks and compare that site’s response time."
+            ]),
             basedOn: [.externalLatency], wouldSharpen: [], byDesign: true
         )
     }
@@ -207,11 +207,11 @@ enum VerdictPatterns {
         let band = MetricBands.vpnOverhead(ms: overhead)
         return Finding(
             kind: .vpnOverhead, severity: max(band, .fair),   // never worse than fair: the tunnel works, it is just far
-            confidence: Confidence(level: .high, reason: "Router delay and internet delay both measured; the difference is the tunnel"),
-            headline: "Your VPN is adding most of the delay",
+            confidence: Confidence(level: .medium, reason: "Router and external response times were measured; the VPN contribution was not isolated"),
+            headline: "External responses are slower while VPN is active",
             evidence: [evidenceGateway(gw), evidenceInternet(ext, viaVPN: true),
-                       Evidence(label: "Added by the VPN", value: overhead, unit: "ms", band: band, comparedTo: "under 150 ms is normal for an international tunnel")],
-            cause: "Your home network answers in \(Int(gw)) ms. The extra \(Int(overhead)) ms is the round trip to your VPN's server\(ctx.vpn.exitCountryText) and back.",
+                       Evidence(label: "Difference beyond gateway", value: overhead, unit: "ms", band: band, comparedTo: "under 150 ms is normal for an international tunnel")],
+            cause: "The gateway responded in \(Int(gw)) ms and the external target in \(Int(ext)) ms. Their difference includes routing, endpoint processing and possible VPN effects; it is not a measured VPN penalty.",
             action: .userFixable(steps: ["Pick a nearer server in your VPN app", "Try the WireGuard protocol if the app offers it", "Reconnect the VPN once — routes sometimes get stuck on a bad path"]),
             basedOn: [.gatewayLatency, .externalLatency]
         )

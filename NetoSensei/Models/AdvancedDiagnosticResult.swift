@@ -137,194 +137,15 @@ enum ThroughputQuality: String, Codable {
 
 // MARK: - B. Traceroute Result
 
+/// Independent endpoint checks. These are never presented as observed IP hops.
 struct TracerouteResult: Codable, Identifiable {
-    let id: UUID
+    var id = UUID()
     let timestamp: Date
     let destination: String
     let hops: [TracerouteHop]
-    let totalLatency: Double
-
-    // Identify bottleneck
-    var bottleneckHop: TracerouteHop? {
-        // Find hop with largest latency increase
-        guard hops.count > 1 else { return nil }
-
-        var maxIncrease = 0.0
-        var bottleneck: TracerouteHop?
-
-        for i in 1..<hops.count {
-            let increase = hops[i].latency - hops[i-1].latency
-            if increase > maxIncrease && increase > 20 { // Only if > 20ms increase
-                maxIncrease = increase
-                bottleneck = hops[i]
-            }
-        }
-
-        return bottleneck
-    }
-
-    // AI-Interpreted Diagnosis
-    var intelligentDiagnosis: IntelligentDiagnosis {
-        guard let bottleneck = bottleneckHop else {
-            return IntelligentDiagnosis(
-                problemType: .none,
-                userFriendlyExplanation: "No performance issues detected. Your connection is running smoothly.",
-                technicalExplanation: "All hops show normal latency (<50ms increase per hop).",
-                whatUserCanDo: ["Your network is performing well!", "No action needed."],
-                severity: .good
-            )
-        }
-
-        let hopNumber = bottleneck.hopNumber
-        let hopName = bottleneck.hostname ?? bottleneck.ipAddress
-        let latency = bottleneck.latency
-
-        // Case A: Router Problem (Hop 1)
-        // FIXED: Don't speculate about "overheating" from a single latency measurement
-        // Also note: traceroute hop 1 timing may differ from direct gateway ping
-        if hopNumber == 1 {
-            let explanation: String
-            if latency > 100 {
-                explanation = "Your router is responding slowly (\(Int(latency))ms). Try restarting it."
-            } else if latency > 50 {
-                explanation = "Gateway latency is elevated (\(Int(latency))ms). May indicate router congestion."
-            } else {
-                explanation = "Router latency is acceptable (\(Int(latency))ms)."
-            }
-
-            return IntelligentDiagnosis(
-                problemType: .routerOverload,
-                userFriendlyExplanation: explanation,
-                technicalExplanation: "First hop latency of \(Int(latency))ms. Compare with direct gateway ping test for consistency.",
-                whatUserCanDo: [
-                    "Restart your router",
-                    "Disconnect unused devices",
-                    "Check for bandwidth-heavy apps"
-                ],
-                severity: latency > 100 ? .warning : .info
-            )
-        }
-
-        // Case B: ISP Congestion (Hops 2-3)
-        else if hopNumber <= 3 {
-            let isChinaTelecom = hopName.lowercased().contains("china") ||
-                                hopName.lowercased().contains("telecom") ||
-                                hopName.lowercased().contains("unicom")
-
-            if isChinaTelecom {
-                return IntelligentDiagnosis(
-                    problemType: .ispCongestion,
-                    userFriendlyExplanation: "High latency at hop \(hopNumber) (China Telecom core). Peak-hour congestion.",
-                    technicalExplanation: "Your ISP's network is congested, likely during peak hours (7-10 PM).",
-                    whatUserCanDo: [
-                        "Wait for off-peak hours",
-                        "Contact ISP about congestion",
-                        "Consider switching ISP",
-                        "Use VPN to route around congestion"
-                    ],
-                    severity: .warning
-                )
-            } else {
-                return IntelligentDiagnosis(
-                    problemType: .ispCongestion,
-                    userFriendlyExplanation: "Local ISP issue at hop \(hopNumber). Problem in ISP's network.",
-                    technicalExplanation: "Latency spike within your ISP's network infrastructure.",
-                    whatUserCanDo: [
-                        "Contact your ISP",
-                        "Report slow speeds",
-                        "Request line quality check"
-                    ],
-                    severity: .warning
-                )
-            }
-        }
-
-        // Case C: Great Firewall / International Gateway
-        else if hopNumber >= 4 && (hopName.lowercased().contains("china") ||
-                                    hopName.lowercased().contains("beijing") ||
-                                    hopName.lowercased().contains("shanghai")) {
-            return IntelligentDiagnosis(
-                problemType: .greatFirewall,
-                userFriendlyExplanation: "International gateway shows packet filtering — common during peak hours.",
-                technicalExplanation: "China's international gateway throttles traffic during peak hours and performs deep packet inspection.",
-                whatUserCanDo: [
-                    "Use VPN with obfuscation",
-                    "Try different VPN protocols (WireGuard, Shadowsocks)",
-                    "Avoid peak hours if possible",
-                    "Use domestic services when available"
-                ],
-                severity: .error
-            )
-        }
-
-        // Case D: VPN Exit Node
-        else if hopName.lowercased().contains("vpn") ||
-                hopName.lowercased().contains("ash") ||  // Ashburn
-                hopName.lowercased().contains("singapore") ||
-                hopName.lowercased().contains("london") {
-            return IntelligentDiagnosis(
-                problemType: .vpnSlowExit,
-                userFriendlyExplanation: "Your VPN exit server is overloaded or too far away.",
-                technicalExplanation: "VPN server latency indicates overloaded exit node or suboptimal routing.",
-                whatUserCanDo: [
-                    "Switch to closer VPN server",
-                    "Choose less crowded server",
-                    "Try different VPN protocol",
-                    "Upgrade to premium VPN tier"
-                ],
-                severity: .warning
-            )
-        }
-
-        // Case E: Destination Server
-        else if hopNumber > hops.count - 2 {
-            return IntelligentDiagnosis(
-                problemType: .destinationServer,
-                userFriendlyExplanation: "The destination server (\(hopName)) is slow or overloaded.",
-                technicalExplanation: "High latency at final hops indicates server-side performance issues.",
-                whatUserCanDo: [
-                    "Try different server/region",
-                    "Wait and retry later",
-                    "Check service status page",
-                    "Contact service provider"
-                ],
-                severity: .info
-            )
-        }
-
-        // Default: General backbone congestion
-        else {
-            return IntelligentDiagnosis(
-                problemType: .backboneCongestion,
-                userFriendlyExplanation: "Internet backbone congestion at \(hopName).",
-                technicalExplanation: "Latency spike in internet transit network, likely due to routing issues or congestion.",
-                whatUserCanDo: [
-                    "Use VPN to try different route",
-                    "Wait for congestion to clear",
-                    "Contact service if persistent"
-                ],
-                severity: .warning
-            )
-        }
-    }
-
-    var diagnosis: String {
-        return intelligentDiagnosis.userFriendlyExplanation
-    }
-
-    init(
-        id: UUID = UUID(),
-        timestamp: Date = Date(),
-        destination: String,
-        hops: [TracerouteHop],
-        totalLatency: Double
-    ) {
-        self.id = id
-        self.timestamp = timestamp
-        self.destination = destination
-        self.hops = hops
-        self.totalLatency = totalLatency
-    }
+    let totalLatency: Double?
+    var bottleneckHop: TracerouteHop? { nil }
+    var diagnosis: String { "Independent endpoint responses do not establish the route or locate a bottleneck." }
 }
 
 struct TracerouteHop: Codable, Identifiable {
@@ -332,13 +153,14 @@ struct TracerouteHop: Codable, Identifiable {
     let hopNumber: Int
     let ipAddress: String
     let hostname: String?
-    let latency: Double        // ms
-    let latencyChange: Double  // Change from previous hop
+    let latency: Double?       // ms; absent when no response
+    let latencyChange: Double? // Not meaningful between independent endpoints
     let asn: String?           // Autonomous System Number
     let isp: String?           // ISP name
     let location: String?      // Geographic location
 
     var status: HopStatus {
+        guard let latency else { return .unknown }
         if latency < 10 {
             return .excellent
         } else if latency < 50 {
@@ -357,8 +179,8 @@ struct TracerouteHop: Codable, Identifiable {
         hopNumber: Int,
         ipAddress: String,
         hostname: String? = nil,
-        latency: Double,
-        latencyChange: Double = 0,
+        latency: Double?,
+        latencyChange: Double? = nil,
         asn: String? = nil,
         isp: String? = nil,
         location: String? = nil
@@ -376,6 +198,7 @@ struct TracerouteHop: Codable, Identifiable {
 }
 
 enum HopStatus: String, Codable {
+    case unknown = "Unmeasured"
     case excellent = "Excellent"
     case good = "Good"
     case fair = "Fair"

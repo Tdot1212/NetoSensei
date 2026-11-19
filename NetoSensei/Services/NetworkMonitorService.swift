@@ -99,12 +99,12 @@ class NetworkMonitorService: ObservableObject {
         }
     }
 
-    /// Async alternative: Use NEHotspotNetwork for SSID and signal strength when CNCopy fails
+    /// fetchCurrent populates SSID/BSSID/security type only (Apple documentation).
     nonisolated func getSSIDViaHotspotNetwork() async -> (ssid: String?, signalStrength: Double?) {
         await withCheckedContinuation { continuation in
             if #available(iOS 14.0, *) {
                 NEHotspotNetwork.fetchCurrent { network in
-                    continuation.resume(returning: (network?.ssid, network?.signalStrength))
+                    continuation.resume(returning: (network?.ssid, nil))
                 }
             } else {
                 continuation.resume(returning: (nil, nil))
@@ -243,7 +243,7 @@ class NetworkMonitorService: ObservableObject {
                         publicIP: nil,
                         localIP: self.getLocalIP(),
                         ipv6Address: nil,
-                        isCGNAT: false,
+                        isCGNAT: nil,
                         isProxyDetected: false,
                         isIPv4Enabled: true,
                         isIPv6Enabled: self.currentPath?.supportsIPv6 ?? false,
@@ -297,7 +297,7 @@ class NetworkMonitorService: ObservableObject {
                 publicIP: nil,
                 localIP: localIP,
                 ipv6Address: nil,
-                isCGNAT: false,
+                isCGNAT: nil,
                 isProxyDetected: false,
                 isIPv4Enabled: true,
                 isIPv6Enabled: currentPath?.supportsIPv6 ?? false,
@@ -335,7 +335,7 @@ class NetworkMonitorService: ObservableObject {
         // Method 1: CNCopyCurrentNetworkInfo
         var (ssid, bssid) = getWiFiInfoSafely()
 
-        // Always call NEHotspotNetwork to get signal strength (and SSID as fallback)
+        // Fetch the current SSID as fallback; this API does not populate signal strength.
         let hotspotResult = await getSSIDViaHotspotNetwork()
         let signalStrength = hotspotResult.signalStrength
 
@@ -368,6 +368,8 @@ class NetworkMonitorService: ObservableObject {
         // Record signal strength sample for tracking
         if let strength = signalStrength {
             await SignalStrengthTracker.shared.recordSample(strength: strength, ssid: ssid)
+        } else {
+            await SignalStrengthTracker.shared.clearCurrent()
         }
 
         return WiFiInfo(
@@ -446,8 +448,8 @@ class NetworkMonitorService: ObservableObject {
         // FIXED: Measure 5 times, take median, discard outliers (>3x median).
         // Gateway latency is measured with the SAME network-layer TCP-handshake
         // probe as the internet latency (NetworkLatencyProbe) — a non-blocking
-        // poll()-bounded BSD connect. allowUDPFallback covers gateways that
-        // expose no open TCP port. Returns seconds; convert to ms.
+        // poll()-bounded BSD connect. A gateway with no responding TCP port
+        // has unknown latency. UDP connect alone proves no response.
         var latencies: [Double] = []
         var successCount = 0
         let pingCount = 5
@@ -456,7 +458,7 @@ class NetworkMonitorService: ObservableObject {
             if let rttSeconds = await NetworkLatencyProbe.shared.measureHandshake(
                 host: gateway,
                 ports: [80, 443, 53],
-                allowUDPFallback: true,
+                allowUDPFallback: false,
                 timeout: 1.0
             ) {
                 latencies.append(rttSeconds * 1000.0)
@@ -470,11 +472,13 @@ class NetworkMonitorService: ObservableObject {
 
         // Sort and take median
         latencies.sort()
-        let median = latencies[latencies.count / 2]
+        guard let median = MeasurementStatistics.median(latencies) else {
+            return RouterInfo(gatewayIP: gateway, isReachable: true)
+        }
 
         // Discard outliers (>3x median) and recalculate
         let filtered = latencies.filter { $0 <= median * 3.0 }
-        let finalLatency = filtered.isEmpty ? median : filtered[filtered.count / 2]
+        let finalLatency = MeasurementStatistics.median(filtered) ?? median
 
         // Compute jitter from filtered samples
         var jitter: Double? = nil
@@ -491,7 +495,7 @@ class NetworkMonitorService: ObservableObject {
             gatewayIP: gateway,
             isReachable: true,
             latency: finalLatency,
-            packetLoss: Double(pingCount - successCount) / Double(pingCount) * 100.0,
+            packetLoss: nil, // TCP probe failure is not IP packet loss.
             jitter: jitter,
             adminURL: adminURL
         )
@@ -543,43 +547,7 @@ class NetworkMonitorService: ObservableObject {
     // MARK: - Detailed Router Measurement (for snapshots)
 
     nonisolated func measureRouterDetailed() async -> RouterInfo {
-        let gatewayIP = estimateGateway()
-
-        guard let gateway = gatewayIP else {
-            return RouterInfo(gatewayIP: nil, isReachable: false)
-        }
-
-        // Perform multiple pings to measure jitter and packet loss
-        let pingCount = 10
-        var latencies: [Double] = []
-        var successfulPings = 0
-
-        for _ in 0..<pingCount {
-            let (reachable, latency) = await safePing(host: gateway, timeout: 0.5)
-            if reachable, let lat = latency {
-                latencies.append(lat)
-                successfulPings += 1
-            }
-        }
-
-        // Calculate statistics
-        let avgLatency: Double? = latencies.isEmpty ? nil : latencies.reduce(0, +) / Double(latencies.count)
-        let packetLoss: Double? = Double(pingCount - successfulPings) / Double(pingCount) * 100.0
-
-        // Calculate jitter (standard deviation of latency)
-        var jitter: Double? = nil
-        if latencies.count >= 2, let avg = avgLatency {
-            let variance = latencies.map { pow($0 - avg, 2) }.reduce(0, +) / Double(latencies.count)
-            jitter = sqrt(variance)
-        }
-
-        return RouterInfo(
-            gatewayIP: gateway,
-            isReachable: successfulPings > 0,
-            latency: avgLatency,
-            packetLoss: packetLoss,
-            jitter: jitter
-        )
+        await getRouter() // Same successful TCP timing; no probe-failure ratio labelled packet loss.
     }
 
     // MARK: - Internet Check (iOS-safe, China-aware)
@@ -703,7 +671,7 @@ class NetworkMonitorService: ObservableObject {
         }
         guard !samples.isEmpty else { return nil }
         samples.sort()
-        return samples[samples.count / 2]
+        return MeasurementStatistics.median(samples)
     }
 
     // MARK: - DNS Check (iOS-safe)
@@ -720,9 +688,9 @@ class NetworkMonitorService: ObservableObject {
 
         return DNSInfo(
             resolverIP: nil,
-            latency: latency,
+            latency: success ? latency : nil,
             lookupSuccess: success,
-            recommendedDNS: latency > 150 ? "1.1.1.1" : nil
+            recommendedDNS: success && latency > 150 ? "1.1.1.1" : nil
         )
     }
 
@@ -833,77 +801,10 @@ class NetworkMonitorService: ObservableObject {
     /// FIXED: Ping local gateway using TCP connect to measure ACTUAL local network latency
     /// This replaces the old approach that was hitting apple.com for gateway pings
     nonisolated private func performLocalPing(host: String) async -> (Bool, Double?) {
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let start = Date()
-
-                // Try TCP connect to common gateway ports: 80, 443, 53
-                let ports: [UInt16] = [80, 443, 53]
-
-                for port in ports {
-                    let socketFD = socket(AF_INET, SOCK_STREAM, 0)
-                    guard socketFD >= 0 else { continue }
-
-                    // Set non-blocking with short timeout
-                    var tv = timeval(tv_sec: 1, tv_usec: 0)
-                    setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-                    setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-                    var addr = sockaddr_in()
-                    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-                    addr.sin_family = sa_family_t(AF_INET)
-                    addr.sin_port = port.bigEndian
-                    inet_pton(AF_INET, host, &addr.sin_addr)
-
-                    let connectResult = withUnsafePointer(to: &addr) {
-                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                            Darwin.connect(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                        }
-                    }
-
-                    close(socketFD)
-
-                    if connectResult == 0 || errno == EISCONN {
-                        let latency = Date().timeIntervalSince(start) * 1000
-                        continuation.resume(returning: (true, latency))
-                        return
-                    }
-                }
-
-                // All ports failed, try ICMP-like approach with UDP
-                let socketFD = socket(AF_INET, SOCK_DGRAM, 0)
-                guard socketFD >= 0 else {
-                    continuation.resume(returning: (false, nil))
-                    return
-                }
-
-                var tv = timeval(tv_sec: 1, tv_usec: 0)
-                setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-                var addr = sockaddr_in()
-                addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-                addr.sin_family = sa_family_t(AF_INET)
-                addr.sin_port = UInt16(7).bigEndian  // echo port
-                inet_pton(AF_INET, host, &addr.sin_addr)
-
-                let connectResult = withUnsafePointer(to: &addr) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                        Darwin.connect(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                    }
-                }
-
-                close(socketFD)
-
-                let latency = Date().timeIntervalSince(start) * 1000
-
-                // UDP connect to gateway usually succeeds even without a response
-                if connectResult == 0 {
-                    continuation.resume(returning: (true, latency))
-                } else {
-                    continuation.resume(returning: (false, nil))
-                }
-            }
-        }
+        let seconds = await NetworkLatencyProbe.shared.measureHandshake(
+            host: host, ports: [80, 443, 53], allowUDPFallback: false, timeout: 1.0
+        )
+        return (seconds != nil, seconds.map { $0 * 1000 })
     }
 
     nonisolated private func safeHTTPCheck(url: String, timeout: TimeInterval) async -> Bool {
@@ -930,42 +831,7 @@ class NetworkMonitorService: ObservableObject {
     }
 
     nonisolated private func safeDNSLookup(hostname: String, timeout: TimeInterval) async -> Bool {
-        do {
-            return try await withThrowingTaskGroup(of: Bool.self) { group in
-                group.addTask {
-                    await withCheckedContinuation { continuation in
-                        var hints = addrinfo(
-                            ai_flags: AI_DEFAULT,
-                            ai_family: AF_UNSPEC,
-                            ai_socktype: SOCK_STREAM,
-                            ai_protocol: 0,
-                            ai_addrlen: 0,
-                            ai_canonname: nil,
-                            ai_addr: nil,
-                            ai_next: nil
-                        )
-
-                        var result: UnsafeMutablePointer<addrinfo>?
-                        let status = getaddrinfo(hostname, nil, &hints, &result)
-                        if result != nil {
-                            freeaddrinfo(result)
-                        }
-                        continuation.resume(returning: status == 0)
-                    }
-                }
-
-                group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    return false
-                }
-
-                let result = try await group.next() ?? false
-                group.cancelAll()
-                return result
-            }
-        } catch {
-            return false
-        }
+        await SystemDNSResolver.resolve(hostname, timeout: timeout) != nil
     }
 
     // MARK: - Local Info Helpers
@@ -1018,35 +884,11 @@ class NetworkMonitorService: ObservableObject {
         if let route = DefaultRouteResolver.lanGateway() {
             return GatewayAddress(ip: route.gateway, isAssumed: false)
         }
-        if let guess = heuristicGateway() {
-            return GatewayAddress(ip: guess, isAssumed: true)
-        }
         return nil
     }
 
     nonisolated private func estimateGateway() -> String? {
         detectedGateway()?.ip
-    }
-
-    /// Legacy inference from the local IP. Only the 192.168.x.1 rule is a
-    /// reasonable assumption; the 10.x and 172.x rules are literal guesses.
-    /// Kept solely as a labelled fallback for DefaultRouteResolver.
-    nonisolated private func heuristicGateway() -> String? {
-        guard let localIP = getLocalIP() else { return nil }
-
-        if localIP.hasPrefix("192.168.") {
-            let parts = localIP.split(separator: ".")
-            guard parts.count == 4 else { return nil }
-            return "192.168.\(parts[2]).1"
-        } else if localIP.hasPrefix("10.") {
-            return "10.0.0.1"
-        } else if localIP.hasPrefix("172.") {
-            let parts = localIP.split(separator: ".")
-            guard parts.count >= 2 else { return nil }
-            return "172.\(parts[1]).0.1"
-        }
-
-        return nil
     }
 
     // MARK: - Path identity (Commit 10)

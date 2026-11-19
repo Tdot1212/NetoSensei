@@ -43,6 +43,7 @@ struct ConnectionCapability {
 }
 
 enum ActivityRating {
+    case unknown    // Measurements needed for this activity are unavailable.
     case excellent  // ✓ green - works flawlessly
     case good       // ✓ green - works well
     case degraded   // ⚠️ yellow - works with limitations
@@ -56,6 +57,7 @@ enum ActivityRating {
 
     var emoji: String {
         switch self {
+        case .unknown: return "?"
         case .excellent: return "✓"
         case .good: return "✓"
         case .degraded: return "⚠️"
@@ -68,6 +70,7 @@ enum ActivityRating {
     /// icon row collapsed everything to red regardless of nuance.
     var sfSymbol: String {
         switch self {
+        case .unknown: return "questionmark.circle"
         case .excellent, .good: return "checkmark.circle.fill"
         case .degraded: return "exclamationmark.triangle.fill"
         case .poor: return "xmark.circle.fill"
@@ -173,17 +176,22 @@ enum ConnectionCapabilityAnalyzer {
     }
 
     /// Convenience: analyze from a SpeedTestResult.
-    /// Phase 3: ping/jitter/loss are optional. This analyzer already documents a
-    /// bandwidth-first fallback, so an unmeasurable latency/jitter/loss maps to 0
-    /// (no penalty) — the judgment then rests on throughput, never on a fabricated
-    /// number.
+    /// Missing real-time metrics yield an unknown rating for real-time uses.
+    /// Buffered streaming remains an estimate based on observed throughput.
     static func analyze(from result: SpeedTestResult) -> ConnectionCapability {
-        analyze(
+        var capability = analyze(
             downloadMbps: result.downloadSpeed,
             uploadMbps: result.uploadSpeed,
             pingMs: result.ping ?? 0,
             jitterMs: result.jitter ?? 0,
             packetLossPercent: result.packetLoss ?? 0
         )
+        if result.ping == nil || result.jitter == nil || result.packetLoss == nil {
+            capability.gaming = .unknown
+            capability.videoCalls = .unknown
+        }
+        if result.measuredUploadSpeed == nil { capability.videoCalls = .unknown }
+        if result.ping == nil { capability.web = .unknown }
+        return capability
     }
 }

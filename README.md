@@ -1,342 +1,86 @@
-# NetSense - Intelligent Network Diagnostic App for iOS
+# NetoSensei
 
-Version: 1.0 (MVP)
+An iOS Wi-Fi and network diagnostic app. Current local development build: **1.0 (25)**.
 
-## Overview
+NetoSensei reports observed measurements, unavailable checks and interpretations
+separately. A speed test measures application throughput through the current
+internet/VPN path; it does not measure Wi-Fi PHY link rate or prove an ISP fault.
 
-NetSense is an intelligent network diagnostic assistant for iOS that identifies the exact cause of slow internet, buffering, or failed connections. The app pinpoints issues caused by Wi-Fi, Router, ISP, VPN, DNS, streaming providers, and CDN routing.
+## Current tools
 
-## Features
+- Connection, gateway TCP response, DNS lookup and internet response monitoring.
+- Download/upload speed tests against qualified endpoints, with absent metrics
+  represented as unavailable rather than failure sentinels.
+- Wi-Fi Assistant: partial device discovery, session-only recognition, and three
+  before/three after throughput and idle-delay comparisons under compatible conditions.
+  The repair guide covers lag, downloads, and identifying unfamiliar devices.
+  Device names include reported hostnames and service names where available.
+- Detailed Checks routes to the same performance, security, DNS and endpoint tools
+  used elsewhere, rather than a separate duplicate diagnostic engine.
+- Endpoint Checks compares independent responses. It is not an IP-hop traceroute.
+- TLS/certificate inspection, DNS benchmarks, local port inspection and history.
+- The Wi-Fi Assistant can use DeepSeek to prioritize an existing repair step from
+  the selected concern and a limited set of measurements. It sends only when
+  requested, uses the app’s Keychain credential, and omits network names, device
+  names and addresses. The repair guide is available without a key.
+- The separate AI chat can discuss diagnostic snapshots and has no router controls.
 
-### ✅ Implemented (MVP)
+## Limits that affect interpretation
 
-1. **Real-Time Network Dashboard**
-   - Wi-Fi status with signal strength (RSSI)
-   - Router reachability and latency
-   - Internet connectivity status
-   - DNS performance monitoring
-   - VPN status and health
-   - Traffic-light indicators (Green/Yellow/Red)
+Public iOS APIs do not provide general nearby Wi-Fi scanning or other-app traffic
+inspection. Current-network Wi-Fi information is entitlement/permission dependent;
+`NEHotspotNetwork.fetchCurrent` does not populate signal strength.
 
-2. **Intelligent Diagnostic Engine**
-   - Comprehensive connectivity tests
-   - VPN health checks
-   - Network congestion detection
-   - Root cause analysis with decision tree logic
-   - Human-friendly explanations
+Local discovery is partial and cannot prove device ownership. A responding IP or
+advertised name is not an authenticated device identity. The app has no supported
+router administration adapters and cannot automatically block devices or change
+router settings. Wi-Fi credentials may differ from administrator credentials.
 
-3. **Streaming Diagnostic Mode**
-   - Platform-specific tests (Netflix, YouTube, TikTok, etc.)
-   - CDN latency and throughput testing
-   - VPN impact analysis
-   - ISP congestion detection
-   - Video quality estimation
+TCP/HTTP attempt failure is not IP packet loss. DNS/VPN/browser leak protection
+remains unverified when the app lacks the necessary route or browser evidence.
+Ratings and estimated video quality are interpretations, not physical measurements.
+No speed improvement or universal router compatibility is guaranteed.
 
-4. **One-Tap Fix System**
-   - Automated problem detection
-   - Single recommended action
-   - Quick-fix buttons for common issues
-   - System settings integration
+Legacy diagnostic implementations are preserved in `ArchivedDiagnostics/`, outside
+the Xcode app target. They must not be restored without accuracy review and tests.
 
-5. **VPN Auto-Recovery Engine**
-   - Tunnel health monitoring
-   - Packet loss detection
-   - Latency monitoring
-   - Auto-reconnection (when permissions allow)
-   - Manual recovery guidance
+## Run on an iPhone without publishing
 
-6. **Speed Test**
-   - Download/Upload speed measurement
-   - Ping, jitter, and packet loss testing
-   - Video quality recommendations
-   - Historical tracking
+Open `NetoSensei.xcodeproj` in Xcode, select the NetoSensei scheme and your paired,
+unlocked iPhone, then Product > Run. USB or Xcode wireless pairing both work.
+Developer Mode must be enabled on the phone. Existing automatic signing is used.
 
-7. **IP Geolocation**
-   - Public IP display
-   - Location detection
-   - ISP information
-   - ASN lookup
-   - Security flags (Proxy/VPN/CGNAT detection)
+For a repeatable local build/install/launch:
 
-8. **History & Analytics**
-   - Speed test history
-   - Diagnostic results logging
-   - Export functionality (CSV)
-   - Statistics and trends
-
-## Project Structure
-
-```
-NetoSensei/
-├── Models/
-│   ├── NetworkStatus.swift
-│   ├── DiagnosticResult.swift
-│   ├── StreamingDiagnosticResult.swift
-│   ├── SpeedTestResult.swift
-│   └── GeoIPInfo.swift
-│
-├── Services/
-│   ├── NetworkMonitorService.swift
-│   ├── DiagnosticEngine.swift
-│   ├── StreamingDiagnosticService.swift
-│   ├── VPNEngine.swift
-│   ├── SpeedTestEngine.swift
-│   ├── GeoIPService.swift
-│   └── HistoryManager.swift
-│
-├── Views/
-│   ├── DashboardView.swift
-│   ├── DiagnosticView.swift
-│   ├── StreamingDiagnosticView.swift
-│   ├── SpeedTestView.swift
-│   └── IPInfoView.swift
-│
-├── NetoSenseiApp.swift
-└── ContentView.swift
+```sh
+./scripts/install-latest-iphone.sh
 ```
 
-## Requirements
+Pass a device identifier as the first argument when multiple phones are connected.
+The script builds current local source and installs a development app. It does not
+archive, upload to App Store Connect, or publish an App Store release.
 
-- **Platform**: iOS 17.0+ / iPadOS 17.0+
-- **Language**: Swift 5.0+
-- **Framework**: SwiftUI
-- **Xcode**: 15.0+
+## Verification
 
-### System Frameworks
-
-- Network Framework
-- URLSession
-- Combine
-- NetworkExtension (for VPN management)
-- SystemConfiguration
-- CoreLocation (optional, for Wi-Fi SSID)
-
-## Setup Instructions
-
-### 1. Xcode Configuration
-
-1. Open `NetoSensei.xcodeproj` in Xcode
-2. Select the NetoSensei target
-3. Go to "Signing & Capabilities"
-
-### 2. Required Capabilities
-
-Add the following capabilities:
-
-#### Access WiFi Information
-- Required to read Wi-Fi SSID and network info
-- Go to Signing & Capabilities → + Capability → "Access WiFi Information"
-
-#### Network Extensions (Optional)
-- Only needed if you want full VPN control
-- Requires Apple Developer Program membership
-- Add: "Network Extensions" capability
-- Note: This requires approval from Apple
-
-#### Background Modes (Optional)
-- For continuous network monitoring
-- Enable "Background fetch" and "Background processing"
-
-### 3. Info.plist Configuration
-
-The following keys are already included in `Info.plist`:
-
-```xml
-<key>NSLocalNetworkUsageDescription</key>
-<string>NetSense needs access to your local network to diagnose Wi-Fi and router connectivity issues.</string>
-
-<key>NSLocationWhenInUseUsageDescription</key>
-<string>NetSense needs location access to identify your Wi-Fi network name (SSID) for diagnostic purposes.</string>
+```sh
+xcodebuild -project NetoSensei.xcodeproj -scheme NetoSensei \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -enableCodeCoverage YES -resultBundlePath build/Verification.xcresult test
 ```
 
-**Important**: For production, replace `NSAllowsArbitraryLoads` with specific domain exceptions for speed test servers.
+Unit tests include controlled URLProtocol transports and clocks for known byte/
+second calculations. These fixtures run only through explicitly injected test
+instances; the shared app instance uses real system services and URLSession.
+Fixtures do not establish physical network accuracy.
 
-### 4. Entitlements
+Export per-function execution evidence with:
 
-The app requires the following entitlements:
-
-#### com.apple.developer.networking.wifi-info
-- Allows reading Wi-Fi information (SSID, BSSID)
-- Automatically added when you enable "Access WiFi Information" capability
-
-#### com.apple.developer.networking.networkextension (Optional)
-- Required for VPN control features
-- Requires approval from Apple
-- Submit request at: https://developer.apple.com/contact/request/networking-entitlement/
-
-## Building the App
-
-### Debug Build
-
-```bash
-cd /Users/toshyagishita/Desktop/NetoSensei
-xcodebuild -scheme NetoSensei -configuration Debug
+```sh
+xcrun xccov view --report --json build/Verification.xcresult > build/coverage.json
+python3 scripts/report-function-coverage.py build/coverage.json build/coverage-report
 ```
 
-### Run on Simulator
-
-```bash
-xcodebuild -scheme NetoSensei -destination 'platform=iOS Simulator,name=iPhone 15' test
-```
-
-### Run on Device
-
-1. Connect your iOS device
-2. Select your device in Xcode
-3. Click Run (⌘R)
-
-**Note**: Real device testing is recommended for accurate Wi-Fi and network measurements.
-
-## Known Limitations
-
-### iOS Restrictions
-
-1. **Wi-Fi RSSI**: iOS restricts direct access to Wi-Fi signal strength. The app provides estimates.
-   - **Workaround**: Use NEHotspotNetwork API with proper entitlements
-   - Requires location permission
-
-2. **VPN Control**: Cannot programmatically control VPN without specific entitlements
-   - App provides guidance for manual fixes
-   - Full control requires Network Extension entitlement + Apple approval
-
-3. **DNS Modification**: Cannot change system DNS settings programmatically
-   - App guides user to System Settings
-
-4. **Router Control**: Cannot restart router remotely
-   - App provides instructions for manual restart
-
-5. **Device Count on Network**: Cannot accurately count devices on Wi-Fi
-   - App provides estimates based on network behavior
-
-### API Limitations
-
-1. **GeoIP Services**: Using free APIs with rate limits
-   - Consider implementing caching
-   - For production, use paid APIs (ipapi.com, ipinfo.io)
-
-2. **Speed Test**: Simplified implementation
-   - For production, integrate with Ookla, Fast.com, or similar services
-
-3. **CDN Testing**: Basic ping-based testing
-   - Full CDN routing analysis requires partnerships with streaming providers
-
-## Testing Checklist
-
-- [ ] Dashboard displays real-time network status
-- [ ] Wi-Fi signal indicator updates
-- [ ] Router ping test works
-- [ ] Internet connectivity detection accurate
-- [ ] DNS latency measurement functional
-- [ ] VPN status detection works
-- [ ] Diagnostic engine identifies issues correctly
-- [ ] One-Tap Fix buttons navigate to correct settings
-- [ ] Streaming diagnostic tests CDN endpoints
-- [ ] Speed test measures download/upload accurately
-- [ ] IP geolocation displays correct information
-- [ ] History logging persists between app launches
-- [ ] All permissions requested appropriately
-
-## Production Considerations
-
-### Before App Store Release
-
-1. **Privacy Policy**: Create comprehensive privacy policy
-   - Explain network data collection
-   - Clarify IP geolocation usage
-   - Detail data retention policies
-
-2. **API Keys**: Secure API keys for GeoIP services
-   - Use environment variables
-   - Implement API key rotation
-
-3. **Rate Limiting**: Implement rate limiting for:
-   - GeoIP lookups
-   - Speed tests
-   - Diagnostic runs
-
-4. **Error Handling**: Add comprehensive error handling
-   - Network timeouts
-   - API failures
-   - Permission denials
-
-5. **Analytics**: Add analytics for:
-   - Feature usage
-   - Common issues detected
-   - Fix success rates
-
-6. **Localization**: Support multiple languages
-   - UI text
-   - Error messages
-   - Diagnostic explanations
-
-7. **Accessibility**: Ensure VoiceOver support
-   - Label all UI elements
-   - Provide haptic feedback
-   - Support Dynamic Type
-
-### Monetization (Optional)
-
-**Free Tier**:
-- Basic diagnostic
-- Speed test (3 per day)
-- Dashboard monitoring
-
-**Pro Tier** ($4.99/month or $29.99/year):
-- Unlimited speed tests
-- Streaming diagnostics
-- VPN auto-recovery
-- Advanced analytics
-- History export
-- Priority support
-
-## Troubleshooting
-
-### Build Errors
-
-**Error**: "Wi-Fi information entitlement required"
-- **Solution**: Add "Access WiFi Information" capability in Xcode
-
-**Error**: "Network Extension entitlement missing"
-- **Solution**: This is optional. Remove VPN control features or apply for entitlement from Apple
-
-**Error**: "Location permission not granted"
-- **Solution**: Request permission in app, or remove Wi-Fi SSID features
-
-### Runtime Issues
-
-**Issue**: Wi-Fi SSID shows "Not connected" even when connected
-- **Cause**: Missing location permission or entitlement
-- **Solution**: Grant location permission and ensure "Access WiFi Information" capability is enabled
-
-**Issue**: Speed test shows 0 Mbps
-- **Cause**: Network security or firewall blocking test servers
-- **Solution**: Check App Transport Security settings in Info.plist
-
-**Issue**: GeoIP shows "0.0.0.0"
-- **Cause**: API rate limit or network issue
-- **Solution**: Implement caching and retry logic
-
-## Support
-
-For issues or questions:
-- Open an issue on GitHub
-- Email: support@netsense.app (placeholder)
-
-## License
-
-Copyright © 2025 NetSense. All rights reserved.
-
-## Credits
-
-- **Developer**: T Dot
-- **Framework**: SwiftUI
-- **APIs Used**:
-  - ipapi.co (GeoIP)
-  - ip-api.com (GeoIP fallback)
-  - ipinfo.io (GeoIP fallback)
-  - Cloudflare (Speed test)
-
----
-
-**Version**: 1.0 MVP
-**Last Updated**: December 15, 2025
+Coverage includes synthesized functions, accessors and closures. Executing a
+function does not prove all branches or hardware/network conditions are correct.
+See `docs/MEASUREMENT_REVIEW_2026_11_19.md` for the current validation evidence and
+remaining gaps. Real RF/bandwidth accuracy requires controlled network references.

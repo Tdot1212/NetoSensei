@@ -13,8 +13,17 @@ actor HistoryStorageService {
     static let shared = HistoryStorageService()
 
     private let maxEntries = 1000
+    private let storageURL: URL?
+    private let defaults: UserDefaults
+    private var latestRevision = -1
+
+    init(fileURL: URL? = nil, userDefaults: UserDefaults = .standard) {
+        storageURL = fileURL
+        defaults = userDefaults
+    }
 
     private var fileURL: URL {
+        if let storageURL { return storageURL }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("network_history_v3.json")
     }
@@ -40,7 +49,11 @@ actor HistoryStorageService {
             return entries
         }
 
-        // Fall back to UserDefaults v2 migration
+        // Preserve unreadable data before a later save could replace it.
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            let backup = fileURL.deletingLastPathComponent().appendingPathComponent("history-corrupt-\(UUID().uuidString).json")
+            try? FileManager.default.copyItem(at: fileURL, to: backup)
+        }
         return await migrateFromUserDefaults()
     }
 
@@ -51,27 +64,23 @@ actor HistoryStorageService {
 
     // MARK: - Save (atomic write to prevent corruption)
 
-    func save(_ entries: [NetworkHistoryEntry]) async {
+    @discardableResult
+    func save(_ entries: [NetworkHistoryEntry], revision: Int? = nil) async -> Bool {
+        if let revision {
+            guard revision > latestRevision else { return false }
+            latestRevision = revision
+        }
         // Trim to max entries, keeping bookmarked entries and newest entries
         let trimmed = trimEntries(entries, maxCount: maxEntries)
 
         do {
             let data = try encoder.encode(trimmed)
 
-            // Write to temp file first, then atomically move
-            let tempURL = fileURL.deletingLastPathComponent()
-                .appendingPathComponent("history_temp_\(UUID().uuidString).json")
-
-            try data.write(to: tempURL, options: .atomic)
-
-            // Atomic rename/replace
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tempURL)
-            } else {
-                try FileManager.default.moveItem(at: tempURL, to: fileURL)
-            }
+            try data.write(to: fileURL, options: .atomic)
+            return true
         } catch {
             debugLog("HistoryStorageService: save failed - \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -95,7 +104,7 @@ actor HistoryStorageService {
     private func migrateFromUserDefaults() async -> [NetworkHistoryEntry] {
         let legacyKey = "network_history_v2"
 
-        guard let data = UserDefaults.standard.data(forKey: legacyKey) else {
+        guard let data = defaults.data(forKey: legacyKey) else {
             return []
         }
 
@@ -107,10 +116,9 @@ actor HistoryStorageService {
             debugLog("HistoryStorageService: migrating \(entries.count) entries from UserDefaults")
 
             // Save to new file format
-            await save(entries)
-
-            // Clean up legacy storage
-            UserDefaults.standard.removeObject(forKey: legacyKey)
+            if await save(entries) {
+                defaults.removeObject(forKey: legacyKey)
+            }
 
             return entries
         } catch {
@@ -132,12 +140,12 @@ actor HistoryStorageService {
         for entry in entries {
             let fields: [String] = [
                 dateFormatter.string(from: entry.timestamp),
-                "\(entry.healthScore)",
+                entry.healthScore.map(String.init) ?? "",
                 entry.downloadSpeed.map { String(format: "%.2f", $0) } ?? "",
                 entry.uploadSpeed.map { String(format: "%.2f", $0) } ?? "",
                 entry.latency.map { String(format: "%.0f", $0) } ?? "",
-                String(format: "%.0f", entry.gatewayLatency),
-                String(format: "%.0f", entry.dnsLatency),
+                entry.gatewayLatency.map { String(format: "%.0f", $0) } ?? "",
+                entry.dnsLatency.map { String(format: "%.0f", $0) } ?? "",
                 entry.jitter.map { String(format: "%.1f", $0) } ?? "",
                 entry.packetLoss.map { String(format: "%.1f", $0) } ?? "",
                 entry.vpnActive ? "Yes" : "No",
@@ -167,6 +175,6 @@ actor HistoryStorageService {
 
     func deleteAll() async {
         try? FileManager.default.removeItem(at: fileURL)
-        UserDefaults.standard.removeObject(forKey: "network_history_v2")
+        defaults.removeObject(forKey: "network_history_v2")
     }
 }

@@ -23,7 +23,7 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .openai: return "https://api.openai.com/v1/chat/completions"
         case .claude: return "https://api.anthropic.com/v1/messages"
-        case .deepseek: return "https://api.deepseek.com/v1/chat/completions"
+        case .deepseek: return "https://api.deepseek.com/chat/completions"
         case .gemini: return "https://generativelanguage.googleapis.com/v1beta/models"
         case .groq: return "https://api.groq.com/openai/v1/chat/completions"
         }
@@ -33,7 +33,7 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .openai: return "gpt-4o"
         case .claude: return "claude-sonnet-4-20250514"
-        case .deepseek: return "deepseek-chat"
+        case .deepseek: return "deepseek-flash"
         case .gemini: return "gemini-2.0-flash"
         case .groq: return "llama-3.1-70b-versatile"
         }
@@ -58,7 +58,7 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
         case .claude:
             return ["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"]
         case .deepseek:
-            return ["deepseek-chat", "deepseek-coder"]
+            return ["deepseek-flash", "deepseek-v4-pro"]
         case .gemini:
             return ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
         case .groq:
@@ -222,7 +222,8 @@ class AIKeyManager: ObservableObject {
 
     var selectedModel: String {
         get {
-            if let model = UserDefaults.standard.string(forKey: selectedModelKey) {
+            if let model = UserDefaults.standard.string(forKey: selectedModelKey),
+               defaultProvider != .deepseek || defaultProvider.availableModels.contains(model) {
                 return model
             }
             return defaultProvider.defaultModel

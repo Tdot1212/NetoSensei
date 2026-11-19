@@ -10,6 +10,7 @@ import Network
 
 actor DiagnosticsEngine {
     static let shared = DiagnosticsEngine()
+    typealias ProgressCallback = (Double, String) -> Void
 
     private init() {}
 
@@ -36,57 +37,6 @@ actor DiagnosticsEngine {
             return result
         }
     }
-
-    // MARK: - Helper: Detect VPN
-
-    // FIXED: Use SmartVPNDetector as primary VPN detection source
-    // This works with ALL VPN types including Shadowsocks, V2Ray, Clash, Surge, etc.
-    private func detectVPNActive() async -> Bool {
-        // Use SmartVPNDetector for consistent VPN detection across the app
-        let detector = await SmartVPNDetector.shared
-        let result = await detector.detectVPN()
-        return result.isVPNActive
-    }
-
-    // MARK: - Helper: Measure Latency to Specific Host
-
-    // DISABLED: NWConnection spam was freezing the app
-    // Using URLSession-based alternative instead
-    private func measureLatency(to host: String, samples: Int = 3) async -> Double {
-        var total: Double = 0
-        var successCount = 0
-
-        for _ in 0..<samples {
-            let startTime = Date()
-            let success = await pingHost(host)
-            if success {
-                total += Date().timeIntervalSince(startTime) * 1000  // ms
-                successCount += 1
-            }
-        }
-
-        return successCount > 0 ? (total / Double(successCount)) : 999.0
-    }
-
-    // FIXED: Use URLSession instead of NWConnection to prevent app freeze
-    private func pingHost(_ host: String) async -> Bool {
-        guard let url = URL(string: "https://\(host)") else { return false }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 2.0
-
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode != nil
-        } catch {
-            return false
-        }
-    }
-
-    // MARK: - Progress Tracking
-
-    typealias ProgressCallback = (Double, String) -> Void
 
     // MARK: - Run Advanced Diagnostics
 
@@ -172,28 +122,22 @@ actor DiagnosticsEngine {
 
         // 4. Performance Tests (85%) - 5s timeout
         onProgress?(0.85, "Measuring network performance...")
-        let performanceResult = await withHardTimeout(
-            seconds: 5,
-            fallback: Result<PerformanceMetrics, DiagnosticError>.failure(.timeout)
-        ) {
-            await PerformanceEngine.shared.runPerformanceTest(host: targetHost)
-        }
+        let performanceResult = await PerformanceEngine.shared.runPerformanceTest(host: targetHost)
         switch performanceResult {
         case .success(let metrics):
             performanceMetrics = metrics
-            records.append(.ran(.performance, metrics.throughput, unit: "Mbps"))
+            if let throughput = metrics.throughput {
+                records.append(.ran(.performance, throughput, unit: "Mbps"))
+            } else {
+                records.append(.failed(.performance, .error("No throughput measurement")))
+            }
         case .failure(let e):
             records.append(.failed(.performance, Self.reason(for: e)))
         }
 
         // 5. Intelligent Diagnosis (95%)
         onProgress?(0.95, "Analyzing symptoms...")
-        let networkDiagnosis = await generateIntelligentDiagnosis(
-            dnsHijackResults: dnsHijackResults,
-            vpnLeakResult: vpnLeakResult,
-            performanceMetrics: performanceMetrics,
-            targetHost: targetHost
-        )
+        let networkDiagnosis: NetworkDiagnosisResult? = nil // Replaced by the shared coverage-aware verdict pipeline.
 
         // Complete (100%)
         onProgress?(1.0, "Diagnostics complete")
@@ -229,57 +173,6 @@ actor DiagnosticsEngine {
     }
 
     // MARK: - Intelligent Diagnosis
-
-    private func generateIntelligentDiagnosis(
-        dnsHijackResults: [DNSHijackResult],
-        vpnLeakResult: VPNLeakResult?,
-        performanceMetrics: PerformanceMetrics?,
-        targetHost: String
-    ) async -> NetworkDiagnosisResult? {
-
-        // Detect VPN status
-        let vpnActive = await detectVPNActive()
-
-        // Get public IP
-        let publicIP = vpnLeakResult?.vpnIP ?? "Unknown"
-
-        // Measure local latency (regional server)
-        let localHost = "cloudflare.com"  // Global CDN, should be fast
-        let localLatency = await measureLatency(to: localHost, samples: 2)
-
-        // Measure foreign latency (international server)
-        let foreignHost = targetHost
-        let foreignLatency = await measureLatency(to: foreignHost, samples: 2)
-
-        // Get performance metrics
-        guard let metrics = performanceMetrics else {
-            return nil
-        }
-
-        // Detect DNS hijacking
-        let dnsHijackDetected = dnsHijackResults.contains(where: { $0.hijacked })
-
-        // Detect VPN leak
-        let vpnLeakDetected = vpnLeakResult?.leaked ?? false
-
-        // Call diagnostic logic engine
-        let diagnosis = await DiagnosticLogicEngine.shared.diagnose(
-            vpnActive: vpnActive,
-            publicIP: publicIP,
-            localLatency: localLatency,
-            foreignLatency: foreignLatency,
-            packetLoss: metrics.packetLoss,
-            jitter: metrics.jitter,
-            downloadSpeed: metrics.throughput,
-            uploadSpeed: nil,
-            dnsHijackDetected: dnsHijackDetected,
-            vpnLeakDetected: vpnLeakDetected
-        )
-
-        return diagnosis
-    }
-
-    // MARK: - Run Security-Only Scan
 
     func runSecurityScan(onProgress: ProgressCallback? = nil) async -> AdvancedDiagnosticSummary {
 
@@ -353,12 +246,7 @@ actor DiagnosticsEngine {
 
         // 3. Intelligent Diagnosis
         onProgress?(0.95, "Analyzing symptoms...")
-        let networkDiagnosis = await generateIntelligentDiagnosis(
-            dnsHijackResults: [],
-            vpnLeakResult: nil,
-            performanceMetrics: performanceMetrics,
-            targetHost: targetHost
-        )
+        let networkDiagnosis: NetworkDiagnosisResult? = nil // Replaced by the shared coverage-aware verdict pipeline.
 
         onProgress?(1.0, "Complete")
 
@@ -377,7 +265,7 @@ actor DiagnosticsEngine {
                 .notRun(.dnsHijack, "security checks not part of the performance test"),
                 .notRun(.vpnLeak, "security checks not part of the performance test"),
                 routingInterpretation != nil ? .ran(.traceroute, 1, unit: "") : .failed(.traceroute, .timeout),
-                performanceMetrics != nil ? .ran(.performance, performanceMetrics!.throughput, unit: "Mbps") : .failed(.performance, .timeout)
+                performanceMetrics?.throughput.map { .ran(.performance, $0, unit: "Mbps") } ?? .failed(.performance, .error("No throughput measurement"))
             ])
         )
     }

@@ -43,6 +43,17 @@ struct CertificateInspection: Identifiable {
     /// One-line user-facing label suitable for a row.
     let summary: String
 
+    struct Counts {
+        let proxyLike: Int, otherTrusted: Int, untrusted: Int, unavailable: Int
+    }
+    static func counts(_ inspections: [CertificateInspection]) -> Counts {
+        let untrusted = inspections.filter { $0.severity == .critical }.count
+        let unavailable = inspections.filter { $0.severity == .unavailable }.count
+        let proxyLike = inspections.filter { $0.isProxyIntercepted && $0.severity != .critical && $0.severity != .unavailable }.count
+        return Counts(proxyLike: proxyLike, otherTrusted: inspections.count-untrusted-unavailable-proxyLike,
+                      untrusted: untrusted, unavailable: unavailable)
+    }
+
     enum Severity {
         case info        // proxy MITM expected (user installed the CA themselves)
         case warning     // unknown / non-public issuer; user should check
@@ -102,7 +113,7 @@ final class CertificateInspector {
     // `nonisolated` because it's pure mapping — no MainActor state touched —
     // and the task group above calls it from a non-isolated context.
 
-    private nonisolated static func map(host: String, result: TLSAnalysisResult, vpnActive: Bool) -> CertificateInspection {
+    nonisolated static func map(host: String, result: TLSAnalysisResult, vpnActive: Bool) -> CertificateInspection {
         // Leaf cert is the first entry in the chain (TLSAnalyzer's contract).
         let leaf = result.certificateChain.first
         let issuerRaw = leaf?.issuer ?? "—"
@@ -124,35 +135,18 @@ final class CertificateInspector {
         var displayIssuer = issuerCN
         var isProxyIntercepted = result.isProxyMITM
 
-        if result.isProxyMITM {
-            severity = .info
-            let appLabel = proxyApp.map { " (\($0))" } ?? ""
-            summary = "Proxy-intercepted\(appLabel) — your local proxy is decrypting and re-signing this connection. Normal if you installed the proxy CA. Concerning if you didn't."
-        } else if let reason = result.unavailableReason {
-            // Commit 7: unreachable ≠ insecure. An unassessed host is reported
-            // as such and excluded from the Combined verdict — it used to map
-            // an empty chain to .critical, turning a blocked host into "Unsafe".
-            severity = .unavailable
-            summary = reason.text + "."
-        } else if result.securityRating == .critical {
-            // Trust failed. If VPN is active, the most likely cause is a proxy
-            // re-signing certs with a CA not in our needle list. Treat as
-            // proxy-intercepted (info), not critical.
-            if vpnActive {
-                severity = .info
-                isProxyIntercepted = true
-                displayIssuer = "Modified by VPN/proxy"
-                summary = "Cert chain modified by VPN/proxy. This is normal if you installed the proxy's CA. Concerning if you didn't."
-            } else {
-                severity = .critical
-                summary = "Trust evaluation failed. \(result.issues.first?.title ?? "Inspect details before trusting this connection.")"
-            }
-        } else if isKnownPublicIssuer(issuerCN) {
-            severity = .info
-            summary = "Real cert — issued by \(issuerCN)."
-        } else {
+        if let reason = result.unavailableReason {
+            severity = .unavailable; summary = reason.text + "."
+        } else if result.securityRating == .critical || result.certificateChain.contains(where: { !$0.isTrusted }) {
+            severity = .critical
+            summary = "Certificate trust evaluation failed. VPN state and issuer names do not establish trust."
+        } else if result.isProxyMITM {
             severity = .warning
-            summary = "Unknown issuer (\(issuerCN)). Not on the known-public-CA list. Review before trusting."
+            summary = "The chain passed system trust, but a name resembles a proxy CA. Review whether local HTTPS decryption was intended."
+        } else if result.securityRating == .poor || result.securityRating == .fair {
+            severity = .warning; summary = "Review the assessed TLS configuration issues."
+        } else {
+            severity = .info; summary = "System trust evaluation passed for this hostname."
         }
 
         return CertificateInspection(

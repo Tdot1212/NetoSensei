@@ -11,10 +11,35 @@ struct SpeedTabView: View {
     @StateObject private var speedVM = SpeedTestViewModel()
     @StateObject private var streamingVM = StreamingDiagnosticViewModel()
     @StateObject private var vpnBenchmark = VPNBenchmark()
-    @State private var selectedSection: SpeedSection = .speedTest
+    @State private var selectedSection: SpeedSection = .overview
+
+    @State private var runPhase: String?
+    @State private var runSummary: PerformanceSummary?
+    @State private var runNotice: String?
+
+    private struct PerformanceSummary {
+        let speed: SpeedTestResult?
+        let streaming: StreamingDiagnosticResult?
+        let sites: [VPNBenchmark.BenchmarkResult]
+        let path: Date
+
+        var nextStep: String {
+            if let streaming, !streaming.cdnReachable {
+                return "Open \(streaming.platform.rawValue) and try playing a video. If it stalls, change one thing, such as moving closer to the router or switching VPN server, and run these checks again."
+            }
+            if sites.contains(where: { !$0.reachable || ($0.httpStatus ?? 0) >= 400 }) {
+                return "Open any site you’re having trouble with in its app or Safari. If it still fails, change one thing about your connection and rerun these checks on the same Wi-Fi."
+            }
+            if speed == nil {
+                return "Open a site you normally use to confirm the connection works, then run the checks again."
+            }
+            return "If you still notice lag, change one thing, such as moving closer to the router or switching VPN server, and run the same checks again."
+        }
+    }
 
     enum SpeedSection: String, CaseIterable {
-        case speedTest = "Speed Test"
+        case overview = "Overview"
+        case speedTest = "Speed"
         case streaming = "Streaming"
         case vpnSites = "VPN Sites"
     }
@@ -29,10 +54,13 @@ struct SpeedTabView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .disabled(runPhase != nil)
                 .padding()
 
                 // Content based on selection
                 switch selectedSection {
+                case .overview:
+                    overview
                 case .speedTest:
                     speedTestContent
                 case .streaming:
@@ -41,28 +69,130 @@ struct SpeedTabView: View {
                     vpnBenchmarkContent
                 }
             }
-            .navigationTitle("Speed & Streaming")
+            .navigationTitle("Connection Test")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack(spacing: 16) {
-                        // Share button (for speed test only)
-                        if selectedSection == .speedTest, let result = speedVM.result {
-                            ShareLink(
-                                item: DiagnosticReportGenerator.shared.generateSpeedTestReport(speedTest: result),
-                                subject: Text("NetoSensei Speed Test"),
-                                message: Text("My speed test results")
-                            ) {
-                                Image(systemName: "square.and.arrow.up")
+                if selectedSection != .overview {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        HStack(spacing: 16) {
+                            if selectedSection == .speedTest, let result = speedVM.result {
+                                ShareLink(
+                                    item: DiagnosticReportGenerator.shared.generateSpeedTestReport(speedTest: result),
+                                    subject: Text("NetoSensei Speed Test"),
+                                    message: Text("My speed test results")
+                                ) {
+                                    Image(systemName: "square.and.arrow.up")
+                                }
                             }
+                            runAgainButton
                         }
-
-                        runAgainButton
                     }
                 }
             }
         }
         .navigationViewStyle(.stack)
+    }
+
+    private var overview: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                CardView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Check your connection")
+                            .font(.title2.bold())
+                        Text("Measure speed, sample the \(streamingVM.selectedPlatform.rawValue) endpoints and check popular sites in one run.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        if let runPhase {
+                            HStack {
+                                ProgressView()
+                                Text(runPhase)
+                            }
+                            .accessibilityElement(children: .combine)
+                        } else {
+                            Button(runSummary == nil ? "Run all checks" : "Run all checks again", action: runAllChecks)
+                                .buttonStyle(.borderedProminent)
+                                .disabled(speedVM.isRunning || streamingVM.isRunning || vpnBenchmark.isRunning)
+                                .accessibilityIdentifier("performance.runAll")
+                        }
+                        if let runNotice {
+                            Text(runNotice).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if let summary = runSummary {
+                    summaryCard(summary)
+                }
+            }
+            .padding()
+        }
+    }
+
+    private func summaryCard(_ summary: PerformanceSummary) -> some View {
+        CardView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("What this run found").font(.headline)
+                if summary.path != ExitPath.lastPathChange {
+                    Text("The connection has changed since this run.").font(.footnote).foregroundStyle(.secondary)
+                }
+                if let speed = summary.speed {
+                    let download = String(format: "%.1f Mbps down", speed.downloadSpeed)
+                    let upload = speed.measuredUploadSpeed.map { String(format: "%.1f Mbps up", $0) } ?? "Upload unavailable"
+                    Label("\(download) · \(upload)", systemImage: "speedometer")
+                    let estimate = ConnectionCapabilityAnalyzer.analyze(from: speed).maxStreamingQuality.rawValue
+                    Text("Streaming bandwidth estimate: \(estimate)").font(.footnote).foregroundStyle(.secondary)
+                    if speed.ping == nil {
+                        Text("Remote delay was unavailable. Call and gaming quality remain unverified.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                } else {
+                    Label("Speed could not be measured", systemImage: "speedometer")
+                }
+                if let streaming = summary.streaming {
+                    let response = streaming.cdnPing.map { String(format: "%.0f ms HTTPS response", $0) } ?? "No HTTPS response"
+                    Label("\(streaming.platform.rawValue) · \(response)", systemImage: "play.tv")
+                }
+                let successful = summary.sites.filter { ($0.httpStatus ?? 0) >= 200 && ($0.httpStatus ?? 0) < 400 }.count
+                let httpErrors = summary.sites.filter { ($0.httpStatus ?? 0) >= 400 }.count
+                let unanswered = summary.sites.filter { $0.httpStatus == nil }.count
+                Label("\(successful) site successes · \(httpErrors) HTTP errors · \(unanswered) without response", systemImage: "globe")
+                Text("Website responses and available bandwidth don’t establish video playback quality.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Divider()
+                Text("Try this next").font(.headline)
+                Text(summary.nextStep).font(.subheadline)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("performance.summary")
+        }
+    }
+
+    private func runAllChecks() {
+        guard runPhase == nil, !speedVM.isRunning, !streamingVM.isRunning, !vpnBenchmark.isRunning else { return }
+        runSummary = nil
+        runNotice = nil
+        runPhase = "1 of 3 · Measuring speed"
+        Task { @MainActor in
+            let path = ExitPath.lastPathChange
+            defer { runPhase = nil }
+            await speedVM.runSpeedTestAndWait()
+            guard checkPath(path) else { return }
+            runPhase = "2 of 3 · Checking streaming endpoints"
+            await streamingVM.runStreamingDiagnostic()
+            guard checkPath(path) else { return }
+            runPhase = "3 of 3 · Checking sites"
+            await vpnBenchmark.runBenchmark()
+            guard checkPath(path) else { return }
+            runSummary = PerformanceSummary(speed: speedVM.result, streaming: streamingVM.result,
+                                            sites: vpnBenchmark.results, path: path)
+        }
+    }
+
+    private func checkPath(_ startingPath: Date) -> Bool {
+        guard startingPath != ExitPath.lastPathChange else { return true }
+        runNotice = "The connection changed during the run. Run all checks again to get results from one connection."
+        return false
     }
 
     // MARK: - Speed Test Content
@@ -185,7 +315,7 @@ struct SpeedTabView: View {
 
                 // Results (if available)
                 if streamingVM.hasResult {
-                    StreamingDiagnosticContentView(vm: streamingVM)
+                    StreamingDiagnosticContentView(vm: streamingVM, currentSpeed: speedVM.result)
                 }
             }
             .padding()
@@ -215,7 +345,7 @@ struct SpeedTabView: View {
                     .padding()
                 } else if !streamingVM.hasResult {
                     VStack(spacing: 12) {
-                        Text("Test your connection's ability to stream 4K, gaming, video calls, and more.")
+                        Text("Check streaming endpoint responses. Playback quality, CDN bandwidth and real-time suitability require additional measurements.")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -236,7 +366,7 @@ struct SpeedTabView: View {
                             .cornerRadius(10)
                         }
                     }
-                } else if let result = streamingVM.result {
+                } else if streamingVM.hasResult {
                     // FIX (Speed Issue 1/6): Icon row reads from
                     // ConnectionCapabilityAnalyzer — the SAME source that the
                     // per-service detail and the Speed Test "What can you do"
@@ -246,26 +376,9 @@ struct SpeedTabView: View {
                     // Also: prefer the latest main-Speed-Test result when
                     // available — it has download/upload/ping/jitter/loss in
                     // one place. Fall back to streaming throughput numbers.
-                    let capability: ConnectionCapability = {
-                        if let speed = HistoryManager.shared.speedTestHistory.first {
-                            return ConnectionCapabilityAnalyzer.analyze(from: speed)
-                        }
-                        return ConnectionCapabilityAnalyzer.analyze(
-                            downloadMbps: result.cdnThroughput,
-                            uploadMbps: 0,
-                            pingMs: result.cdnPing ?? 0,   // nil = unmeasured → analyzer's documented no-penalty fallback (Phase 3 convention)
-                            jitterMs: 0
-                        )
-                    }()
-
-                    VStack(spacing: 12) {
-                        HStack(spacing: 16) {
-                            capabilityBadge(icon: "4k.tv",        label: "4K",     rating: capability.streaming4K)
-                            capabilityBadge(icon: "play.rectangle", label: "HD",   rating: capability.streamingHD)
-                            capabilityBadge(icon: "gamecontroller", label: "Gaming", rating: capability.gaming)
-                            capabilityBadge(icon: "video",        label: "Calls",  rating: capability.videoCalls)
-                        }
-                    }
+                    Text("These HTTPS responses show how the sampled endpoints answered. Actual video playback is a separate check.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
         }
@@ -330,7 +443,7 @@ struct SpeedTabView: View {
                         Image(systemName: "info.circle")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text("Times shown include full HTTP request through your VPN tunnel. For international VPN connections (China to US), 500-2000ms is normal. Under 1 second is good.")
+                        Text("Times describe full HTTPS responses over the current route, including any active VPN. A response or HTTP error does not prove that the service can play content or that every app uses the VPN.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -351,6 +464,9 @@ struct SpeedTabView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(result.destination.rawValue)
                     .font(.subheadline.bold())
+                if let code = result.httpStatus {
+                    Text("HTTP \(code)").font(.caption2).foregroundStyle(.secondary)
+                }
                 if let error = result.error {
                     Text(error)
                         .font(.caption2)
@@ -393,6 +509,7 @@ struct SpeedTabView: View {
 
     private func benchmarkBadgeColor(_ result: VPNBenchmark.BenchmarkResult) -> Color {
         guard result.reachable, let latency = result.latencyMs else { return .red }
+        if let code = result.httpStatus, code >= 400 { return .orange }
         return benchmarkLatencyColor(latency)
     }
 
@@ -403,6 +520,7 @@ struct SpeedTabView: View {
     private func capabilityBadge(icon: String, label: String, rating: ActivityRating) -> some View {
         let tint: Color = {
             switch rating {
+            case .unknown: return .secondary
             case .excellent, .good: return .green
             case .degraded: return .yellow
             case .poor: return .red
@@ -429,6 +547,8 @@ struct SpeedTabView: View {
     @ViewBuilder
     private var runAgainButton: some View {
         switch selectedSection {
+        case .overview:
+            EmptyView()
         case .speedTest:
             if speedVM.hasResult && !speedVM.isRunning {
                 Button("Run Again") {

@@ -14,7 +14,10 @@ enum TimeoutError: Error {
 }
 
 func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
+    guard seconds.isFinite, seconds > 0, seconds < Double(UInt64.max) / 1_000_000_000 else {
+        throw TimeoutError.timedOut
+    }
+    return try await withThrowingTaskGroup(of: T.self) { group in
         group.addTask {
             try await operation()
         }

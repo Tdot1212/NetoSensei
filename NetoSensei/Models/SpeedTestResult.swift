@@ -7,6 +7,18 @@
 
 import Foundation
 
+struct HTTPSResponsiveness: Codable, Equatable {
+    let endpoint: String
+    let idleMs: Double?
+    let downloadMs: Double?
+    let uploadMs: Double?
+
+    static func median(_ samples: [Double]) -> Double? {
+        let valid = samples.filter { $0.isFinite && $0 > 0 }
+        return valid.count >= 3 ? MeasurementStatistics.median(valid) : nil
+    }
+}
+
 struct SpeedTestResult: Codable, Identifiable {
     var id: UUID
     var timestamp: Date
@@ -25,11 +37,13 @@ struct SpeedTestResult: Codable, Identifiable {
     // or 100% loss (those are self-refuting next to a successful throughput run).
     var ping: Double?  // ms — nil when probes failed or were intercepted
     var jitter: Double?  // ms — nil when ping is nil
+    var responsiveness: HTTPSResponsiveness?
     var packetLoss: Double?  // percentage — nil when no probe round-trip succeeded
 
     /// True when a local TUN-mode proxy/VPN answered the ping handshake
     /// on-device (implausibly low vs the gateway). Same contract as
     /// InternetInfo.latencyIntercepted. See LatencyInterception.
+    var measurementVersion: Int? = nil
     var latencyIntercepted: Bool = false
 
     // Test details
@@ -85,8 +99,8 @@ struct SpeedTestResult: Codable, Identifiable {
     // Encoding stays synthesized.
 
     private enum CodingKeys: String, CodingKey {
-        case id, timestamp, downloadSpeed, downloadJitter, uploadSpeed, uploadJitter
-        case ping, jitter, packetLoss, latencyIntercepted
+        case id, timestamp, measurementVersion, downloadSpeed, downloadJitter, uploadSpeed, uploadJitter
+        case ping, jitter, packetLoss, latencyIntercepted, responsiveness
         case serverUsed, serverLocation, testDuration
         case connectionType, vpnActive, ipAddress
         case networkSSID, localSubnet, publicCountry
@@ -102,9 +116,11 @@ struct SpeedTestResult: Codable, Identifiable {
         downloadJitter = try c.decodeIfPresent(Double.self, forKey: .downloadJitter)
         uploadSpeed = try c.decode(Double.self, forKey: .uploadSpeed)
         uploadJitter = try c.decodeIfPresent(Double.self, forKey: .uploadJitter)
+        responsiveness = try c.decodeIfPresent(HTTPSResponsiveness.self, forKey: .responsiveness)
         ping = try c.decodeIfPresent(Double.self, forKey: .ping)
         jitter = try c.decodeIfPresent(Double.self, forKey: .jitter)
         packetLoss = try c.decodeIfPresent(Double.self, forKey: .packetLoss)
+        measurementVersion = try c.decodeIfPresent(Int.self, forKey: .measurementVersion)
         latencyIntercepted = try c.decodeIfPresent(Bool.self, forKey: .latencyIntercepted) ?? false
         serverUsed = try c.decodeIfPresent(String.self, forKey: .serverUsed)
         serverLocation = try c.decodeIfPresent(String.self, forKey: .serverLocation)
@@ -206,7 +222,7 @@ struct SpeedTestResult: Codable, Identifiable {
 
     var summary: String {
         let download = String(format: "%.1f", downloadSpeed)
-        let upload = String(format: "%.1f", uploadSpeed)
+        let upload = measuredUploadSpeed.map { String(format: "%.1f", $0) } ?? "—"
         let latency = ping.map { String(format: "%.0f", $0) } ?? "—"
 
         return "\(download) Mbps ↓ / \(upload) Mbps ↑ | \(latency)ms ping | \(quality.rawValue)"
@@ -218,12 +234,7 @@ struct SpeedTestResult: Codable, Identifiable {
         downloadSpeed >= 25 && (packetLoss.map { $0 < 2 } ?? true) && (ping.map { $0 < 100 } ?? true)
     }
 
-    var recommendedVideoQuality: String {
-        if downloadSpeed >= 25 { return "4K UHD" }
-        if downloadSpeed >= 8 { return "Full HD (1080p)" }
-        if downloadSpeed >= 3 { return "HD (720p)" }
-        return "SD (480p)"
-    }
+    var recommendedVideoQuality: String { streamingCapability.maxVideoQuality.rawValue }
 
     // MARK: - Streaming Capability Analysis
 
@@ -281,6 +292,7 @@ struct StreamingCapability {
         let notes: String?
 
         enum BufferingLevel: String {
+            case unmeasured = "Playback buffering not measured"
             case none = "No buffering expected"
             case rare = "Rare buffering"
             case occasional = "Occasional buffering"
@@ -289,6 +301,7 @@ struct StreamingCapability {
     }
 
     enum VideoCallQuality: String {
+        case unmeasured = "Video call conditions not fully measured"
         case excellent = "HD video calls with screen sharing"
         case good = "HD video calls"
         case fair = "SD video calls"
@@ -297,6 +310,7 @@ struct StreamingCapability {
     }
 
     enum GamingCapability: String {
+        case unmeasured = "Gaming conditions not fully measured"
         case competitive = "Competitive gaming ready"
         case casual = "Casual gaming"
         case limited = "Single player only"
@@ -327,6 +341,7 @@ struct StreamingCapability {
         // For this ADVISORY (bandwidth-driven) estimate, treat unknown as
         // no-penalty so the result reflects measured throughput rather than
         // inventing a problem. The rest of the function is unchanged.
+        let realTimeMetricsAvailable = latency != nil && jitter != nil && packetLoss != nil
         let latency = latency ?? 0
         let jitter = jitter ?? 0
         let packetLoss = packetLoss ?? 0
@@ -367,39 +382,41 @@ struct StreamingCapability {
         let platforms = [
             StreamingPlatformCapability(
                 platform: "Netflix",
-                maxQuality: downloadSpeed >= 15 ? .uhd4K : (downloadSpeed >= 5 ? .fullHD : .hd720),
-                expectedBuffering: packetLoss < 1 ? .none : (packetLoss < 3 ? .rare : .occasional),
-                notes: downloadSpeed >= 25 ? "Dolby Vision/HDR supported" : nil
+                maxQuality: maxQuality,
+                expectedBuffering: .unmeasured,
+                notes: nil
             ),
             StreamingPlatformCapability(
                 platform: "YouTube",
-                maxQuality: downloadSpeed >= 20 ? .uhd4K : (downloadSpeed >= 5 ? .fullHD : .hd720),
-                expectedBuffering: jitter < 30 ? .none : .rare,
-                notes: downloadSpeed >= 40 ? "60fps 4K supported" : nil
+                maxQuality: maxQuality,
+                expectedBuffering: .unmeasured,
+                notes: nil
             ),
             StreamingPlatformCapability(
                 platform: "TikTok/Douyin",
-                maxQuality: downloadSpeed >= 8 ? .fullHD : .hd720,
-                expectedBuffering: latency < 100 ? .none : .rare,
+                maxQuality: maxQuality,
+                expectedBuffering: .unmeasured,
                 notes: nil
             ),
             StreamingPlatformCapability(
                 platform: "Bilibili",
-                maxQuality: downloadSpeed >= 10 ? .uhd4K : .fullHD,
-                expectedBuffering: jitter < 50 ? .none : .occasional,
-                notes: downloadSpeed >= 15 ? "HEVC streaming supported" : nil
+                maxQuality: maxQuality,
+                expectedBuffering: .unmeasured,
+                notes: nil
             ),
             StreamingPlatformCapability(
                 platform: "Twitch",
-                maxQuality: downloadSpeed >= 6 ? .fullHD : .hd720,
-                expectedBuffering: latency < 80 ? .none : .rare,
-                notes: latency < 50 ? "Low latency mode available" : nil
+                maxQuality: maxQuality,
+                expectedBuffering: .unmeasured,
+                notes: nil
             )
         ]
 
         // Video call quality
         let videoCallQuality: VideoCallQuality
-        if uploadSpeed >= 3 && downloadSpeed >= 3 && latency < 50 && jitter < 20 {
+        if !realTimeMetricsAvailable || uploadSpeed <= 0 {
+            videoCallQuality = .unmeasured
+        } else if uploadSpeed >= 3 && downloadSpeed >= 3 && latency < 50 && jitter < 20 {
             videoCallQuality = .excellent
         } else if uploadSpeed >= 1.5 && downloadSpeed >= 1.5 && latency < 100 {
             videoCallQuality = .good
@@ -413,7 +430,9 @@ struct StreamingCapability {
 
         // Gaming capability
         let gamingCapability: GamingCapability
-        if latency < 30 && jitter < 10 && packetLoss < 0.5 {
+        if !realTimeMetricsAvailable {
+            gamingCapability = .unmeasured
+        } else if latency < 30 && jitter < 10 && packetLoss < 0.5 {
             gamingCapability = .competitive
         } else if latency < 80 && jitter < 30 && packetLoss < 2 {
             gamingCapability = .casual

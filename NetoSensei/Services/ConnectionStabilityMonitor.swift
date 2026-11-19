@@ -44,7 +44,7 @@ struct StabilityEvent: Codable, Identifiable {
 // MARK: - Connection Stability Metrics
 
 struct ConnectionStabilityMetrics {
-    let uptimePercentage: Double         // % of time connected in tracking period
+    let uptimePercentage: Double?        // Continuous uptime cannot be established while iOS suspends the app.
     let averageLatency: Double?          // Average latency when connected
     let disconnectCount: Int             // Number of disconnects
     let latencySpikeCount: Int           // Number of latency spikes (>200ms)
@@ -53,6 +53,7 @@ struct ConnectionStabilityMetrics {
     let connectionQuality: ConnectionQualityLevel
 
     enum ConnectionQualityLevel: String {
+        case unknown = "Unmeasured"
         case excellent = "Excellent"  // >99% uptime, <50ms avg latency, 0 spikes
         case good = "Good"            // >95% uptime, <100ms avg latency, <3 spikes
         case fair = "Fair"            // >90% uptime, <200ms avg latency
@@ -60,6 +61,7 @@ struct ConnectionStabilityMetrics {
 
         var description: String {
             switch self {
+            case .unknown: return "Not enough observed latency data"
             case .excellent: return "Rock solid connection"
             case .good: return "Stable with minor variations"
             case .fair: return "Some instability detected"
@@ -92,6 +94,8 @@ class ConnectionStabilityMonitor: ObservableObject {
 
     // MARK: - State Tracking
 
+    struct Observation { let timestamp: Date; let connected: Bool; let latency: Double? }
+    private var observations: [Observation] = []
     private var lastKnownStatus: NetworkStatus?
     private var lastConnectedTime: Date?
     private var totalConnectedTime: TimeInterval = 0
@@ -183,6 +187,11 @@ class ConnectionStabilityMonitor: ObservableObject {
     // MARK: - Status Processing
 
     private func processStatusChange(_ newStatus: NetworkStatus) {
+        if !AppLoadTracker.shared.isActiveOrRecent(grace: Self.postLoadGrace) {
+            observations.append(Observation(timestamp: Date(), connected: newStatus.internet.isReachable,
+                latency: newStatus.internet.latencyToExternal.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }))
+            observations = Array(observations.filter { $0.timestamp > Date().addingTimeInterval(-86400) }.suffix(3000))
+        }
         defer {
             lastKnownStatus = newStatus
         }
@@ -371,57 +380,23 @@ class ConnectionStabilityMonitor: ObservableObject {
         let windowStart = Date().addingTimeInterval(-Double(trackingWindowHours) * 3600)
         let recentEvents = events.filter { $0.timestamp >= windowStart }
 
-        // Calculate uptime percentage
-        var connectedTime: TimeInterval = 0
-        var lastConnect: Date?
-        var lastDisconnect: Date?
-
-        // Process events in chronological order
-        for event in recentEvents.reversed() {
-            switch event.type {
-            case .connected:
-                lastConnect = event.timestamp
-            case .disconnected:
-                if let connect = lastConnect {
-                    connectedTime += event.timestamp.timeIntervalSince(connect)
-                    lastConnect = nil
-                }
-                lastDisconnect = event.timestamp
-            default:
-                break
-            }
-        }
-
-        // Add time for current connection if still connected
-        if let connect = lastConnect, lastKnownStatus?.internet.isReachable == true {
-            connectedTime += Date().timeIntervalSince(connect)
-        }
-
-        let windowDuration = Date().timeIntervalSince(windowStart)
-        let uptimePercentage = windowDuration > 0 ? (connectedTime / windowDuration) * 100 : 100
-
-        // Calculate average latency
-        let latencyEvents = recentEvents.compactMap { $0.latency }
-        let avgLatency: Double? = latencyEvents.isEmpty ? lastKnownStatus?.internet.latencyToExternal : latencyEvents.reduce(0, +) / Double(latencyEvents.count)
-
-        // Count events
+        let samples = observations.filter { $0.timestamp >= windowStart }
+        let latencySamples = samples.filter(\.connected).compactMap(\.latency)
+        let avgLatency: Double? = latencySamples.isEmpty ? nil : latencySamples.reduce(0,+)/Double(latencySamples.count)
         let disconnectCount = recentEvents.filter { $0.type == .disconnected }.count
         let spikeCount = recentEvents.filter { $0.type == .latencySpike }.count
-
-        // Determine stable since (last disconnect or start of tracking)
-        let stableSince: Date? = lastDisconnect.map { Date() > $0 ? $0 : nil } ?? trackingStartTime
-
-        // Determine quality
+        let lastDisconnect = recentEvents.first { $0.type == .disconnected }?.timestamp
+        // Samples and app lifecycle callbacks cannot prove uninterrupted connectivity.
+        let uptimePercentage: Double? = nil
+        let stableSince: Date? = nil
         let quality: ConnectionStabilityMetrics.ConnectionQualityLevel
-        if uptimePercentage >= 99 && (avgLatency ?? 0) < 50 && spikeCount == 0 {
-            quality = .excellent
-        } else if uptimePercentage >= 95 && (avgLatency ?? 0) < 100 && spikeCount < 3 {
-            quality = .good
-        } else if uptimePercentage >= 90 && (avgLatency ?? 0) < 200 {
-            quality = .fair
-        } else {
-            quality = .poor
-        }
+        if let avgLatency, samples.count >= 2 {
+            if samples.contains(where: { !$0.connected }) { quality = .poor }
+            else if avgLatency < 50 && spikeCount == 0 { quality = .excellent }
+            else if avgLatency < 100 && spikeCount < 3 { quality = .good }
+            else if avgLatency < 200 { quality = .fair }
+            else { quality = .poor }
+        } else { quality = .unknown }
 
         currentMetrics = ConnectionStabilityMetrics(
             uptimePercentage: uptimePercentage,
@@ -453,7 +428,7 @@ class ConnectionStabilityMonitor: ObservableObject {
         }
 
         if metrics.disconnectCount == 0 && metrics.latencySpikeCount == 0 {
-            return "\(metrics.connectionQuality.rawValue) - No issues in last \(trackingWindowHours)h"
+            return "\(metrics.connectionQuality.rawValue) — sampled while app was active"
         }
 
         var issues: [String] = []
@@ -470,6 +445,7 @@ class ConnectionStabilityMonitor: ObservableObject {
     /// Clear all events
     func clearHistory() {
         events = []
+        observations = []
         totalConnectedTime = 0
         trackingStartTime = Date()
         saveEvents()
@@ -516,20 +492,19 @@ class ConnectionStabilityMonitor: ObservableObject {
             .sorted { $0.timestamp < $1.timestamp }
     }
 
-    /// Create timeline buckets for visualization (true = connected, false = had issues)
-    func timelineBuckets(hours: Int = 24) -> [Bool] {
-        var buckets = Array(repeating: true, count: hours)
-        let now = Date()
-        let disconnects = events.filter { $0.type == .disconnected }
-
-        for event in disconnects {
-            let hoursAgo = now.timeIntervalSince(event.timestamp) / 3600
-            let bucketIndex = hours - 1 - Int(hoursAgo)
-            if bucketIndex >= 0 && bucketIndex < hours {
-                buckets[bucketIndex] = false
-            }
+    /// Each bucket describes observations only. Nil means no sample, never healthy by default.
+    func timelineBuckets(hours: Int = 24) -> [Bool?] {
+        Self.timeline(observations, hours: hours, now: Date())
+    }
+    static func timeline(_ samples: [Observation], hours: Int, now: Date) -> [Bool?] {
+        guard hours > 0, hours <= 168 else { return [] }
+        var buckets = [Bool?](repeating: nil, count: hours)
+        for sample in samples {
+            let age = now.timeIntervalSince(sample.timestamp)
+            guard age >= 0, age < Double(hours)*3600 else { continue }
+            let index = hours-1-Int(age/3600)
+            buckets[index] = (buckets[index] ?? true) && sample.connected
         }
-
         return buckets
     }
 

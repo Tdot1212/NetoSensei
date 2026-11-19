@@ -15,7 +15,7 @@ struct DNSServerInfo: Identifiable, Equatable {
     let id = UUID()
     let ipAddress: String
     let provider: DNSProviderType
-    let isEncrypted: Bool
+    let isEncrypted: Bool?
     let latencyMs: Double?
     let isSystem: Bool
 
@@ -85,10 +85,10 @@ struct DNSLeakTestResult: Identifiable {
 
 struct DNSAnalysisResult {
     let systemDNS: [DNSServerInfo]
-    let isEncryptedDNS: Bool
+    let isEncryptedDNS: Bool?
     let encryptedDNSType: EncryptedDNSType?
     let leakTestResults: [DNSLeakTestResult]
-    let hasLeak: Bool
+    let hasLeak: Bool?
     let timestamp: Date
 
     // FIX (Phase 6.1): `detectedDNS` and `averageLatencyMs` were removed. The
@@ -104,13 +104,13 @@ struct DNSAnalysisResult {
     }
 
     var securityRating: SecurityRating {
-        if hasLeak { return .poor }
-        if isEncryptedDNS { return .excellent }
-        if systemDNS.contains(where: { $0.provider.isPrivacyFocused }) { return .good }
-        return .fair
+        if hasLeak == true { return .poor }
+        guard let isEncryptedDNS else { return .unknown }
+        return isEncryptedDNS ? .good : .fair
     }
 
     enum SecurityRating: String {
+        case unknown = "Unverified"
         case excellent = "Excellent"
         case good = "Good"
         case fair = "Fair"
@@ -118,6 +118,7 @@ struct DNSAnalysisResult {
 
         var icon: String {
             switch self {
+            case .unknown: return "questionmark.shield"
             case .excellent: return "checkmark.shield.fill"
             case .good: return "checkmark.shield"
             case .fair: return "exclamationmark.shield"
@@ -174,300 +175,37 @@ private let knownDNSServers: [String: DNSProviderType] = [
 // MARK: - DNS Analyzer Service
 
 @MainActor
-class DNSAnalyzer: ObservableObject {
+final class DNSAnalyzer: ObservableObject {
     static let shared = DNSAnalyzer()
-
     @Published var isAnalyzing = false
     @Published var progress: Double = 0
     @Published var currentStep = ""
     @Published var result: DNSAnalysisResult?
     @Published var error: String?
-
-    private init() {}
-
-    // MARK: - Main Analysis
-
+    private let resolver: () -> String?
+    init(resolver: (() -> String?)? = nil) {
+        self.resolver = resolver ?? { NetworkMonitorService.shared.currentStatus.dns.resolverIP }
+    }
     func runFullAnalysis() async -> DNSAnalysisResult {
-        return await BackgroundTaskManager.shared.runInBackground(
-            id: "dnsAnalysis",
-            name: "DNS Analysis",
-            operation: {
-                return await self.performFullAnalysis()
-            },
-            resultFormatter: { result in
-                "Rating: \(result.securityRating.rawValue)"
-            }
-        )
-    }
-
-    private func performFullAnalysis() async -> DNSAnalysisResult {
-        // FIX (Phase 6.1): scoped down to privacy/security analysis only.
-        // Removed steps that produced bogus numbers:
-        //   - "Detect actual DNS" probed UDP `.ready` (socket setup), not RTT
-        //   - "Measure latency" used getaddrinfo through the system resolver,
-        //     which goes through the proxy/VPN's local fake DNS — every server
-        //     looked like 1ms. DNS Benchmark handles real per-server latency.
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-
         isAnalyzing = true
-        progress = 0
-        error = nil
-
-        // Step 1: Get system DNS servers (the resolver actually in use)
-        currentStep = "Reading system DNS..."
-        progress = 0.2
-        let systemDNS = await getSystemDNSServers()
-
-        // Step 2: Check for encrypted DNS (DoH/DoT)
-        currentStep = "Checking encryption..."
-        progress = 0.5
-        let (isEncrypted, encryptedType) = await checkEncryptedDNS()
-
-        // Step 3: DNS leak test (only meaningful when VPN active)
-        currentStep = "Testing for DNS leaks..."
-        progress = 0.8
-        var leakResults: [DNSLeakTestResult] = []
-        var hasLeak = false
-
-        if vpnActive {
-            leakResults = await runDNSLeakTest()
-            hasLeak = leakResults.contains { $0.isLeak }
-        }
-
-        let analysisResult = DNSAnalysisResult(
-            systemDNS: systemDNS,
-            isEncryptedDNS: isEncrypted,
-            encryptedDNSType: encryptedType,
-            leakTestResults: leakResults,
-            hasLeak: hasLeak,
-            timestamp: Date()
-        )
-
-        result = analysisResult
-        progress = 1.0
-        currentStep = "Complete"
-        isAnalyzing = false
-
-        return analysisResult
+        defer { isAnalyzing = false }
+        currentStep = "Reading available resolver information"
+        progress = 0.5; error = nil
+        let servers = resolver().map { address in
+            [DNSServerInfo(ipAddress: address, provider: Self.identifyProvider(ip: address), isEncrypted: nil, latencyMs: nil, isSystem: true)]
+        } ?? []
+        let observed = DNSAnalysisResult(systemDNS: servers, isEncryptedDNS: nil, encryptedDNSType: nil,
+            leakTestResults: [], hasLeak: nil, timestamp: Date())
+        result = observed; progress = 1; currentStep = "Complete"
+        return observed
     }
-
-    // MARK: - Get System DNS
-
-    private nonisolated func getSystemDNSServers() async -> [DNSServerInfo] {
-        var servers: [DNSServerInfo] = []
-
-        // Read from existing NetworkMonitorService DNS info
-        let resolverIP = await NetworkMonitorService.shared.currentStatus.dns.resolverIP
-        if let ip = resolverIP {
-            let provider = identifyProvider(ip: ip)
-            servers.append(DNSServerInfo(
-                ipAddress: ip,
-                provider: provider,
-                isEncrypted: false,
-                latencyMs: await NetworkMonitorService.shared.currentStatus.dns.latency,
-                isSystem: true
-            ))
+    nonisolated static func identifyProvider(ip: String) -> DNSProviderType {
+        if let provider = knownDNSServers[ip] { return provider }
+        var address = in_addr()
+        if inet_pton(AF_INET, ip, &address) == 1 {
+            let value = UInt32(bigEndian: address.s_addr)
+            if value >> 24 == 10 || value >> 16 == 0xC0A8 || value >> 20 == 0xAC1 { return .local }
         }
-
-        // Gateway as DNS forwarder
-        let gatewayIP = await NetworkMonitorService.shared.currentStatus.router.gatewayIP
-        if let gateway = gatewayIP, !servers.contains(where: { $0.ipAddress == gateway }) {
-            servers.append(DNSServerInfo(
-                ipAddress: gateway,
-                provider: .local,
-                isEncrypted: false,
-                latencyMs: nil,
-                isSystem: true
-            ))
-        }
-
-        return servers
-    }
-
-    // FIX (Phase 6.1): `detectActualDNS`, `fetchCloudflareTrace`, `measureDNSLatency`,
-    // and `probeDNS` were removed. They produced misleading per-server latency
-    // numbers — `probeDNS` waited for UDP `.ready` (which fires after local
-    // socket setup, not after a server response), and `measureDNSLatency`
-    // used getaddrinfo (the system resolver, not the listed servers).
-    // Real per-server DNS performance lives in DNSBenchmark.
-
-    // MARK: - Check Encrypted DNS
-
-    private nonisolated func checkEncryptedDNS() async -> (Bool, DNSAnalysisResult.EncryptedDNSType?) {
-        // Heuristic: Check if DoT port 853 is reachable on known providers
-        // If DoT is open and responding with TLS, encrypted DNS is likely configured
-
-        let dotServers = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
-        for server in dotServers {
-            if await checkPort(ip: server, port: 853) {
-                return (true, .dot)
-            }
-        }
-
-        // Check if gateway is forwarding DNS on port 53 (traditional)
-        let gatewayIP = await NetworkMonitorService.shared.currentStatus.router.gatewayIP
-        if let gateway = gatewayIP {
-            let gatewayHasDNS = await checkPort(ip: gateway, port: 53)
-            if !gatewayHasDNS {
-                // Gateway not serving DNS on 53 but resolution works = likely encrypted
-                return (true, .doh)
-            }
-        }
-
-        return (false, nil)
-    }
-
-    /// Thread-safe once-guard for NWConnection callbacks.
-    private final class OnceFlag: @unchecked Sendable {
-        private var _done = false
-        private let lock = NSLock()
-        func claim() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            if _done { return false }
-            _done = true
-            return true
-        }
-    }
-
-    private nonisolated func checkPort(ip: String, port: UInt16) async -> Bool {
-        await withCheckedContinuation { continuation in
-            let host = NWEndpoint.Host(ip)
-            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-                continuation.resume(returning: false)
-                return
-            }
-            let connection = NWConnection(to: .hostPort(host: host, port: nwPort), using: .tcp)
-            let flag = OnceFlag()
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if flag.claim() {
-                        connection.cancel()
-                        continuation.resume(returning: true)
-                    }
-                case .failed, .cancelled:
-                    if flag.claim() {
-                        continuation.resume(returning: false)
-                    }
-                case .waiting:
-                    if flag.claim() {
-                        connection.cancel()
-                        continuation.resume(returning: false)
-                    }
-                default:
-                    break
-                }
-            }
-
-            connection.start(queue: .global(qos: .userInitiated))
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
-                if flag.claim() {
-                    connection.cancel()
-                    continuation.resume(returning: false)
-                }
-            }
-        }
-    }
-
-    // MARK: - DNS Leak Test
-
-    private nonisolated func runDNSLeakTest() async -> [DNSLeakTestResult] {
-        var results: [DNSLeakTestResult] = []
-
-        // Resolve well-known domains and check which IP responds
-        let testDomains = [
-            ("resolver1.opendns.com", "OpenDNS"),
-            ("whoami.akamai.net", "Akamai"),
-        ]
-
-        for (domain, serverName) in testDomains {
-            if let ip = await resolveDomain(domain) {
-                let provider = identifyProvider(ip: ip)
-
-                // Leak = DNS resolving outside VPN tunnel (ISP or local DNS responding)
-                let isLeak = provider == .isp
-                    || provider == .chinaUnicom
-                    || provider == .chinaTelecom
-                    || provider == .chinaMobile
-                    || provider == .local
-
-                results.append(DNSLeakTestResult(
-                    testServer: serverName,
-                    respondingIP: ip,
-                    provider: provider,
-                    country: nil,
-                    isLeak: isLeak
-                ))
-            }
-        }
-
-        return results
-    }
-
-    private nonisolated func resolveDomain(_ domain: String) async -> String? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            var hints = addrinfo(
-                ai_flags: AI_DEFAULT,
-                ai_family: AF_UNSPEC,
-                ai_socktype: SOCK_STREAM,
-                ai_protocol: 0,
-                ai_addrlen: 0,
-                ai_canonname: nil,
-                ai_addr: nil,
-                ai_next: nil
-            )
-
-            var result: UnsafeMutablePointer<addrinfo>?
-            let status = getaddrinfo(domain, nil, &hints, &result)
-
-            defer {
-                if result != nil { freeaddrinfo(result) }
-            }
-
-            guard status == 0, let res = result else {
-                continuation.resume(returning: nil)
-                return
-            }
-
-            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if let addr = res.pointee.ai_addr {
-                getnameinfo(
-                    addr, socklen_t(res.pointee.ai_addrlen),
-                    &hostname, socklen_t(hostname.count),
-                    nil, 0, NI_NUMERICHOST
-                )
-                continuation.resume(returning: String(cString: hostname))
-            } else {
-                continuation.resume(returning: nil)
-            }
-        }
-    }
-
-    // FIX (Phase 6.1): `measureDNSLatency` and `probeDNS` removed. They produced
-    // misleading numbers — see the explanatory comment near `performFullAnalysis`.
-    // Use DNSBenchmark for honest per-server DNS RTT.
-
-    // MARK: - Helpers
-
-    private nonisolated func identifyProvider(ip: String) -> DNSProviderType {
-        if let known = knownDNSServers[ip] {
-            return known
-        }
-
-        // Private IP ranges = local/router
-        if ip.hasPrefix("192.168.") || ip.hasPrefix("10.") || ip.hasPrefix("172.") {
-            return .local
-        }
-
-        // Chinese IP ranges (common ISP prefixes)
-        if ip.hasPrefix("202.") || ip.hasPrefix("221.") || ip.hasPrefix("211.") ||
-            ip.hasPrefix("218.") || ip.hasPrefix("220.") || ip.hasPrefix("222.") {
-            return .isp
-        }
-
-        return .unknown
+        return .unknown // Prefixes do not identify the operator of an arbitrary IP.
     }
 }

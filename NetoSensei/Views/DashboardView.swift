@@ -785,7 +785,7 @@ struct DashboardView: View {
                 if vm.latencyIntercepted {
                     StatusRow(
                         title: "Latency",
-                        value: "Via VPN/proxy",
+                        value: "Probe uncertain",
                         color: AppColors.yellow
                     )
                 } else if let latency = vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal {
@@ -800,7 +800,7 @@ struct DashboardView: View {
                 if vm.hasISPWarning {
                     if vpnActive {
                         // VPN is active - latency is caused by VPN routing, not ISP
-                        Text("ℹ️ High latency — caused by VPN routing (not ISP)")
+                        Text("ℹ️ High endpoint latency while VPN is active; cause unverified")
                             .font(.caption)
                             .foregroundColor(AppColors.yellow)
                             .padding(.top, 4)
@@ -822,7 +822,7 @@ struct DashboardView: View {
 
     private var internetLatencyInfoSheet: some View {
         // PHASE 2.1: when intercepted, the direct network RTT is unmeasurable —
-        // show "Via VPN/proxy" rather than a stale/fake number.
+        // show "Probe uncertain" rather than a stale/fake number.
         let intercepted = vm.latencyIntercepted
         let primary = intercepted ? nil : (vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal)
         let appResponse = vm.status.internet.httpRTT
@@ -837,7 +837,7 @@ struct DashboardView: View {
                                 .font(.headline)
                             Spacer()
                             if intercepted {
-                                Text("Via VPN/proxy")
+                                Text("Probe uncertain")
                                     .font(.subheadline.bold())
                                     .foregroundColor(AppColors.yellow)
                             } else {
@@ -927,7 +927,7 @@ struct DashboardView: View {
                 )
 
                 // Protocol
-                if let tunnelType = vm.status.vpn.tunnelType {
+                if vm.status.vpn.isAuthoritative, let tunnelType = vm.status.vpn.tunnelType {
                     StatusRow(
                         title: "Protocol",
                         value: tunnelType,
@@ -936,7 +936,7 @@ struct DashboardView: View {
                 }
 
                 // VPN Health Score
-                if let score = vm.vpnHealthScore {
+                if vm.status.vpn.isAuthoritative, let score = vm.vpnHealthScore {
                     HStack(spacing: 12) {
                         // Mini score circle
                         ZStack {
@@ -964,9 +964,9 @@ struct DashboardView: View {
                     }
                 } else {
                     StatusRow(
-                        title: "Health",
-                        value: vm.vpnHealthDescription,
-                        color: vm.vpnHealthColor
+                        title: "Protection",
+                        value: "Unverified",
+                        color: .secondary
                     )
                 }
 
@@ -975,7 +975,7 @@ struct DashboardView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "info.circle")
                             .font(.caption2)
-                        Text("VPN adds ~\(Int(overhead))ms latency")
+                        Text("VPN difference ~\(Int(overhead))ms")
                             .font(.caption2)
                     }
                     .foregroundColor(AppColors.textSecondary)
@@ -1042,7 +1042,7 @@ struct DashboardView: View {
                         Image(systemName: "network")
                             .font(.system(size: UIConstants.iconSizeM))
                             .foregroundColor(AppColors.textSecondary)
-                        Text("Public IP & ISP")
+                        Text("Public IP & network organization")
                             .font(.headline)
                             .foregroundColor(AppColors.textPrimary)
 
@@ -1082,7 +1082,7 @@ struct DashboardView: View {
                     // ISP
                     if !vm.ispName.isEmpty {
                         HStack {
-                            Text("ISP")
+                            Text("Organization")
                                 .font(.subheadline)
                                 .foregroundColor(AppColors.textSecondary)
                             Spacer()

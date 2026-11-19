@@ -261,16 +261,8 @@ class DigitalFootprintScanner: ObservableObject {
         scanResults.filter { $0.status == .pending }.count
     }
 
-    var exposureScore: Int {
-        let totalBrokers = database.brokers.count
-        let found = foundCount
-        let pending = pendingCount
-
-        if totalBrokers == 0 { return 0 }
-
-        let exposedPercent = Double(found + pending) / Double(totalBrokers) * 100
-        return 100 - Int(exposedPercent)
-    }
+    /// Search links and user-entered statuses cannot establish a numerical privacy score.
+    var exposureScore: Int? { nil }
 
     // MARK: - Persistence
 

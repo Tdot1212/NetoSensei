@@ -23,22 +23,9 @@ struct PrivacyShieldStatus {
 
     var overallStatus: OverallStatus {
         let checks = [vpnStatus, dnsPrivacy, ipHidden, webRTCLeak, httpsIntegrity, ipv6Leak]
-        let passedCount = checks.filter { $0.passed }.count
-        let warningCount = checks.filter { $0.severity == .warning }.count
-
-        // FIX (Sec Issue 2): Any warning-severity check (e.g. IPv6 leak under
-        // VPN) downgrades the top verdict — the previous logic counted only
-        // pass/fail and would still say "All Checks Passed" while a real leak
-        // was flagged underneath.
-        if passedCount == checks.count {
-            return .protected
-        } else if warningCount > 0 && passedCount + warningCount >= 4 {
-            return .partiallyProtected
-        } else if passedCount >= 3 {
-            return .partiallyProtected
-        } else {
-            return .exposed
-        }
+        if checks.allSatisfy(\.passed) { return .protected }
+        if checks.contains(where: { $0.severity == .failed }) { return .exposed }
+        return .partiallyProtected
     }
 
     enum OverallStatus {
@@ -49,7 +36,7 @@ struct PrivacyShieldStatus {
         var displayText: String {
             switch self {
             case .protected: return "All Checks Passed"
-            case .partiallyProtected: return "Partial Protection"
+            case .partiallyProtected: return "Privacy Unverified"
             case .exposed: return "Checks Failed"
             }
         }
@@ -116,7 +103,7 @@ struct ExposureInfo {
 
     var locationDetail: String {
         if let loc = visibleLocation {
-            return isRealIP ? "Your real location is visible" : "Websites think you're in \(loc)"
+            return "Approximate IP geolocation: \(loc). This is not a GPS location."
         }
         return "Location unknown"
     }
@@ -189,6 +176,7 @@ struct VPNLeakTestResult {
     }
 
     enum Verdict {
+        case unverified
         case noLeaks
         case minorLeaks
         case majorLeaks
@@ -196,6 +184,7 @@ struct VPNLeakTestResult {
 
         var displayText: String {
             switch self {
+            case .unverified: return "Leak Protection Unverified"
             case .noLeaks: return "No Leaks Detected"
             case .minorLeaks: return "Minor Leaks Found"
             case .majorLeaks: return "Major Leaks Found"
@@ -205,6 +194,7 @@ struct VPNLeakTestResult {
 
         var systemImage: String {
             switch self {
+            case .unverified: return "questionmark.shield"
             case .noLeaks: return "checkmark.shield.fill"
             case .minorLeaks: return "exclamationmark.shield.fill"
             case .majorLeaks: return "xmark.shield.fill"
@@ -272,40 +262,9 @@ class PrivacyShieldService: ObservableObject {
     /// SmartVPNDetector already detects this via `IPv6 Check` method — this
     /// surfaces the same finding as a top-level Privacy Shield row.
     private func checkIPv6Leak() async -> PrivacyShieldStatus.CheckResult {
-        let vpnResult = SmartVPNDetector.shared.detectionResult
-        let vpnLikelyOn = vpnResult?.vpnState.isLikelyOn ?? false
-
-        // The IPv6 Check method emits "Native ISP IPv6 present" when residential
-        // IPv6 is exposed outside the tunnel.
-        let nativeIPv6Detected: Bool = {
-            guard let methods = vpnResult?.methodResults else { return false }
-            return methods.contains {
-                $0.method == "IPv6 Check" && $0.detail.lowercased().contains("native isp ipv6")
-            }
-        }()
-
-        if vpnLikelyOn && nativeIPv6Detected {
-            // Real partial-protection state — VPN is up but IPv6 bypasses it.
-            return PrivacyShieldStatus.CheckResult(
-                passed: false,
-                title: "IPv6 Leak",
-                detail: "Your ISP IPv6 address is visible to websites that prefer IPv6. VPN protection is incomplete.",
-                recommendation: "To fix: disable IPv6 in your proxy app settings (Surge / Shadowrocket: Settings → IPv6 → Off), OR use a VPN profile that tunnels IPv6.",
-                severity: .warning
-            )
-        }
-
-        // No VPN: IPv6 leak doesn't apply (no tunnel to leak around).
-        // VPN active and no native IPv6: pass.
-        return PrivacyShieldStatus.CheckResult(
-            passed: true,
-            title: "IPv6 Leak",
-            detail: vpnLikelyOn
-                ? "No native IPv6 leak detected — IPv6 traffic appears to route through VPN"
-                : "Not applicable — no VPN active",
-            recommendation: nil,
-            severity: .passed
-        )
+        PrivacyShieldStatus.CheckResult(passed: false, title: "IPv6 Protection Unverified",
+            detail: "An interface address does not establish whether a remote IPv6 request bypasses a VPN. No end-to-end IPv6 routing test was completed.",
+            recommendation: nil, severity: .warning)
     }
 
     // MARK: - VPN Status Check
@@ -340,8 +299,8 @@ class PrivacyShieldService: ObservableObject {
             return PrivacyShieldStatus.CheckResult(
                 passed: false,
                 title: "VPN",
-                detail: "No VPN detected — traffic visible to ISP",
-                recommendation: "Connect to a VPN to encrypt your traffic"
+                detail: "No VPN detected; HTTPS can still encrypt application traffic",
+                recommendation: nil, severity: .warning
             )
         }
     }
@@ -357,66 +316,30 @@ class PrivacyShieldService: ObservableObject {
             return PrivacyShieldStatus.CheckResult(
                 passed: false,
                 title: "DNS Private",
-                detail: "DNS queries are visible to your ISP",
-                recommendation: "Connect to a VPN to hide DNS queries"
+                detail: "DNS privacy is unverified; a VPN is not detected",
+                recommendation: nil, severity: .warning
             )
         }
 
-        // Check if DNS resolver appears to be through VPN
-        // Chinese ISP DNS servers typically start with these prefixes
-        let chinaISPDNS = ["202.96.", "218.2.", "114.114.", "119.29.", "223.5.", "223.6.", "182.254."]
-
-        // Get current DNS resolver from network status
-        let dnsServer = NetworkMonitorService.shared.currentStatus.dns.resolverIP
-
-        if let dns = dnsServer, chinaISPDNS.contains(where: { dns.hasPrefix($0) }) {
-            return PrivacyShieldStatus.CheckResult(
-                passed: false,
-                title: "DNS Private",
-                detail: "DNS queries may be leaking to your local ISP (\(dns))",
-                recommendation: "Configure your VPN to use its own DNS servers"
-            )
-        }
-
+        // Neither a VPN-active flag nor the configured resolver proves the
+        // transport taken by a DNS query. No resolver-path test exists here.
         return PrivacyShieldStatus.CheckResult(
-            passed: true,
-            title: "DNS Private",
-            detail: "DNS queries go through your VPN",
-            recommendation: nil
+            passed: false,
+            title: "DNS Privacy Unverified",
+            detail: "VPN is active, but the DNS query path was not measured",
+            recommendation: "Review DNS settings in your VPN app",
+            severity: .warning
         )
     }
 
     // MARK: - IP Hidden Check
 
     private func checkIPHidden() async -> PrivacyShieldStatus.CheckResult {
-        let vpnResult = SmartVPNDetector.shared.detectionResult
-        let vpnState = vpnResult?.vpnState ?? .unknown
-        let isAuthoritative = vpnResult?.isAuthoritative ?? false
-
-        guard vpnState.isLikelyOn else {
-            let ip = vpnResult?.publicIP ?? "Unknown"
-            let isp = vpnResult?.publicISP ?? "your ISP"
-            // Don't say "IP Hidden" when it's a residential ISP
-            return PrivacyShieldStatus.CheckResult(
-                passed: false,
-                title: "IP Visibility",
-                detail: "Your IP (\(ip)) from \(isp) is visible to websites",
-                recommendation: "Connect to a VPN to route through a different IP"
-            )
-        }
-
-        let publicCountry = vpnResult?.publicCountry ?? ""
-        let deviceLocale = Locale.current.region?.identifier ?? ""
-        let isRerouted = !publicCountry.isEmpty && publicCountry != deviceLocale
-
-        return PrivacyShieldStatus.CheckResult(
-            passed: isRerouted,
-            title: "IP Visibility",
-            detail: isRerouted
-                ? "Traffic routed through \(publicCountry) IP\(isAuthoritative ? " (VPN confirmed)" : " (inferred)")"
-                : "VPN active but IP country matches your location",
-            recommendation: isRerouted ? nil : "Try a VPN server in a different region"
-        )
+        let ip = SmartVPNDetector.shared.detectionResult?.publicIP
+        return PrivacyShieldStatus.CheckResult(passed: false, title: "IP Routing Unverified",
+            detail: ip.map { "Observed public egress: \($0). A baseline and per-route comparison are needed to establish VPN bypass." }
+                ?? "Public egress unavailable; VPN bypass cannot be assessed.",
+            recommendation: nil, severity: .warning)
     }
 
     // MARK: - WebRTC Leak Check
@@ -426,10 +349,10 @@ class PrivacyShieldService: ObservableObject {
         // iOS apps do not use WebRTC for IP discovery.
         // Showing this check as always-passed with honest explanation.
         return PrivacyShieldStatus.CheckResult(
-            passed: true,
-            title: "WebRTC",
-            detail: "Not applicable — WebRTC leaks only affect web browsers, not native iOS apps",
-            recommendation: nil
+            passed: false,
+            title: "Browser WebRTC Unverified",
+            detail: "This native check does not test browser WebRTC behavior",
+            recommendation: nil, severity: .warning
         )
     }
 
@@ -505,19 +428,7 @@ class PrivacyShieldService: ObservableObject {
         let city = vpnResult?.publicCity
         let isp = vpnResult?.publicISP
 
-        // Determine IP type based on ISP name
-        let ipType: String
-        if let ispName = isp?.lowercased() {
-            if ispName.contains("vpn") || ispName.contains("private") ||
-               ispName.contains("hosting") || ispName.contains("cloud") ||
-               ispName.contains("data center") {
-                ipType = "Data Center / VPN"
-            } else {
-                ipType = "Residential"
-            }
-        } else {
-            ipType = "Unknown"
-        }
+        let ipType = "Unverified (provider metadata only)"
 
         let location: String?
         if let c = city, let co = country {
@@ -539,7 +450,7 @@ class PrivacyShieldService: ObservableObject {
 
     // MARK: - WiFi Safety Check
 
-    func checkWiFiSafety() async {
+    func checkWiFiSafety(portal: CaptivePortalResult, vpn: SmartVPNDetector.VPNDetectionResult) async -> WiFiSafetyResult {
         isCheckingWiFi = true
         defer { isCheckingWiFi = false }
 
@@ -566,35 +477,25 @@ class PrivacyShieldService: ObservableObject {
         }
 
         // 2. Check VPN status
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
+        let vpnActive = vpn.vpnState.isLikelyOn
         checks.append(WiFiSafetyResult.SafetyCheck(
             title: "VPN Protection",
-            detail: vpnActive ? "Traffic is encrypted" : "Traffic is not encrypted",
-            status: vpnActive ? .passed : .warning
+            detail: vpnActive ? "Possible VPN or proxy. Traffic coverage is unverified." : "No VPN detected; HTTPS can still encrypt application traffic",
+            status: .warning
         ))
 
-        // 3. Check for captive portal (try connecting to a known URL)
-        let hasCaptivePortal = await checkCaptivePortal()
-        checks.append(WiFiSafetyResult.SafetyCheck(
-            title: "Captive Portal",
-            detail: hasCaptivePortal ? "Login page detected" : "No login page required",
-            status: hasCaptivePortal ? .warning : .passed
-        ))
-
-        // 4. Check DNS hijacking
-        let dnsHijacked = await checkDNSHijacking()
-        checks.append(WiFiSafetyResult.SafetyCheck(
-            title: "DNS Security",
-            detail: dnsHijacked ? "DNS may be tampered" : "DNS appears normal",
-            status: dnsHijacked ? .failed : .passed
-        ))
+        checks.append(WiFiSafetyResult.SafetyCheck(title: "Captive Portal",
+            detail: portal.verdict == .noPortal ? "Known portal probes returned expected responses" : (portal.verdict == .portalDetected ? "Login page detected by the portal probes" : "Login requirement unverified"),
+            status: portal.verdict == .noPortal ? .passed : .warning))
+        checks.append(WiFiSafetyResult.SafetyCheck(title: "DNS Query Integrity",
+            detail: "Not verified. A successful lookup does not establish DNS integrity.", status: .warning))
 
         // 5. Check HTTPS
         let httpsWorks = await checkBasicHTTPS()
         checks.append(WiFiSafetyResult.SafetyCheck(
             title: "HTTPS Connections",
-            detail: httpsWorks ? "HTTPS works correctly" : "HTTPS may be blocked or intercepted",
-            status: httpsWorks ? .passed : .failed
+            detail: httpsWorks ? "A tested HTTPS endpoint responded" : "HTTPS response unavailable; cause unknown",
+            status: httpsWorks ? .passed : .warning
         ))
 
         // Determine overall status
@@ -604,13 +505,15 @@ class PrivacyShieldService: ObservableObject {
         let overallStatus: WiFiSafetyResult.SafetyStatus
         if failedCount > 0 {
             overallStatus = .unsafe
-        } else if warningCount > 1 || (!vpnActive && warningCount > 0) {
+        } else if warningCount > 0 {
             overallStatus = .caution
         } else {
             overallStatus = .safe
         }
 
-        wifiSafetyResult = WiFiSafetyResult(overallStatus: overallStatus, checks: checks)
+        let result = WiFiSafetyResult(overallStatus: overallStatus, checks: checks)
+        wifiSafetyResult = result
+        return result
     }
 
     // MARK: - Helper Methods
@@ -801,7 +704,7 @@ class PrivacyShieldService: ObservableObject {
         if criticalCount > 0 {
             verdict = .majorLeaks
         } else if warningCount > 0 {
-            verdict = .minorLeaks
+            verdict = .unverified
         } else {
             verdict = .noLeaks
         }
@@ -823,57 +726,9 @@ class PrivacyShieldService: ObservableObject {
     }
 
     private func performDNSLeakTest(vpnResult: SmartVPNDetector.VPNDetectionResult) async -> VPNLeakTestResult.LeakCheck {
-        // Check DNS servers - if they belong to local ISP while VPN is active, DNS is leaking
-        let dnsServers = getDNSServers()
-        let localISPDNS = ["202.96.", "218.2.", "114.114.", "119.29.", "223.5.", "223.6.", "182.254.",
-                           "61.139.", "218.6.", "221.228.", "112.124.", "101.226."]
-
-        let leakingServers = dnsServers.filter { server in
-            localISPDNS.contains(where: { server.hasPrefix($0) })
-        }
-
-        if !leakingServers.isEmpty {
-            return VPNLeakTestResult.LeakCheck(
-                name: "DNS Leak",
-                isLeaking: true,
-                detail: "DNS queries going to local ISP (\(leakingServers.first ?? "unknown")) instead of VPN",
-                severity: .critical,
-                solution: "Enable 'Use VPN DNS' in your VPN app settings, or manually set DNS to 1.1.1.1 or 8.8.8.8"
-            )
-        }
-
-        // Also test by resolving through different DNS path
-        let resolvedNormally = await resolveDomain("myip.opendns.com")
-
-        if let resolved = resolvedNormally, resolved != vpnResult.publicIP {
-            // If resolver returns a proxy fake-IP, the proxy is handling DNS
-            // locally — that's expected, not a leak.
-            // CLEANUP 5: shared ranges via ProxyDetection.isProxyFakeIP
-            if ProxyDetection.isProxyFakeIP(resolved) {
-                return VPNLeakTestResult.LeakCheck(
-                    name: "DNS Leak",
-                    isLeaking: false,
-                    detail: "DNS handled locally by proxy (\(resolved)) — normal for fake-IP routing",
-                    severity: .safe,
-                    solution: nil
-                )
-            }
-            return VPNLeakTestResult.LeakCheck(
-                name: "DNS Leak",
-                isLeaking: true,
-                detail: "DNS resolver returns different IP (\(resolved)) than VPN exit IP",
-                severity: .warning,
-                solution: "Your DNS may be going outside the VPN tunnel. Check VPN DNS settings."
-            )
-        }
-
-        return VPNLeakTestResult.LeakCheck(
-            name: "DNS Leak",
-            isLeaking: false,
-            detail: "DNS queries are going through the VPN tunnel",
-            severity: .safe,
-            solution: nil
-        )
+        VPNLeakTestResult.LeakCheck(name: "DNS Privacy", isLeaking: false,
+            detail: "Not measured. Resolver addresses and ordinary hostname answers do not establish the route of DNS queries.",
+            severity: .warning, solution: "Review DNS routing in your VPN app. A controlled DNS leak test is required to verify protection.")
     }
 
     private func performIPLeakTest(vpnResult: SmartVPNDetector.VPNDetectionResult) async -> VPNLeakTestResult.LeakCheck {
@@ -905,62 +760,17 @@ class PrivacyShieldService: ObservableObject {
             }
         }
 
-        if detectedIPs.count > 1 {
-            return VPNLeakTestResult.LeakCheck(
-                name: "IP Leak",
-                isLeaking: true,
-                detail: "Multiple IPs detected: \(detectedIPs.joined(separator: ", ")). Some traffic may bypass VPN.",
-                severity: .critical,
-                solution: "Disable split-tunneling in your VPN app, or ensure all traffic routes through VPN"
-            )
-        }
-
-        // Check if IP matches expected VPN location (not local country)
-        let deviceCountry = Locale.current.region?.identifier ?? ""
-        let vpnCountry = vpnResult.publicCountry ?? ""
-
-        if !vpnCountry.isEmpty && vpnCountry == deviceCountry {
-            // Could be same-country VPN server, which is fine
-            return VPNLeakTestResult.LeakCheck(
-                name: "IP Leak",
-                isLeaking: false,
-                detail: "Public IP (\(vpnResult.publicIP ?? "unknown")) is consistent. VPN server is in your country.",
-                severity: .safe,
-                solution: nil
-            )
-        }
-
-        return VPNLeakTestResult.LeakCheck(
-            name: "IP Leak",
-            isLeaking: false,
-            detail: "Public IP (\(vpnResult.publicIP ?? "unknown")) is consistent across all tests",
-            severity: .safe,
-            solution: nil
-        )
+        return VPNLeakTestResult.LeakCheck(name: "Observed public IP", isLeaking: false,
+            detail: detectedIPs.isEmpty
+                ? "No public IP response was obtained; leak protection is unverified."
+                : "Observed: \(detectedIPs.sorted().joined(separator: ", ")). Multiple IPs may reflect IPv4/IPv6 or routing differences. No direct-path baseline was measured.",
+            severity: .warning, solution: "Verify the expected VPN exit and split-tunnel settings in your VPN app.")
     }
 
     private func performWebRTCLeakTest() async -> VPNLeakTestResult.LeakCheck {
-        // On iOS native apps, WebRTC leaks don't apply
-        // But we check if local IP is accessible (browsers could leak it)
-        let localIP = getLocalIP()
-
-        if let ip = localIP {
-            return VPNLeakTestResult.LeakCheck(
-                name: "WebRTC Leak",
-                isLeaking: false,
-                detail: "Native apps are safe. Browsers could expose local IP (\(ip)) via WebRTC.",
-                severity: .warning,
-                solution: "Use a browser extension to disable WebRTC, or use Safari (which blocks WebRTC leaks by default)"
-            )
-        }
-
-        return VPNLeakTestResult.LeakCheck(
-            name: "WebRTC Leak",
-            isLeaking: false,
-            detail: "No WebRTC leak risk detected",
-            severity: .safe,
-            solution: nil
-        )
+        VPNLeakTestResult.LeakCheck(name: "Browser WebRTC", isLeaking: false,
+            detail: "Browser WebRTC behavior was not tested by this native network check.",
+            severity: .warning, solution: nil)
     }
 
     private func getDNSServers() -> [String] {
@@ -988,37 +798,6 @@ class PrivacyShieldService: ObservableObject {
     }
 
     private func resolveDomain(_ domain: String) async -> String? {
-        await withCheckedContinuation { continuation in
-            var hints = addrinfo(
-                ai_flags: AI_DEFAULT,
-                ai_family: AF_INET,
-                ai_socktype: SOCK_STREAM,
-                ai_protocol: 0,
-                ai_addrlen: 0,
-                ai_canonname: nil,
-                ai_addr: nil,
-                ai_next: nil
-            )
-
-            var result: UnsafeMutablePointer<addrinfo>?
-            let status = getaddrinfo(domain, nil, &hints, &result)
-
-            defer {
-                if result != nil { freeaddrinfo(result) }
-            }
-
-            guard status == 0, let addrInfo = result else {
-                continuation.resume(returning: nil)
-                return
-            }
-
-            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            getnameinfo(addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen,
-                       &hostname, socklen_t(hostname.count),
-                       nil, 0, NI_NUMERICHOST)
-
-            let ip = String(cString: hostname)
-            continuation.resume(returning: ip.isEmpty ? nil : ip)
-        }
+        await SystemDNSResolver.resolve(domain)?.addresses.first
     }
 }

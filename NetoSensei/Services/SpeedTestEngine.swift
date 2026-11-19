@@ -25,21 +25,47 @@ class SpeedTestEngine: ObservableObject {
         case complete
     }
 
-    private init() {}
+    /// Internal dependency injection for controlled transport tests. The shared
+    /// app instance uses real system services and sessions exclusively.
+    struct Environment {
+        var status: @MainActor () -> NetworkStatus
+        var exit: @MainActor () async -> ExitPath.Resolution
+        var latency: @MainActor () async -> (Double?, Double?, Bool)
+        var pathChange: @MainActor () -> Date
+        var makeSession: @Sendable () -> URLSession
+        var now: @Sendable () -> TimeInterval
+    }
+    private let environment: Environment?
+    nonisolated private let clock: @Sendable () -> TimeInterval
+    init(environment: Environment? = nil) {
+        self.environment = environment
+        self.clock = environment?.now ?? { ProcessInfo.processInfo.systemUptime }
+    }
 
     // MARK: - Run Speed Test (GUARANTEED TO COMPLETE)
 
-    func runSpeedTest() async -> SpeedTestResult {
+    func runSpeedTest(measureResponsiveness: Bool = false, comparisonServer: String? = nil) async -> SpeedTestResult {
+        let started = clock()
+        guard !isRunning, !Task.isCancelled else {
+            var unavailable = SpeedTestResult(
+                downloadSpeed: 0, uploadSpeed: 0, ping: nil, jitter: nil, packetLoss: nil,
+                testDuration: 0, connectionType: "Unknown", vpnActive: false
+            )
+            unavailable.testUnavailableReason = Task.isCancelled ? "Speed test cancelled." : "Another speed test is already running."
+            return unavailable
+        }
         debugLog("🚀 SpeedTestEngine: Starting speed test")
 
         // Update MainActor state
         self.isRunning = true
+        defer { self.isRunning = false; self.currentPhase = .idle }
+        let pathChangedAt = environment?.pathChange() ?? ExitPath.lastPathChange
         self.progress = 0.0
         AppLoadTracker.shared.begin("speedTest")            // Commit 7: the monitor must not judge this load
         defer { AppLoadTracker.shared.end("speedTest") }
 
         // Capture network state (already on MainActor)
-        let status = NetworkMonitorService.shared.currentStatus
+        let status = environment?.status() ?? NetworkMonitorService.shared.currentStatus
         let connectionType = status.connectionType?.displayName ?? "Unknown"
         let ipAddress = status.publicIP
         // Phase 4: network identity for trend segmentation (same key concept
@@ -53,7 +79,9 @@ class SpeedTestEngine: ObservableObject {
         self.currentPhase = .findingServer; self.progress = 0.1
         let publicCountry: String?
         let vpnActive: Bool
-        switch await ExitPath.resolveFresh() {
+        let exit: ExitPath.Resolution
+        if let environment { exit = await environment.exit() } else { exit = await ExitPath.resolveFresh() }
+        switch exit {
         case .resolved(let c, let v):
             publicCountry = c
             vpnActive = v
@@ -74,10 +102,10 @@ class SpeedTestEngine: ObservableObject {
         // Fresh connections for this run's transfers: URLSession.shared keeps
         // pooled connections from the PREVIOUS network alive across a switch
         // (device log: "The network connection was lost" on the first upload).
-        transferSession = Self.makeTransferSession()
+        transferSession = environment?.makeSession() ?? Self.makeTransferSession()
         defer { transferSession?.invalidateAndCancel(); transferSession = nil }
 
-        let decision = await selectServer(exitCountry: publicCountry, vpnActive: vpnActive)
+        let decision = await selectServer(exitCountry: publicCountry, vpnActive: vpnActive, comparisonServer: comparisonServer)
         let serverLabel: String
         let serverRegion: SpeedTestServerSelection.Region
         switch decision {
@@ -105,13 +133,35 @@ class SpeedTestEngine: ObservableObject {
         // China-aware: prefer domestic resolvers when in-China-without-VPN
         // (same rule as NetworkMonitorService.getInternet).
         let preferDomestic = isInChina && !vpnActive
-        let (ping, jitter, pingIntercepted) = await testLatency(preferDomestic: preferDomestic, vpnActive: vpnActive)
+        let latencyResult: (Double?, Double?, Bool)
+        if let environment { latencyResult = await environment.latency() } else { latencyResult = await testLatency(preferDomestic: preferDomestic, vpnActive: vpnActive) }
+        let (ping, jitter, pingIntercepted) = latencyResult
         debugLog("✅ Ping: \(ping.map { String(format: "%.0f", $0) + "ms" } ?? "unmeasurable")\(pingIntercepted ? " (intercepted)" : ""), Jitter: \(jitter.map { String(format: "%.0f", $0) + "ms" } ?? "—")")
         self.progress = 0.3
 
+        let probeURL = measureResponsiveness && environment == nil ? selectedCandidate.probeURL : nil
+        let probeSession = probeURL.map { _ in
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = 2
+            configuration.timeoutIntervalForResource = 3
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            return URLSession(configuration: configuration)
+        }
+        defer { probeSession?.invalidateAndCancel() }
+        var idleSamples: [Double] = []
+        if let probeURL, let probeSession {
+            for _ in 0..<5 {
+                guard !Task.isCancelled else { break }
+                if let elapsed = await Self.responseTime(probeURL, session: probeSession) {
+                    idleSamples.append(elapsed)
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+
         // Phase 3: Testing Download (40%) - 30s timeout
         self.currentPhase = .testingDownload; self.progress = 0.4
-        let (downloadSpeed, _) = await testDownloadSpeed(timeout: 30.0)
+        let (downloadSpeed, downloadSamples) = await testDownloadSpeed(probeURL: probeURL, probes: probeSession)
         if downloadSpeed == 0 {
             debugLog("⚠️ Download test failed against \(serverLabel) (\(serverRegion.text)) — no bytes moved")
         } else {
@@ -124,9 +174,10 @@ class SpeedTestEngine: ObservableObject {
         self.currentPhase = .testingUpload; self.progress = 0.75
         let uploadSpeed: Double
         let uploadUnavailableReason: String?
+        var uploadSamples: [Double] = []
         switch SpeedTestServerSelection.uploadPlan(for: selectedCandidate) {
         case .measure(let url):
-            uploadSpeed = await testUploadSpeed(to: url)
+            (uploadSpeed, uploadSamples) = await testUploadSpeed(to: url, probeURL: probeURL, probes: probeSession)
             uploadUnavailableReason = nil
             debugLog("✅ Upload: \(uploadSpeed) Mbps")
         case .unsupported(let reason):
@@ -136,13 +187,9 @@ class SpeedTestEngine: ObservableObject {
         }
         self.progress = 0.9
 
-        // Phase 5: Measure Packet Loss (10%)
-        // INTERNAL CONSISTENCY (Phase 3 physics authority): a test run that just
-        // moved real bytes cannot have 100% loss. Total probe failure with
-        // working throughput = "probes blocked", reported as nil, never 100%.
-        let throughputSucceeded = downloadSpeed > 0 || uploadSpeed > 0
-        let packetLoss = await measurePacketLoss(throughputSucceeded: throughputSucceeded, vpnActive: vpnActive)
-        debugLog("✅ Packet Loss: \(packetLoss.map { String(format: "%.1f", $0) + "%" } ?? "unmeasurable (probes blocked)")")
+        // TCP/HTTP attempts include retries, server policy and filtering. Their
+        // failure ratio is not IP packet loss. Leave packet loss unmeasured.
+        let packetLoss: Double? = nil
         self.progress = 1.0; self.currentPhase = .complete
 
         var result = SpeedTestResult(
@@ -153,7 +200,7 @@ class SpeedTestEngine: ObservableObject {
             packetLoss: packetLoss,
             serverUsed: serverLabel,
             serverLocation: serverRegion.text,
-            testDuration: 0,
+            testDuration: clock() - started,
             connectionType: connectionType,
             vpnActive: vpnActive,
             ipAddress: ipAddress,
@@ -162,9 +209,25 @@ class SpeedTestEngine: ObservableObject {
             localSubnet: localSubnet,
             publicCountry: publicCountry
         )
+        if let probeURL {
+            result.responsiveness = HTTPSResponsiveness(
+                endpoint: probeURL.absoluteString,
+                idleMs: HTTPSResponsiveness.median(idleSamples),
+                downloadMs: downloadSpeed > 0 ? HTTPSResponsiveness.median(downloadSamples) : nil,
+                uploadMs: uploadSpeed > 0 ? HTTPSResponsiveness.median(uploadSamples) : nil
+            )
+        }
+        result.measurementVersion = 2
         result.serverRegion = serverRegion.text
         result.uploadUnavailableReason = uploadUnavailableReason
+        if (environment?.pathChange() ?? ExitPath.lastPathChange) != pathChangedAt {
+            result.testUnavailableReason = "The network path changed during the test. Repeat on a stable connection."
+        }
 
+        if downloadSpeed <= 0 {
+            result.testUnavailableReason = "No valid download transfer completed. Repeat the test when the endpoint is reachable."
+        }
+        if Task.isCancelled { result.testUnavailableReason = "Speed test cancelled." }
         self.isRunning = false
         self.currentPhase = .idle
 
@@ -181,6 +244,9 @@ class SpeedTestEngine: ObservableObject {
     private var transferSession: URLSession?
     nonisolated private static func makeTransferSession() -> URLSession {
         let c = URLSessionConfiguration.ephemeral
+        c.requestCachePolicy = .reloadIgnoringLocalCacheData
+        c.urlCache = nil
+        c.httpAdditionalHeaders = ["Accept-Encoding": "identity", "Cache-Control": "no-cache"]
         c.timeoutIntervalForRequest = 60
         c.timeoutIntervalForResource = 120
         return URLSession(configuration: c)
@@ -190,11 +256,16 @@ class SpeedTestEngine: ObservableObject {
     /// Probe every candidate for the exit country in order, then let the pure
     /// rules decide. Every candidate is probed (not just until the first
     /// qualifies) so the log — and the "Test Not Run" reason — show all of them.
-    private func selectServer(exitCountry: String?, vpnActive: Bool) async -> SpeedTestServerSelection.Decision {
-        let candidates = SpeedTestServerSelection.candidates(forExitCountry: exitCountry)
+    private func selectServer(exitCountry: String?, vpnActive: Bool, comparisonServer: String?) async -> SpeedTestServerSelection.Decision {
+        let eligible = SpeedTestServerSelection.candidates(forExitCountry: exitCountry)
+        let candidates = comparisonServer.map { label in eligible.filter { $0.label == label } } ?? eligible
+        if candidates.isEmpty {
+            return .unavailable(reason: "The baseline test server is unavailable on this route. Choose another VPN exit or repeat the baseline.")
+        }
         var probes: [SpeedTestServerSelection.Probe] = []
         for c in candidates {
-            let (ok, rtt) = await Self.probe(c)
+            if Task.isCancelled { break }
+            let (ok, rtt) = await Self.probe(c, injectedSession: environment?.makeSession())
             debugLog("[SpeedTest] Candidate \(c.label) (\(c.hostname)) exit=\(exitCountry ?? "unknown") vpn=\(vpnActive): \(ok ? "reachable" : "unreachable")\(rtt.map { ", probe \(Int($0)) ms" } ?? "")")
             probes.append(.init(candidate: c, reachable: ok, rttMs: rtt))
         }
@@ -212,7 +283,7 @@ class SpeedTestEngine: ObservableObject {
     /// answers but 404s the test path is not a candidate.
     nonisolated static let probeTimeoutSeconds: TimeInterval = 4.0
 
-    nonisolated private static func probe(_ c: SpeedTestServerSelection.Candidate) async -> (Bool, Double?) {
+    nonisolated private static func probe(_ c: SpeedTestServerSelection.Candidate, injectedSession: URLSession? = nil) async -> (Bool, Double?) {
         guard let url = c.probeURL else { return (false, nil) }
         // Reachability cap, NOT the nearby rule: 4 s so a candidate behind a
         // VPN (the probe crosses the tunnel; the device run showed Cloudflare
@@ -221,7 +292,7 @@ class SpeedTestEngine: ObservableObject {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = Self.probeTimeoutSeconds
         config.timeoutIntervalForResource = Self.probeTimeoutSeconds
-        let session = URLSession(configuration: config)
+        let session = injectedSession ?? URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -273,6 +344,7 @@ class SpeedTestEngine: ObservableObject {
         var samplesMs: [Double] = []
         let start = Date()
         for _ in 0..<Self.pingSampleCount {
+            if Task.isCancelled { break }
             if Date().timeIntervalSince(start) > Self.pingBudgetSeconds { break }
             if let rttSec = await NetworkLatencyProbe.shared.measureExternalLatency(preferDomestic: preferDomestic) {
                 samplesMs.append(rttSec * 1000.0)
@@ -298,18 +370,50 @@ class SpeedTestEngine: ObservableObject {
     /// implausibly-low handshake vs the gateway is excluded, not shown as a
     /// fabricated ~1ms "great" ping.
     nonisolated static func pingVerdict(samplesMs: [Double], gatewayRTTms: Double?, vpnActive: Bool) -> (ping: Double?, jitter: Double?, intercepted: Bool) {
+        let samplesMs = samplesMs.filter { $0.isFinite && $0 >= 0 }
         guard !samplesMs.isEmpty else { return (nil, nil, false) }
-
-        let sorted = samplesMs.sorted()
-        let medianPing = sorted[sorted.count / 2]
+        guard let medianPing = MeasurementStatistics.median(samplesMs) else { return (nil, nil, false) }
 
         if LatencyInterception.evaluate(externalRTTms: medianPing, gatewayRTTms: gatewayRTTms, vpnActive: vpnActive).intercepted {
             return (nil, nil, true)
         }
 
-        let avg = samplesMs.reduce(0, +) / Double(samplesMs.count)
-        let variance = samplesMs.map { pow($0 - avg, 2) }.reduce(0, +) / Double(samplesMs.count)
-        return (medianPing, sqrt(variance), false)
+        return (medianPing, MeasurementStatistics.standardDeviation(samplesMs), false)
+    }
+
+    private func sampleDuringTransfer<Value>(
+        url: URL?, session: URLSession?, transfer: () async throws -> Value
+    ) async rethrows -> (Value, [Double]) {
+        guard let url, let session else { return (try await transfer(), []) }
+        let sampler = Task { @MainActor in
+            var observations: [Double] = []
+            while !Task.isCancelled {
+                if let elapsed = await Self.responseTime(url, session: session), !Task.isCancelled {
+                    observations.append(elapsed)
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            return observations
+        }
+        defer { sampler.cancel() }
+        return try await withTaskCancellationHandler {
+            let value = try await transfer()
+            sampler.cancel()
+            return (value, await sampler.value)
+        } onCancel: {
+            sampler.cancel()
+        }
+    }
+
+    private static func responseTime(_ url: URL, session: URLSession) async -> Double? {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let started = ProcessInfo.processInfo.systemUptime
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              http.url == url, data.count <= 1024,
+              !(http.mimeType?.lowercased().contains("html") ?? false) else { return nil }
+        return (ProcessInfo.processInfo.systemUptime - started) * 1000
     }
 
     // MARK: - Download Speed Test
@@ -317,8 +421,9 @@ class SpeedTestEngine: ObservableObject {
     // FIXED: Increased timeout to 90 seconds (25MB at 2 Mbps = ~100s each, so 2 tests need buffer)
     // FIXED: Return successful results even if second test times out
 
-    private func testDownloadSpeed(timeout: TimeInterval) async -> (Double, Double?) {
+    private func testDownloadSpeed(probeURL: URL?, probes: URLSession?) async -> (Double, [Double]) {
         var collectedSpeeds: [Double] = []
+        var matchingSamples: [Double] = []
 
         // FIXED: Progressive download sizing
         // Start with 5MB (works on slow connections / China), scale up if fast
@@ -328,6 +433,7 @@ class SpeedTestEngine: ObservableObject {
         ]
 
         for (i, testSize) in testSizes.enumerated() {
+            if Task.isCancelled { break }
             // Skip the large test if first test showed very slow speeds (<2 Mbps)
             if i == 1, let firstSpeed = collectedSpeeds.first, firstSpeed < 2.0 {
                 debugLog("📥 Skipping \(testSize.label) test — connection too slow (\(String(format: "%.1f", firstSpeed)) Mbps)")
@@ -336,33 +442,43 @@ class SpeedTestEngine: ObservableObject {
 
             do {
                 let perTestTimeout = i == 0 ? 20.0 : 45.0
-                let speed = try await withTimeout(seconds: perTestTimeout) {
-                    let (candidate, session) = await MainActor.run { (self.selectedCandidate, self.runSession) }
-                    guard let url = candidate.downloadURL(bytes: testSize.bytes) else {
-                        throw SpeedTestTransferError.unsupported("download")
-                    }
+                let (speed, samples) = try await sampleDuringTransfer(url: probeURL, session: probes) {
+                    try await withTimeout(seconds: perTestTimeout) {
+                        let (candidate, session) = await MainActor.run { (self.selectedCandidate, self.runSession) }
+                        guard let url = candidate.downloadURL(bytes: testSize.bytes) else {
+                            throw SpeedTestTransferError.unsupported("download")
+                        }
 
-                    let start = Date()
-                    let (data, response) = try await session.data(from: url)
-                    let duration = Date().timeIntervalSince(start)
-                    // Commit 12: a measurement needs a 2xx AND (about) the bytes
-                    // asked for. A 200 HTML page or a 404 body is not throughput.
-                    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                        throw SpeedTestTransferError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
-                    }
-                    guard Double(data.count) >= Double(testSize.bytes) * 0.9 else {
-                        throw SpeedTestTransferError.shortBody(got: data.count, wanted: testSize.bytes)
-                    }
+                        let start = self.clock()
+                        var request = URLRequest(url: url)
+                        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                        let (data, response) = try await session.data(for: request)
+                        let duration = self.clock() - start
+                        // Commit 12: a measurement needs a 2xx AND (about) the bytes
+                        // asked for. A 200 HTML page or a 404 body is not throughput.
+                        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                            throw SpeedTestTransferError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+                        }
+                        guard http.value(forHTTPHeaderField: "Content-Encoding").map({ $0.lowercased() == "identity" }) ?? true,
+                              !(http.mimeType?.lowercased().hasPrefix("text/") ?? false) else {
+                            throw SpeedTestTransferError.unsupported("uncompressed binary response")
+                        }
+                        guard Double(data.count) >= Double(testSize.bytes) * 0.9 else {
+                            throw SpeedTestTransferError.shortBody(got: data.count, wanted: testSize.bytes)
+                        }
 
-                    let megabits = Double(data.count) * 8 / 1_000_000
-                    let mbps = megabits / duration
+                        guard let mbps = MeasurementStatistics.throughputMbps(bytes: data.count, duration: duration) else {
+                            throw SpeedTestTransferError.unsupported("valid transfer duration")
+                        }
 
-                    debugLog("📥 Download test \(i+1) (\(testSize.label)): \(String(format: "%.1f", mbps)) Mbps (\(data.count) bytes in \(String(format: "%.1f", duration))s)")
-                    return mbps
+                        debugLog("📥 Download test \(i+1) (\(testSize.label)): \(String(format: "%.1f", mbps)) Mbps (\(data.count) bytes in \(String(format: "%.1f", duration))s)")
+                        return mbps
+                    }
                 }
 
                 if speed > 0 {
                     collectedSpeeds.append(speed)
+                    matchingSamples = samples
                 }
             } catch {
                 debugLog("⚠️ Download test \(i+1) (\(testSize.label)) failed: \(error.localizedDescription)")
@@ -376,18 +492,9 @@ class SpeedTestEngine: ObservableObject {
         // this naturally handles both single- and multi-result cases.
         guard let bestSpeed = collectedSpeeds.last else {
             debugLog("⚠️ All download tests failed")
-            return (0.0, nil)
+            return (0, [])
         }
-
-        let avgSpeed = collectedSpeeds.reduce(0, +) / Double(collectedSpeeds.count)
-        let variance = collectedSpeeds.count > 1
-            ? collectedSpeeds.map { pow($0 - avgSpeed, 2) }.reduce(0, +) / Double(collectedSpeeds.count)
-            : 0.0
-        let jitter = sqrt(variance)
-
-        // Use the larger test result if available (more accurate), otherwise use first
-        debugLog("📥 Download result: \(String(format: "%.1f", bestSpeed)) Mbps (from \(collectedSpeeds.count) test(s))")
-        return (bestSpeed, jitter)
+        return (bestSpeed, matchingSamples)
     }
 
     // MARK: - Upload Speed Test
@@ -395,40 +502,47 @@ class SpeedTestEngine: ObservableObject {
     // FIXED: Increased timeout to 60 seconds per test
     // FIXED: Return successful results even if second test times out
 
-    private func testUploadSpeed(to uploadURL: URL) async -> Double {
+    private func testUploadSpeed(to uploadURL: URL, probeURL: URL?, probes: URLSession?) async -> (Double, [Double]) {
         var collectedSpeeds: [Double] = []
+        var matchingSamples: [Double] = []
 
         // FIXED: Generate 10MB of test data for more accurate upload measurement
         let testData = Data(repeating: 0, count: 10_000_000)  // 10MB
 
         // FIXED: Create individual test tasks with their own timeouts
         for i in 0..<2 {
+            if Task.isCancelled { break }
             do {
                 // Each upload test gets 45 seconds
-                let speed = try await withTimeout(seconds: 45.0) {
-                    var request = URLRequest(url: uploadURL)
-                    request.httpMethod = "POST"
-                    request.httpBody = testData
-                    request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                let (speed, samples) = try await sampleDuringTransfer(url: probeURL, session: probes) {
+                    try await withTimeout(seconds: 45.0) {
+                        var request = URLRequest(url: uploadURL)
+                        request.httpMethod = "POST"
+                        request.httpBody = testData
+                        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
 
-                    let session = await MainActor.run { self.runSession }
-                    let start = Date()
-                    let (_, response) = try await session.data(for: request)
-                    let duration = Date().timeIntervalSince(start)
-                    // Commit 12: a rejected upload (405/413/…) returns fast and
-                    // would read as a huge figure. Only a 2xx counts.
-                    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                        throw SpeedTestTransferError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+                        let session = await MainActor.run { self.runSession }
+                        let start = self.clock()
+                        let (response, sentBytes) = try await UploadTransfer.perform(session: session, request: request)
+                        let duration = self.clock() - start
+                        // Commit 12: a rejected upload (405/413/…) returns fast and
+                        // would read as a huge figure. Only a 2xx counts.
+                        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                            throw SpeedTestTransferError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+                        }
+                        guard sentBytes == Int64(testData.count),
+                              let mbps = MeasurementStatistics.throughputMbps(bytes: Int(sentBytes), duration: duration) else {
+                            throw SpeedTestTransferError.unsupported("valid transfer duration")
+                        }
+
+                        debugLog("📤 Upload test \(i+1): \(String(format: "%.1f", mbps)) Mbps (\(testData.count) bytes in \(String(format: "%.1f", duration))s)")
+                        return mbps
                     }
-                    let megabits = Double(testData.count) * 8 / 1_000_000
-                    let mbps = megabits / duration
-
-                    debugLog("📤 Upload test \(i+1): \(String(format: "%.1f", mbps)) Mbps (\(testData.count) bytes in \(String(format: "%.1f", duration))s)")
-                    return mbps
                 }
 
                 if speed > 0 {
                     collectedSpeeds.append(speed)
+                    matchingSamples.append(contentsOf: samples)
                 }
             } catch {
                 debugLog("⚠️ Upload test \(i+1) failed: \(error.localizedDescription)")
@@ -442,62 +556,16 @@ class SpeedTestEngine: ObservableObject {
         // FIXED: Return whatever successful measurements we collected
         guard !collectedSpeeds.isEmpty else {
             debugLog("⚠️ All upload tests failed")
-            return 0.0
+            return (0, [])
         }
 
         let avgSpeed = collectedSpeeds.reduce(0, +) / Double(collectedSpeeds.count)
         debugLog("📤 Upload result: \(String(format: "%.1f", avgSpeed)) Mbps (from \(collectedSpeeds.count) successful test(s))")
-        return avgSpeed
+        return (avgSpeed, matchingSamples)
     }
 
-    // MARK: - Packet Loss Test (Phase 3: sentinel-free, consistency-gated)
-    //
-    // Returns nil when loss is UNMEASURABLE — never a 100% / 0% sentinel.
-    // The physics authority: you can only measure loss on a path you can reach
-    // at all. If zero probe rounds round-trip, that is "probes blocked", not
-    // "100% loss" — and it is self-refuting when throughput simultaneously
-    // succeeded (the old bug: 100% loss next to 71 Mbps). Real loss is only
-    // reported when >= 1 probe round actually got through.
-
-    /// Probe rounds; each round races 3 targets so one blocked host can't poison
-    /// the metric (a round counts as reached if ANY target answers).
-    private static let lossProbeRounds = 10
-    /// Per-probe timeout. Loss probes need to be quick, but not so tight that a
-    /// tunnel's added latency fakes a failure (that asymmetry caused the bug).
-    private static let lossProbeTimeoutSeconds: TimeInterval = 1.5
-    /// Overall budget; rounds actually run form the denominator.
-    private static let lossBudgetSeconds: TimeInterval = 6.0
-
-    private func measurePacketLoss(throughputSucceeded: Bool, vpnActive: Bool) async -> Double? {
-        let targets = ["apple.com", "1.1.1.1", "www.baidu.com"]
-        var successCount = 0
-        var roundsRun = 0
-        let start = Date()
-
-        for _ in 0..<Self.lossProbeRounds {
-            if Date().timeIntervalSince(start) > Self.lossBudgetSeconds { break }
-            async let r1 = NetworkMonitorService.shared.pingHost(targets[0], timeout: Self.lossProbeTimeoutSeconds)
-            async let r2 = NetworkMonitorService.shared.pingHost(targets[1], timeout: Self.lossProbeTimeoutSeconds)
-            async let r3 = NetworkMonitorService.shared.pingHost(targets[2], timeout: Self.lossProbeTimeoutSeconds)
-            let results = await [r1, r2, r3]
-            roundsRun += 1
-            if results.contains(where: { $0.0 == true }) {
-                successCount += 1
-            }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-
-        let loss = Self.packetLossPercent(roundsRun: roundsRun, successCount: successCount)
-        if loss == nil {
-            let reason = throughputSucceeded
-                ? "throughput succeeded but 0/\(roundsRun) probe rounds got through → probes blocked by VPN/proxy, not packet loss"
-                : "0/\(roundsRun) probe rounds got through → path unreachable, loss unmeasurable"
-            debugLog("[SpeedTest] Packet loss unmeasurable — \(reason) (vpnActive=\(vpnActive))")
-        }
-        return loss
-    }
-
-    /// Pure packet-loss verdict (Phase 3, testable without network I/O).
+    // Legacy helper retained for decoding/auditing old probe-failure behavior.
+    /// Legacy probe-failure calculation, not used as an IP packet-loss metric.
     /// The physics authority: loss is only measurable on a path at least one
     /// probe reached. Zero successes -> nil ("probes blocked"), NEVER 100% —
     /// which would be self-refuting next to a successful throughput run. With

@@ -93,7 +93,7 @@ struct ThrottleAnalysis {
     let results: [ThrottleResult]
     let throttlingDetected: Bool
     let throttledServices: [String]
-    let baselineSpeed: Double     // Fastest endpoint speed
+    let baselineSpeed: Double?    // Fastest validated endpoint; nil if none
     let validTestCount: Int       // How many tests were valid
     let summary: String
     let explanation: String       // Plain-English explanation
@@ -124,11 +124,11 @@ struct ThrottleAnalysis {
         if validTestCount < 2 {
             return "Inconclusive"
         } else if throttlingDetected {
-            return "Possible Throttling"
+            return "Large sample difference"
         } else if results.allSatisfy({ $0.status != .success }) {
             return "Test Failed"
         } else {
-            return "No Throttling"
+            return "Similar sampled speeds"
         }
     }
 
@@ -196,7 +196,14 @@ class ThrottleDetectionService {
         ),
     ]
 
-    private init() {}
+    private let injectedSession: URLSession?
+    private let vpn: @MainActor () -> Bool
+    private let clock: @Sendable () -> TimeInterval
+    init(session: URLSession? = nil,
+         vpn: @escaping @MainActor () -> Bool = { SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false },
+         clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        injectedSession = session; self.vpn = vpn; self.clock = clock
+    }
 
     // MARK: - Detect Throttling
 
@@ -205,32 +212,7 @@ class ThrottleDetectionService {
         // stability monitor must not judge the network by them.
         await MainActor.run { AppLoadTracker.shared.begin("throttleTest") }
         defer { Task { @MainActor in AppLoadTracker.shared.end("throttleTest") } }
-        let isVPNActive = await MainActor.run {
-            SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-        }
-
-        // FIX (Phase 6.2): Skip the whole test under VPN. Throttle detection
-        // works by comparing per-CDN throughput. Through a VPN, all traffic
-        // exits at the same tunnel endpoint — the differences just reflect
-        // VPN-server-to-CDN paths, not ISP behavior. Reporting 0.7 Mbps for
-        // Apple while the user has a 122 Mbps line is worse than reporting
-        // nothing.
-        if isVPNActive {
-            progressHandler?(1.0, "Skipped (VPN active)")
-            return ThrottleAnalysis(
-                results: [],
-                throttlingDetected: false,
-                throttledServices: [],
-                baselineSpeed: 0,
-                validTestCount: 0,
-                summary: "Throttle Test only runs when VPN is disconnected.",
-                explanation: "Throttle detection compares per-CDN download speeds to spot ISP-level slowdowns. With VPN active, all traffic exits through the tunnel — per-CDN comparisons reflect the VPN server's routing, not your ISP. VPN bypasses ISP throttling anyway, so the test isn't useful here.",
-                timestamp: Date(),
-                recommendation: "Disconnect your VPN and run this test again to check if your ISP is throttling specific services.",
-                isVPNActive: true,
-                confidence: .skipped
-            )
-        }
+        let isVPNActive = await vpn()
 
         var results: [ThrottleResult] = []
         let totalEndpoints = Double(Self.endpoints.count)
@@ -259,7 +241,7 @@ class ThrottleDetectionService {
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 15
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: config)
+        let session = injectedSession ?? URLSession(configuration: config)
 
         guard let url = URL(string: endpoint.url) else {
             return ThrottleResult(
@@ -278,15 +260,18 @@ class ThrottleDetectionService {
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = clock()
         do {
             let (data, response) = try await session.data(for: request)
-            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            let elapsed = clock() - start
 
             guard let httpResponse = response as? HTTPURLResponse,
-                  (200...399).contains(httpResponse.statusCode),
+                  (200...299).contains(httpResponse.statusCode),
+                  httpResponse.value(forHTTPHeaderField: "Content-Encoding").map({ $0.lowercased() == "identity" }) ?? true,
+                  !(httpResponse.mimeType?.lowercased().hasPrefix("text/") ?? false),
                   elapsed > 0 else {
                 return ThrottleResult(
                     endpoint: endpoint.name,
@@ -318,8 +303,7 @@ class ThrottleDetectionService {
                 )
             }
 
-            let bytes = Double(data.count)
-            let mbps = (bytes * 8) / (elapsed * 1_000_000)
+            guard let mbps = MeasurementStatistics.throughputMbps(bytes: data.count, duration: elapsed) else { throw URLError(.badServerResponse) }
 
             return ThrottleResult(
                 endpoint: endpoint.name,
@@ -374,7 +358,7 @@ class ThrottleDetectionService {
                 results: results,
                 throttlingDetected: false,
                 throttledServices: [],
-                baselineSpeed: 0,
+                baselineSpeed: validResults.compactMap(\.speedMbps).max(),
                 validTestCount: validTestCount,
                 summary: "Not enough valid test results to determine throttling.",
                 explanation: "We couldn't complete enough speed tests to draw conclusions. This may be due to network issues or endpoint unavailability.",
@@ -514,15 +498,15 @@ class ThrottleDetectionService {
                     "• The service's servers being far away or busy\n" +
                     "• Network routing issues\n" +
                     "• Temporary congestion\n\n" +
-                    "To confirm ISP throttling, try running this test with a VPN enabled and compare the results."
+                    "Compare repeated tests with and without a VPN. A difference alone does not confirm ISP throttling."
             }
         } else {
-            summary = "No throttling detected. Speeds are consistent across tested services (baseline: \(String(format: "%.1f", baselineSpeed)) Mbps)."
+            summary = "No large speed difference observed in these samples (baseline: \(String(format: "%.1f", baselineSpeed)) Mbps)."
 
             if isVPNActive {
                 explanation = "All services show consistent performance through your VPN. Your VPN is providing equal access to all tested endpoints."
             } else {
-                explanation = "All the services we tested load at similar speeds. Your ISP appears to be treating all traffic fairly without selective throttling."
+                explanation = "All the services we tested load at similar speeds. These samples cannot establish ISP traffic policy or rule out throttling."
             }
         }
 
@@ -544,9 +528,9 @@ class ThrottleDetectionService {
 
         if !throttlingDetected {
             if isVPNActive {
-                return "No throttling detected through your VPN connection. Your VPN is providing consistent speeds across all services."
+                return "No large difference observed between the sampled endpoints. This does not establish VPN coverage or rule out throttling."
             } else {
-                return "No throttling detected. Your ISP appears to treat all traffic equally. No action needed."
+                return "No large difference observed between the sampled endpoints. This does not rule out throttling."
             }
         }
 
@@ -557,7 +541,7 @@ class ThrottleDetectionService {
                 "• Your VPN server being closer to some CDNs than others\n\n" +
                 "Try switching to a different VPN server location and running the test again to compare."
         } else {
-            return "Your ISP may be slowing down certain services. A VPN can bypass this by encrypting your traffic so your ISP can't identify which service you're using.\n\n" +
+            return "Endpoint, route and load differences can explain these samples. They do not establish deliberate ISP throttling.\n\n" +
                 "Try connecting to a VPN and run this test again to compare results."
         }
     }

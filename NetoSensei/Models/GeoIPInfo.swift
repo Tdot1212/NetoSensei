@@ -34,7 +34,7 @@ struct GeoIPInfo: Codable {
     var isRelay: Bool
 
     // CGNAT detection
-    var isCGNAT: Bool
+    var isCGNAT: Bool?
 
     // DNS information
     var hostname: String?
@@ -58,12 +58,12 @@ struct GeoIPInfo: Codable {
         if isVPN { warnings.append("VPN detected") }
         if isTor { warnings.append("Tor exit node") }
         if isHosting { warnings.append("Hosting/Data center IP") }
-        if isCGNAT { warnings.append("Carrier-grade NAT detected") }
+        if isCGNAT == true { warnings.append("Carrier-grade NAT detected") }
         return warnings
     }
 
     var hasSecurityFlags: Bool {
-        isProxy || isVPN || isTor || isHosting || isCGNAT
+        isProxy || isVPN || isTor || isHosting || isCGNAT == true
     }
 
     static var empty: GeoIPInfo {
@@ -75,7 +75,7 @@ struct GeoIPInfo: Codable {
             isTor: false,
             isHosting: false,
             isRelay: false,
-            isCGNAT: false
+            isCGNAT: nil
         )
     }
 }

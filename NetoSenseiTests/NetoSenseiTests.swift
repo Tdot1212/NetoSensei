@@ -764,21 +764,22 @@ struct VerdictPatternTests {
             .ran(.gatewayLatency, 5, unit: "ms"), .failed(.externalLatency, .intercepted)
         ], context: ctx)
         let f = v.findings.first { $0.kind == .proxyInterception }
-        #expect(f != nil && f?.byDesign == true && Self.isNotFixable(f))
+        #expect(f != nil && f?.byDesign == true && Self.isUserFixable(f))
         #expect(v.score == nil)                                                // no internet delay measured → no number
-        #expect(v.state != .broken)
-        #expect(v.coverage.line.contains("internet delay was answered by a local VPN/proxy"))
+        #expect(v.state == .unknown)
+        #expect(v.coverage.line.contains("internet delay could not be measured reliably"))
     }
 
     // ---- E4 VPN overhead vs E5 ISP vs E6 undetermined ----
 
-    @Test func vpnOverhead_routerFineTunnelSlow_isUserFixable_measuredNeverEstimated() {
+    @Test func externalDelayWithVPN_doesNotClaimIsolatedVPNPenalty() {
         let ctx = VerdictContext(connectionType: "WiFi", vpn: .on(authoritative: true, exitCountry: "US"))
         let v = VerdictComposer.compose(records: [.ran(.gatewayLatency, 4, unit: "ms"), .ran(.externalLatency, 335, unit: "ms")], context: ctx)
         let f = v.primary
         #expect(f?.kind == .vpnOverhead && Self.isUserFixable(f))
-        #expect(f?.evidence.contains { $0.label == "Added by the VPN" && $0.value == 331 } == true)
-        #expect(f?.cause.contains("in US") == true)
+        #expect(f?.evidence.contains { $0.label == "Difference beyond gateway" && $0.value == 331 } == true)
+        #expect(f?.cause.contains("not a measured VPN penalty") == true)
+        #expect(f?.confidence.level == .medium)
         #expect(f?.severity == .fair && v.state == .degraded)
     }
 
@@ -1084,10 +1085,9 @@ struct TLSAssessmentTests {
         if case .unavailable(let r) = a { #expect(r.text.hasPrefix("Couldn't assess — host unreachable")) }
     }
 
-    @Test func trustFailureWithoutProxyCA_isInterceptedOrBlocked_notCritical() {
+    @Test func presentedUntrustedChain_isCompletedSoTrustFailureCanBeReported() {
         let a = A.classifyAssessment(chain: [Self.cert], isTrusted: false, isProxyMITM: false, fetchErrorCode: nil)
-        #expect(a == .unavailable(.interceptedOrBlocked))
-        if case .unavailable(let r) = a { #expect(r.text.contains("intercepted or blocked")) }
+        #expect(a == .completed)
     }
 
     @Test func trustedChain_orKnownProxyCA_isACompletedAssessment() {

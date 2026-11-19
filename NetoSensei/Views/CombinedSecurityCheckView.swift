@@ -20,20 +20,23 @@ import SwiftUI
 // MARK: - Combined Verdict
 
 enum CombinedSecurityVerdict {
-    case secure          // both checks passed
+    case unknown
+    case secure          // assessed checks passed
     case partial         // exactly one issue, or low/warning-level only
     case unsafe          // multiple issues OR a critical leak
 
     var displayText: String {
         switch self {
-        case .secure: return "Network Secure"
-        case .partial: return "Partial Protection"
-        case .unsafe: return "Network Unsafe"
+        case .unknown: return "Checks Incomplete"
+        case .secure: return "Assessed Checks Passed"
+        case .partial: return "Check needs attention"
+        case .unsafe: return "Critical Check Finding"
         }
     }
 
     var systemImage: String {
         switch self {
+        case .unknown: return "questionmark.shield"
         case .secure: return "checkmark.shield.fill"
         case .partial: return "exclamationmark.shield.fill"
         case .unsafe: return "xmark.shield.fill"
@@ -42,6 +45,7 @@ enum CombinedSecurityVerdict {
 
     var color: Color {
         switch self {
+        case .unknown: return .secondary
         case .secure: return .green
         case .partial: return .yellow
         case .unsafe: return .red
@@ -50,9 +54,10 @@ enum CombinedSecurityVerdict {
 
     var explanation: String {
         switch self {
-        case .secure: return "WiFi safety and VPN leak checks all passed."
-        case .partial: return "One issue found. Your traffic is mostly protected, but review the items below."
-        case .unsafe: return "Multiple issues found. Your traffic may be exposed — see Recommendations."
+        case .unknown: return "Some checks could not assess protection. Review the available evidence below."
+        case .secure: return "The assessed checks found no issue. This is not a guarantee of network security."
+        case .partial: return "At least one check needs review. Coverage and protection may be incomplete."
+        case .unsafe: return "Follow the first step below, then rerun the checks."
         }
     }
 }
@@ -87,35 +92,26 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
     private let privacy = PrivacyShieldService.shared
 
     func runFullCheck() async {
+        guard !isRunning else { return }
         isRunning = true
+        result = nil
         error = nil
+        let path = ExitPath.lastPathChange
         AppLoadTracker.shared.begin("securityCheck")         // Commit 7: cert fetches to blocked hosts are self-load
         defer { isRunning = false; AppLoadTracker.shared.end("securityCheck") }
 
-        // Refresh VPN detection ONCE up front and capture the result. We pass
-        // it into `runVPNLeakTest` so it doesn't force-refresh again — that
-        // second refresh would race with `checkWiFiSafety()` reading the same
-        // shared cache.
         let vpnSnapshot = await SmartVPNDetector.shared.detectVPN(forceRefresh: true)
-
-        // Both checks use URLSession.shared and read-only singletons —
-        // see the parallel-execution audit notes in the PR. Running them
-        // concurrently is safe given the up-front refresh above.
-        // Now fanning out 6 things in parallel (was 2): the original two,
-        // plus the 4 new self-contained services. None of them mutate shared
-        // state — captive portal / DNS encryption / cert inspector all use
-        // ephemeral URLSession configurations; kill-switch advisor is sync.
-        async let wifiTask: Void = privacy.checkWiFiSafety()
         async let leakTask = privacy.runVPNLeakTest(prefetchedVPNResult: vpnSnapshot)
-        async let captiveTask = CaptivePortalDetector.shared.detectCaptivePortal()
+        async let captiveTask = CaptivePortalDetector.shared.detectCaptivePortal(
+            vpnLikelyActive: vpnSnapshot.vpnState.isLikelyOn
+        )
         async let dnsEncTask = DNSEncryptionChecker.shared.checkDNSEncryption()
         async let certTask = CertificateInspector.shared.inspectCertificates()
 
-        // Await WiFi (void) and leak (returns value) together.
-        _ = await wifiTask
-        let leak = await leakTask
-        let wifi = privacy.wifiSafetyResult
         let captive = await captiveTask
+        async let wifiTask = privacy.checkWiFiSafety(portal: captive, vpn: vpnSnapshot)
+        let leak = await leakTask
+        let wifi = await wifiTask
         let dnsEnc = await dnsEncTask
         let certs = await certTask
 
@@ -125,23 +121,20 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
         // IPv6 leak signal comes from SmartVPNDetector method results — same
         // signal the Privacy Shield "IPv6 Leak" row uses. Including it here
         // keeps the verdict consistent with the rest of the Security tab.
-        let vpnDetection = SmartVPNDetector.shared.detectionResult
-        let vpnActive = vpnDetection?.vpnState.isLikelyOn ?? false
-        let ipv6Leak: Bool = {
-            guard vpnActive, let methods = vpnDetection?.methodResults else { return false }
-            return methods.contains {
-                $0.method == "IPv6 Check" && $0.detail.lowercased().contains("native isp ipv6")
-            }
-        }()
+        let ipv6Leak = false // No end-to-end IPv6 bypass probe was completed.
 
-        let verdict = computeVerdict(
+        let verdict = Self.computeVerdict(
             wifi: wifi, leak: leak, ipv6Leak: ipv6Leak,
             captive: captive, certs: certs
         )
-        let recs = collectRecommendations(
-            wifi: wifi, leak: leak, ipv6Leak: ipv6Leak,
-            captive: captive, dnsEnc: dnsEnc, certs: certs
+        let recs = Self.recommendedSteps(
+            leak: leak, captive: captive, certs: certs, vpnLikelyActive: vpnSnapshot.vpnState.isLikelyOn
         )
+
+        guard path == ExitPath.lastPathChange else {
+            error = "The connection changed. Run the security check again."
+            return
+        }
 
         result = CombinedSecurityResult(
             verdict: verdict,
@@ -159,7 +152,7 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
 
     // MARK: - Verdict & Recommendations
 
-    private func computeVerdict(
+    nonisolated static func computeVerdict(
         wifi: WiFiSafetyResult?,
         leak: VPNLeakTestResult?,
         ipv6Leak: Bool,
@@ -179,7 +172,6 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
         // Count moderate issues across all surfaces.
         var issueCount = 0
         if leak?.overallVerdict == .minorLeaks { issueCount += 1 }
-        if wifi?.overallStatus == .caution { issueCount += 1 }
         if ipv6Leak { issueCount += 1 }
         // A confirmed captive portal blocks VPN setup, which downstreams to
         // every other check. Count it as one moderate issue. Inconclusive /
@@ -192,93 +184,49 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
         // Proxy MITM (.info severity) is NOT an issue — it's expected when
         // the user installed the proxy CA themselves.
 
-        if issueCount == 0 { return .secure }
-        if issueCount == 1 { return .partial }
-        return .unsafe
+        if issueCount == 0 {
+            guard wifi != nil, leak?.overallVerdict == .noLeaks,
+                  captive?.verdict == .noPortal, !certs.isEmpty,
+                  !certs.contains(where: { $0.severity == .unavailable }) else { return .unknown }
+            return .secure
+        }
+        return .partial // Multiple warnings do not establish an unsafe network.
     }
 
-    /// Pulls actionable items from all checks and dedupes by trimmed text.
-    private func collectRecommendations(
-        wifi: WiFiSafetyResult?,
+    nonisolated static func recommendedSteps(
         leak: VPNLeakTestResult?,
-        ipv6Leak: Bool,
         captive: CaptivePortalResult?,
-        dnsEnc: DNSEncryptionResult?,
-        certs: [CertificateInspection]
+        certs: [CertificateInspection],
+        vpnLikelyActive: Bool
     ) -> [String] {
-        var items: [String] = []
-
-        // Captive portal — most actionable: user must log in BEFORE VPN.
-        if captive?.verdict == .portalDetected, let cap = captive {
-            items.append(cap.recommendation)
+        var steps: [String] = []
+        if let cert = certs.first(where: { $0.severity == .critical }) {
+            steps.append("Certificate trust failed for \(cert.hostname). Avoid entering credentials there. Check that Settings → General → Date & Time is set automatically, then run the check again on a trusted connection.")
         }
-
-        // VPN leak solutions (only the leaks that actually fire).
-        if let leak = leak {
-            for check in [leak.dnsLeak, leak.ipLeak, leak.webRTCLeak] where check.isLeaking {
-                if let solution = check.solution, !solution.isEmpty {
-                    items.append(solution)
-                }
+        if captive?.verdict == .portalDetected {
+            steps.append("On a network you recognize, open Settings → Wi-Fi and tap the network to open its sign-in page. Confirm the page belongs to the venue, sign in, then run this check again.")
+        }
+        if let leak {
+            steps += [leak.dnsLeak, leak.ipLeak, leak.webRTCLeak].compactMap {
+                $0.isLeaking ? $0.solution : nil
             }
         }
-
-        // IPv6 leak (Sec Issue 2 fix surfaces this in Privacy Shield; mirror it here).
-        if ipv6Leak {
-            items.append("Disable IPv6 in your proxy app settings (Surge / Shadowrocket: Settings → IPv6 → Off), or use a VPN profile that tunnels IPv6.")
+        if vpnLikelyActive {
+            steps.append("Open the VPN app you use. Confirm the expected server and review split tunneling, DNS protection and kill-switch settings there. The checks below show what this phone observed on its current route.")
         }
-
-        // DNS encryption — only surface when neither DoH nor DoT is reachable
-        // OR when both are reachable (the "you could be using these" nudge).
-        // Other states are network-specific noise.
-        if let dnsEnc = dnsEnc {
-            if !dnsEnc.dohReachable && !dnsEnc.dotReachable {
-                items.append(dnsEnc.recommendation)
-            }
+        if steps.isEmpty {
+            steps.append("If a site showed a security warning, open it again on a trusted connection and rerun this check. If you are checking who has access to your network, open your router’s Connected Devices list and review unfamiliar entries.")
         }
-
-        // Certificate inspector — only surface .critical / .warning entries.
-        // .info (proxy MITM expected) doesn't generate a recommendation.
-        for cert in certs where cert.severity != .info && cert.severity != .unavailable {   // Commit 7: unassessed = no recommendation
-            items.append("\(cert.hostname): \(cert.summary)")
-        }
-
-        // WiFi safety doesn't expose per-check solutions in its model, so map
-        // failed/warning checks to a small set of actionable hints.
-        if let wifi = wifi {
-            for check in wifi.checks where check.status != .passed {
-                if let hint = wifiActionHint(for: check) {
-                    items.append(hint)
-                }
-            }
-        }
-
-        // Dedupe preserving order.
-        var seen = Set<String>()
-        return items.filter { seen.insert($0.trimmingCharacters(in: .whitespacesAndNewlines)).inserted }
+        return steps
     }
 
-    private func wifiActionHint(for check: WiFiSafetyResult.SafetyCheck) -> String? {
-        let lower = check.title.lowercased()
-        if lower.contains("vpn protection") && check.status != .passed {
-            return "Connect to a VPN to encrypt traffic before sensitive activity on this network."
-        }
-        if lower.contains("captive portal") && check.status != .passed {
-            return "This network requires login. Verify the captive portal page is genuine before entering credentials."
-        }
-        if lower.contains("dns") && check.status == .failed {
-            return "DNS may be tampered with. Switch to encrypted DNS (1.1.1.1 or 8.8.8.8) in WiFi settings."
-        }
-        if lower.contains("https") && check.status == .failed {
-            return "HTTPS connections appear blocked or intercepted. Avoid sensitive activity until you're on a trusted network."
-        }
-        return nil
-    }
 }
 
 // MARK: - Sheet
 
 struct CombinedSecurityCheckSheet: View {
     @StateObject private var vm = CombinedSecurityCheckViewModel()
+    @State private var followUp: WiFiRepairGuide?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -289,6 +237,15 @@ struct CombinedSecurityCheckSheet: View {
                         runningView
                     } else if let result = vm.result {
                         verdictHeader(result)
+                        recommendationsSection(result)
+                        if result.certificateInspections.contains(where: { $0.severity == .critical }) {
+                            Button("Retest a website security warning") { followUp = .certificate }
+                                .buttonStyle(.bordered)
+                        }
+                        if result.vpnLeak?.overallVerdict == .unverified {
+                            Button("Verify VPN privacy with your provider") { followUp = .vpnPrivacy }
+                                .buttonStyle(.bordered)
+                        }
                         wifiSection(result)
                         vpnSection(result)
                         // The four new self-contained checks. Each rendered
@@ -306,15 +263,14 @@ struct CombinedSecurityCheckSheet: View {
                         if let killSwitch = result.killSwitch {
                             killSwitchSection(killSwitch)
                         }
-                        if !result.recommendations.isEmpty {
-                            recommendationsSection(result)
-                        }
+
                     } else {
                         idleView
                     }
                 }
                 .padding()
             }
+            .sheet(item: $followUp) { WiFiAssistantView(guide: $0) }
             .navigationTitle("Full Security Check")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -488,9 +444,9 @@ struct CombinedSecurityCheckSheet: View {
             color = .yellow
             icon = "exclamationmark.triangle.fill"
         } else {
-            detail = "No native IPv6 leak detected"
-            color = .green
-            icon = "checkmark.circle.fill"
+            detail = "Unverified — no end-to-end IPv6 bypass test completed"
+            color = .gray
+            icon = "questionmark.circle"
         }
         return HStack(spacing: 12) {
             Image(systemName: icon)
@@ -591,7 +547,7 @@ struct CombinedSecurityCheckSheet: View {
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
                 Text(label).font(.subheadline.bold())
-                Text(reachable ? "Endpoint reachable from this network" : "Endpoint not reachable")
+                Text(reachable ? "Validated DNS reply over the tested encrypted transport" : "No validated reply; cause and configured transport unverified")
                     .font(.caption).foregroundColor(.secondary)
             }
             Spacer()
@@ -601,14 +557,12 @@ struct CombinedSecurityCheckSheet: View {
     // ------- Certificate Inspection Section -------
 
     private func certificateSection(_ inspections: [CertificateInspection]) -> some View {
-        let proxyCount = inspections.filter { $0.isProxyIntercepted }.count
-        let untrustedCount = inspections.filter { $0.severity == .critical }.count
-        let realCount = inspections.count - proxyCount - untrustedCount
+        let counts = CertificateInspection.counts(inspections)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Certificate Inspection").font(.headline)
                 Spacer()
-                Text("\(inspections.count) checked · \(proxyCount) proxy-intercepted · \(realCount) real · \(untrustedCount) untrusted")
+                Text("\(inspections.count) checked · \(counts.proxyLike) proxy-like issuers · \(counts.otherTrusted) other trusted · \(counts.untrusted) untrusted · \(counts.unavailable) unavailable")
                     .font(.caption2).foregroundColor(.secondary)
             }
             .padding(.leading, 4)
@@ -723,7 +677,7 @@ struct CombinedSecurityCheckSheet: View {
 
     private func recommendationsSection(_ result: CombinedSecurityResult) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Recommendations")
+            Text("What to do next")
                 .font(.headline)
                 .padding(.leading, 4)
 

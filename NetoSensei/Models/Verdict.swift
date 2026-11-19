@@ -66,7 +66,7 @@ enum FailureReason: Codable, Sendable, Equatable {
         switch self {
         case .timeout: return "timed out"
         case .blocked: return "was blocked"
-        case .intercepted: return "was answered by a local VPN/proxy"
+        case .intercepted: return "could not be measured reliably"
         case .error(let s): return s
         }
     }

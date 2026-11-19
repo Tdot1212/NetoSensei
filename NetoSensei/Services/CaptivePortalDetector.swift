@@ -78,13 +78,13 @@ final class CaptivePortalDetector {
     /// Detect captive-portal interception. When VPN is active we return
     /// `.inconclusiveVPNActive` rather than guess — the tunnel will route the
     /// probe through the VPN exit, where there's no portal to find.
-    func detectCaptivePortal() async -> CaptivePortalResult {
+    func detectCaptivePortal(vpnLikelyActive: Bool? = nil) async -> CaptivePortalResult {
         // VPN-aware skip: a captive portal sits between the device and the
         // upstream gateway, BEFORE any tunnel can be established. If a VPN
         // is reporting active, the tunnel either came up despite a portal
         // (possible if the user already logged in) or routes around it. Either
         // way the probe results would be misleading.
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.vpnState.isLikelyOn ?? false
+        let vpnActive = vpnLikelyActive ?? SmartVPNDetector.shared.detectionResult?.vpnState.isLikelyOn ?? false
         if vpnActive {
             return CaptivePortalResult(
                 verdict: .inconclusiveVPNActive,

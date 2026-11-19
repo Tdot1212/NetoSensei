@@ -21,12 +21,12 @@ enum HistoryEntryType: String, Codable {
 struct NetworkHistoryEntry: Codable, Identifiable {
     let id: UUID
     let timestamp: Date
-    let healthScore: Int           // 0-100
+    let healthScore: Int?           // 0-100
     let downloadSpeed: Double?     // Mbps
     let uploadSpeed: Double?       // Mbps
     let latency: Double?           // ms (external). Phase 4: nil = unmeasured, never 0
-    let gatewayLatency: Double     // ms
-    let dnsLatency: Double         // ms
+    let gatewayLatency: Double?     // ms
+    let dnsLatency: Double?         // ms
     let jitter: Double?            // ms
     let packetLoss: Double?        // %
     let vpnActive: Bool
@@ -64,7 +64,7 @@ struct NetworkHistoryEntry: Codable, Identifiable {
         // Decode existing fields
         id = try container.decode(UUID.self, forKey: .id)
         timestamp = try container.decode(Date.self, forKey: .timestamp)
-        healthScore = try container.decode(Int.self, forKey: .healthScore)
+        healthScore = try container.decodeIfPresent(Int.self, forKey: .healthScore)
         downloadSpeed = try container.decodeIfPresent(Double.self, forKey: .downloadSpeed)
         uploadSpeed = try container.decodeIfPresent(Double.self, forKey: .uploadSpeed)
         // Phase 4: latency is optional. Entries written before this change
@@ -73,8 +73,8 @@ struct NetworkHistoryEntry: Codable, Identifiable {
         // strip; the file is rewritten on the next save anyway).
         let rawLatency = try container.decodeIfPresent(Double.self, forKey: .latency)
         latency = (rawLatency ?? 0) > 0 ? rawLatency : nil
-        gatewayLatency = try container.decode(Double.self, forKey: .gatewayLatency)
-        dnsLatency = try container.decode(Double.self, forKey: .dnsLatency)
+        gatewayLatency = try container.decodeIfPresent(Double.self, forKey: .gatewayLatency).flatMap { $0 > 0 && $0.isFinite ? $0 : nil }
+        dnsLatency = try container.decodeIfPresent(Double.self, forKey: .dnsLatency).flatMap { $0 > 0 && $0.isFinite ? $0 : nil }
         jitter = try container.decodeIfPresent(Double.self, forKey: .jitter)
         packetLoss = try container.decodeIfPresent(Double.self, forKey: .packetLoss)
         vpnActive = try container.decode(Bool.self, forKey: .vpnActive)
@@ -95,12 +95,12 @@ struct NetworkHistoryEntry: Codable, Identifiable {
     init(
         id: UUID = UUID(),
         timestamp: Date = Date(),
-        healthScore: Int,
+        healthScore: Int?,
         downloadSpeed: Double?,
         uploadSpeed: Double?,
         latency: Double?,
-        gatewayLatency: Double,
-        dnsLatency: Double,
+        gatewayLatency: Double?,
+        dnsLatency: Double?,
         jitter: Double?,
         packetLoss: Double?,
         vpnActive: Bool,
@@ -148,17 +148,17 @@ struct NetworkHistoryEntry: Codable, Identifiable {
         self.timestamp = Date()
 
         // Calculate health score from status
-        self.healthScore = Self.calculateHealthScore(from: status)
+        self.healthScore = nil // Only the shared verdict composer supplies a diagnostic score.
 
-        self.downloadSpeed = speedTest?.downloadSpeed
-        self.uploadSpeed = speedTest?.uploadSpeed
+        self.downloadSpeed = speedTest.flatMap { $0.testUnavailableReason == nil && $0.downloadSpeed.isFinite && $0.downloadSpeed > 0 ? $0.downloadSpeed : nil }
+        self.uploadSpeed = speedTest?.measuredUploadSpeed
         self.latency = status.internet.latencyToExternal  // Phase 4: nil stays nil
-        self.gatewayLatency = status.router.latency ?? 0
-        self.dnsLatency = status.dns.latency ?? 0
+        self.gatewayLatency = status.router.displayableLatency
+        self.dnsLatency = status.dns.displayableLatency
         self.jitter = status.router.jitter
         self.packetLoss = status.router.packetLoss
         self.vpnActive = status.vpn.isActive
-        self.vpnOverhead = status.vpn.isActive ? (status.vpn.tunnelLatency ?? 0) - (status.router.latency ?? 0) : nil
+        self.vpnOverhead = nil // No paired on/off measurement.
         self.rootCause = rootCause
         self.connectionType = status.connectionType?.displayName ?? "Unknown"
 
@@ -173,37 +173,6 @@ struct NetworkHistoryEntry: Codable, Identifiable {
         self.entryType = entryType
         self.isBookmarked = false
         self.userNote = nil
-    }
-
-    private static func calculateHealthScore(from status: NetworkStatus) -> Int {
-        var score = 100
-
-        // Deduct for latency issues
-        if let latency = status.internet.latencyToExternal {
-            if latency > 200 { score -= 30 }
-            else if latency > 100 { score -= 15 }
-            else if latency > 50 { score -= 5 }
-        } else {
-            score -= 40 // No connectivity
-        }
-
-        // Deduct for gateway issues
-        if let gateway = status.router.latency {
-            if gateway > 50 { score -= 20 }
-            else if gateway > 20 { score -= 10 }
-        }
-
-        // Deduct for packet loss
-        if let loss = status.router.packetLoss, loss > 2 {
-            score -= Int(loss * 5)
-        }
-
-        // Deduct for DNS issues
-        if let dns = status.dns.latency, dns > 100 {
-            score -= 10
-        }
-
-        return max(0, min(100, score))
     }
 
     // MARK: - Pure aggregates (Phase 4: nil-safe, unit-tested)
@@ -234,6 +203,7 @@ enum HistoryPeriod: String, CaseIterable {
 
 // MARK: - Network History Manager
 
+@MainActor
 class NetworkHistoryManager: ObservableObject {
     static let shared = NetworkHistoryManager()
 
@@ -242,6 +212,9 @@ class NetworkHistoryManager: ObservableObject {
     // Now using file-based storage via HistoryStorageService
     // Supports 1000 entries with atomic writes and auto-migration from UserDefaults
     private let maxEntries = 1000
+    private var saveRevision = 0
+    private var historyLoaded = false
+    private var pendingClear: Bool?
 
     private init() {
         loadHistory()
@@ -279,15 +252,18 @@ class NetworkHistoryManager: ObservableObject {
     var baseline: NetworkHistoryEntry? {
         guard entries.count >= 5 else { return nil }
 
-        let sorted = entries.sorted { $0.healthScore > $1.healthScore }
+        guard let latest = entries.max(by: { $0.timestamp < $1.timestamp }), let ssid = latest.wifiSSID else { return nil }
+        let compatible = entries.filter { $0.wifiSSID == ssid && $0.connectionType == latest.connectionType && $0.vpnActive == latest.vpnActive && $0.healthScore != nil }
+        guard compatible.count >= 5 else { return nil }
+        let sorted = compatible.sorted { ($0.healthScore ?? -1) > ($1.healthScore ?? -1) }
         let topCount = max(1, sorted.count / 5)
         let topEntries = Array(sorted.prefix(topCount))
 
         // Calculate averages
-        let avgHealth = topEntries.map { $0.healthScore }.reduce(0, +) / topCount
+        let avgHealth = MeasurementStatistics.mean(topEntries.map { $0.healthScore.map(Double.init) }).map { Int($0.rounded()) }
         let avgLatency = NetworkHistoryEntry.averageLatency(of: topEntries)  // nil if none measured
-        let avgGateway = topEntries.map { $0.gatewayLatency }.reduce(0, +) / Double(topCount)
-        let avgDns = topEntries.map { $0.dnsLatency }.reduce(0, +) / Double(topCount)
+        let avgGateway = MeasurementStatistics.mean(topEntries.map { $0.gatewayLatency })
+        let avgDns = MeasurementStatistics.mean(topEntries.map { $0.dnsLatency })
 
         let downSpeeds = topEntries.compactMap { $0.downloadSpeed }
         let avgDownSpeed = downSpeeds.isEmpty ? nil : downSpeeds.reduce(0, +) / Double(downSpeeds.count)
@@ -324,7 +300,7 @@ class NetworkHistoryManager: ObservableObject {
     func averageHealthScore(for period: HistoryPeriod) -> Double? {
         let periodEntries = entriesForPeriod(period)
         guard !periodEntries.isEmpty else { return nil }
-        return Double(periodEntries.map { $0.healthScore }.reduce(0, +)) / Double(periodEntries.count)
+        return MeasurementStatistics.mean(periodEntries.map { $0.healthScore.map(Double.init) })
     }
 
     func averageLatency(for period: HistoryPeriod) -> Double? {
@@ -351,35 +327,36 @@ class NetworkHistoryManager: ObservableObject {
     // MARK: - Persistence (using HistoryStorageService)
 
     private func saveHistory() {
-        // Save in background using the file-based storage service
+        saveRevision += 1
+        guard historyLoaded else { return }
         let snapshot = entries
-        Task.detached(priority: .utility) {
-            await HistoryStorageService.shared.save(snapshot)
-        }
+        let revision = saveRevision
+        Task { await HistoryStorageService.shared.save(snapshot, revision: revision) }
     }
 
     private func loadHistory() {
-        // Load asynchronously from file storage
         Task {
             let loaded = await HistoryStorageService.shared.load()
-            await MainActor.run {
-                self.entries = loaded
+            var merged: [UUID: NetworkHistoryEntry] = [:]
+            for entry in loaded { merged[entry.id] = entry }
+            for entry in entries { merged[entry.id] = entry }
+            if let keepBookmarked = pendingClear {
+                entries = keepBookmarked ? merged.values.filter { $0.isBookmarked } : []
+            } else {
+                entries = Array(merged.values)
             }
+            entries.sort { $0.timestamp < $1.timestamp }
+            historyLoaded = true
+            if saveRevision > 0 { saveHistory() }
         }
     }
 
     // MARK: - Clear History
 
     func clearHistory(keepBookmarked: Bool = false) {
-        if keepBookmarked {
-            entries = entries.filter { $0.isBookmarked }
-            saveHistory()
-        } else {
-            entries.removeAll()
-            Task.detached {
-                await HistoryStorageService.shared.deleteAll()
-            }
-        }
+        if !historyLoaded { pendingClear = keepBookmarked }
+        entries = keepBookmarked ? entries.filter { $0.isBookmarked } : []
+        saveHistory()
     }
 
     // MARK: - Bookmark Management

@@ -122,7 +122,7 @@ enum ExitPath {
         }
         debugLog("[ExitPath] Exit path predates the last path change — re-reading VPN state and GeoIP")
         do {
-            try await withTimeout(seconds: timeoutSeconds) {
+            try await withTimeout(seconds: Double(timeoutSeconds)) {
                 async let vpn: Void = { _ = await SmartVPNDetector.shared.detectVPN(forceRefresh: true) }()
                 async let geo: Void = { _ = await GeoIPService.shared.fetchGeoIPInfo(forceRefresh: true) }()
                 _ = await (vpn, geo)

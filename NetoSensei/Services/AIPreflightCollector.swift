@@ -52,21 +52,15 @@ final class AIPreflightCollector: ObservableObject {
         StepState(id: 3,  title: "Geolocation",          status: .pending),
         StepState(id: 4,  title: "Diagnostics",          status: .pending),
         StepState(id: 5,  title: "Speed test",           status: .pending),
-        StepState(id: 6,  title: "DNS security",         status: .pending),
+        StepState(id: 6,  title: "DNS lookup timing",         status: .pending),
         StepState(id: 7,  title: "TLS security",         status: .pending),
-        StepState(id: 8,  title: "VPN leak test",        status: .pending),
-        StepState(id: 9,  title: "Stability check",      status: .pending),
-        StepState(id: 10, title: "Device discovery",     status: .pending),
-        StepState(id: 11, title: "Router port scan",     status: .pending),
-        StepState(id: 12, title: "VPN site reachability", status: .pending),
+        StepState(id: 8,  title: "VPN route observations",        status: .pending),
+        StepState(id: 9, title: "VPN site reachability", status: .pending),
     ]
 
     private var completedCount = 0
     private var featureFlags: [String: Bool] = [:]
     private var featureSkipReasons: [String: String] = [:]
-
-    /// Reuse a recent speed test result instead of re-running (5-minute window).
-    static let speedTestCacheWindow: TimeInterval = 300
 
     private init() {}
 
@@ -161,6 +155,7 @@ final class AIPreflightCollector: ObservableObject {
 
         // VPN leak test
         var vpnLeakVerdict: String?
+        var vpnPrivacyCoverage: String?
         var vpnLeakDnsLeaking: Bool?
         var vpnLeakIpLeaking: Bool?
         var vpnLeakWebRTCLeaking: Bool?
@@ -254,6 +249,7 @@ final class AIPreflightCollector: ObservableObject {
         steps = Self.initialSteps
 
         let startTime = CFAbsoluteTimeGetCurrent()
+        let path = ExitPath.lastPathChange
 
         // Run the entire collection under a 90-second budget.
         let snapshot: AINetworkSnapshot = await withTaskGroup(of: AINetworkSnapshot.self) { group in
@@ -270,23 +266,28 @@ final class AIPreflightCollector: ObservableObject {
             return first
         }
 
-        lastSnapshot = snapshot
-        lastCollectedAt = Date()
+        let usable = path == ExitPath.lastPathChange ? snapshot : AINetworkSnapshot(
+            collectedAt: Date(), collectionDurationMs: snapshot.collectionDurationMs, featuresTested: [:],
+            featuresSkipped: ["snapshot": "Connection changed during measurement. Request a new check."],
+            isOffline: false, isConnected: false
+        )
+        lastSnapshot = usable
+        lastCollectedAt = path == ExitPath.lastPathChange ? Date() : nil
         isCollecting = false
         progress = 1.0
         currentStep = "Complete"
 
-        let payload = (try? JSONEncoder().encode(snapshot))?.count ?? 0
+        let payload = (try? JSONEncoder().encode(usable))?.count ?? 0
         let succeeded = snapshot.featuresTested.filter { $0.value }.count
         let total = snapshot.featuresTested.count
         debugLog("[AI] Sending \(payload) bytes of diagnostic data to AI (\(succeeded)/\(total) features collected in \(Int(snapshot.collectionDurationMs))ms)")
 
-        return snapshot
+        return usable
     }
 
     /// True when we have a cached snapshot that's still within the fresh window.
     func isSnapshotFresh() -> Bool {
-        guard let collectedAt = lastCollectedAt else { return false }
+        guard let collectedAt = lastCollectedAt, collectedAt >= ExitPath.lastPathChange else { return false }
         return Date().timeIntervalSince(collectedAt) < Self.freshWindow
     }
 
@@ -324,19 +325,11 @@ final class AIPreflightCollector: ObservableObject {
         await beginStep(0, label: "Checking network status...")
         let status = NetworkMonitorService.shared.currentStatus
         snapshot.connectionType = status.connectionType?.displayName ?? (status.wifi.isConnected ? "WiFi" : "Unknown")
-        snapshot.ssid = status.wifi.ssid
-        snapshot.bssid = status.wifi.bssid
-        snapshot.localIP = status.localIP
-        snapshot.publicIP = status.publicIP
-        snapshot.ipv6Address = status.ipv6Address
         snapshot.isConnected = status.internet.isReachable || status.wifi.isConnected
-        snapshot.gatewayIP = status.router.gatewayIP
         snapshot.gatewayReachable = status.router.isReachable
         snapshot.gatewayLatencyMs = status.router.latency
-        snapshot.routerAdminURL = status.router.adminURL
         snapshot.internetReachable = status.internet.isReachable
         snapshot.externalLatencyMs = status.internet.latencyToExternal
-        snapshot.dnsResolverIP = status.dns.resolverIP
         snapshot.dnsLatencyMs = status.dns.latency
         snapshot.isCGNAT = status.isCGNAT
         snapshot.overallHealth = Self.healthString(status.overallHealth)
@@ -365,20 +358,14 @@ final class AIPreflightCollector: ObservableObject {
         } else {
             let vpn = await SmartVPNDetector.shared.detectVPN(forceRefresh: true)
             snapshot.vpnActive = vpn.isVPNActive
-            snapshot.vpnConfidence = vpn.confidence
             snapshot.vpnDetectionMethod = vpn.detectionMethod
-            snapshot.vpnInference = vpn.inferenceReasons.joined(separator: "; ")
             snapshot.vpnState = vpn.vpnState.rawValue
-            snapshot.vpnProtocol = vpn.vpnProtocol
             snapshot.ipCountry = vpn.publicCountry
             snapshot.ipCity = vpn.publicCity
             snapshot.ipISP = vpn.publicISP
             snapshot.ipASN = vpn.publicASN
             snapshot.ipType = vpn.ipType
-            snapshot.deviceCountry = vpn.expectedCountry
-            snapshot.chinaMode = vpn.isLikelyInChina
             snapshot.isAuthoritative = vpn.isAuthoritative
-            snapshot.vpnTunnelType = status.vpn.tunnelType
             setFeature("vpn_detection", true)
             await completeStep(2, status: .completed)
         }
@@ -413,14 +400,11 @@ final class AIPreflightCollector: ObservableObject {
                     name: test.name,
                     result: Self.testResultString(test.result),
                     latencyMs: test.latency,
-                    details: test.details
+                    details: ""
                 )
             }
-            snapshot.diagnosticSummary = diag.summary
             snapshot.diagnosticStatus = Self.healthString(diag.overallStatus)
             snapshot.diagnosticIssueCount = diag.issues.count
-            snapshot.diagnosticPrimaryIssue = diag.primaryIssue?.title
-            snapshot.diagnosticRecommendations = diag.recommendations
             setFeature("diagnostic", true)
             await completeStep(4, status: .completed)
         }
@@ -433,12 +417,6 @@ final class AIPreflightCollector: ObservableObject {
         } else if skipSpeedTest {
             markSkipped("speed_test", reason: "user_requested_quick_scan")
             await completeStep(5, status: .failed)
-        } else if let cached = recentCachedSpeedTest() {
-            let age = Int(Date().timeIntervalSince(cached.timestamp) / 60)
-            debugLog("[AI Preflight] Using cached speed test from \(age)m ago")
-            applySpeedTestResult(cached, to: &snapshot)
-            setFeature("speed_test", cached.downloadSpeed > 0)
-            await completeStep(5, status: cached.downloadSpeed > 0 ? .completed : .failed)
         } else {
             let speed = await SpeedTestEngine.shared.runSpeedTest()
             if let reason = speed.testUnavailableReason {
@@ -459,23 +437,18 @@ final class AIPreflightCollector: ObservableObject {
         }
 
         // ---- Step 6: DNS security ----
-        await beginStep(6, label: "Analyzing DNS security...")
+        await beginStep(6, label: "Checking DNS lookup timing…")
         if offline {
-            setFeature("dns_security", false)
+            setFeature("dns_lookup", false)
             await completeStep(6, status: .failed)
         } else {
-            let dns = await DNSAnalyzer.shared.runFullAnalysis()
-            snapshot.dnsSystemServers = dns.systemDNS.map { $0.ipAddress }
-            snapshot.dnsIsEncrypted = dns.isEncryptedDNS
-            snapshot.dnsEncryptionType = dns.encryptedDNSType?.rawValue
-            snapshot.dnsHasLeak = dns.hasLeak
-            snapshot.dnsSecurityRating = dns.securityRating.rawValue
             // FIX (Phase 6.1): DNSAnalyzer no longer reports an "average latency"
             // — the previous one was bogus (system-resolver short-circuit). Use
             // the network monitor's real DNS RTT instead.
-            snapshot.dnsAverageLatencyMs = NetworkMonitorService.shared.currentStatus.dns.latency
-            setFeature("dns_security", true)
-            await completeStep(6, status: .completed)
+            snapshot.dnsAverageLatencyMs = NetworkMonitorService.shared.currentStatus.dns.displayableLatency
+            let hasTiming = snapshot.dnsAverageLatencyMs != nil
+            setFeature("dns_lookup", hasTiming)
+            await completeStep(6, status: hasTiming ? .completed : .failed)
         }
 
         // ---- Step 7: TLS security ----
@@ -504,102 +477,26 @@ final class AIPreflightCollector: ObservableObject {
         }
 
         // ---- Step 8: VPN leak test ----
-        await beginStep(8, label: "Testing for VPN leaks...")
+        await beginStep(8, label: "Checking assessment coverage…")
         if offline {
             setFeature("vpn_leak", false)
             await completeStep(8, status: .failed)
         } else if snapshot.vpnActive == true {
-            let leak = await PrivacyShieldService.shared.runVPNLeakTest()
-            snapshot.vpnLeakVerdict = Self.verdictString(leak.overallVerdict)
-            snapshot.vpnLeakDnsLeaking = leak.dnsLeak.isLeaking
-            snapshot.vpnLeakIpLeaking = leak.ipLeak.isLeaking
-            snapshot.vpnLeakWebRTCLeaking = leak.webRTCLeak.isLeaking
-            snapshot.vpnServerIP = leak.vpnServerIP
-            snapshot.vpnDetectedDNSServers = leak.detectedDNSServers
-            setFeature("vpn_leak", true)
-            await completeStep(8, status: .completed)
+            snapshot.vpnLeakVerdict = "unverified"
+            snapshot.vpnPrivacyCoverage = "DNS routing, public IP bypass, IPv6 bypass and browser WebRTC were not measured end to end."
+            markSkipped("vpn_leak", reason: "No end-to-end leak measurement available")
+            await completeStep(8, status: .failed)
         } else {
             // Not applicable — VPN inactive, so a leak test has no meaning.
             markSkipped("vpn_leak", reason: "vpn_inactive")
             await completeStep(8, status: .failed)
         }
 
-        // ---- Step 9: Connection stability ----
-        await beginStep(9, label: "Checking connection stability...")
-        let stability = ConnectionStabilityMonitor.shared
-        if let metrics = stability.currentMetrics {
-            snapshot.stabilityQuality = metrics.connectionQuality.rawValue
-            snapshot.stabilityUptimePercent = metrics.uptimePercentage
-            snapshot.stabilityDisconnectCount = metrics.disconnectCount
-            snapshot.stabilityLatencySpikeCount = metrics.latencySpikeCount
-            snapshot.stabilityAverageLatencyMs = metrics.averageLatency
-        }
-        let recent = stability.events.suffix(20)
-        if !recent.isEmpty {
-            snapshot.recentStabilityEvents = recent.map { event in
-                let latencyPart = event.latency.map { " (\(Int($0))ms)" } ?? ""
-                return "\(event.type.rawValue): \(event.details)\(latencyPart)"
-            }
-        }
-        let stabilityOK = stability.currentMetrics != nil || !recent.isEmpty
-        setFeature("stability", stabilityOK)
-        await completeStep(9, status: stabilityOK ? .completed : .failed)
-
-        // ---- Step 10: Device discovery ----
-        await beginStep(10, label: "Scanning for devices...")
-        if offline {
-            setFeature("device_discovery", false)
-            await completeStep(10, status: .failed)
-        } else {
-            let discovered = await NetworkDeviceDiscovery.shared.scanNetwork()
-            snapshot.devicesFoundCount = discovered.count
-            snapshot.devicesConnectedNow = discovered.count
-            snapshot.deviceList = discovered.prefix(20).map { device in
-                let label = device.hostname ?? device.ipAddress
-                return "\(label) - \(device.ipAddress)"
-            }
-            setFeature("device_discovery", !discovered.isEmpty)
-            await completeStep(10, status: discovered.isEmpty ? .failed : .completed)
-        }
-
-        // ---- Step 11: Gateway port scan ----
-        await beginStep(11, label: "Scanning router ports...")
-        if offline {
-            setFeature("gateway_scan", false)
-            await completeStep(11, status: .failed)
-        } else if let gateway = snapshot.gatewayIP {
-            let ports: [UInt16] = [80, 443, 22, 23, 53, 445, 8080, 8443, 5000]
-            let scan = await PortScanner.shared.scanDevice(ip: gateway, hostname: "Router", ports: ports)
-            let openPorts = scan.openPorts
-            let portDescriptions: [String] = openPorts.map { port in
-                "\(port.port) (\(port.service)) [\(port.risk.rawValue)]"
-            }
-            snapshot.gatewayOpenPorts = portDescriptions
-            let hasDanger = openPorts.contains { $0.risk == .danger }
-            let hasCaution = openPorts.contains { $0.risk == .caution }
-            let riskLabel: String
-            if hasDanger {
-                riskLabel = "Danger"
-            } else if hasCaution {
-                riskLabel = "Caution"
-            } else if openPorts.isEmpty {
-                riskLabel = "none"
-            } else {
-                riskLabel = openPorts.first?.risk.rawValue ?? "none"
-            }
-            snapshot.gatewayPortRisk = riskLabel
-            setFeature("gateway_scan", true)
-            await completeStep(11, status: .completed)
-        } else {
-            setFeature("gateway_scan", false)
-            await completeStep(11, status: .failed)
-        }
-
         // ---- Step 12: VPN site reachability benchmark ----
-        await beginStep(12, label: "Testing VPN site reachability...")
+        await beginStep(9, label: "Testing VPN site reachability...")
         if offline {
             markSkipped("vpn_site_benchmark", reason: "offline")
-            await completeStep(12, status: .failed)
+            await completeStep(9, status: .failed)
         } else if snapshot.vpnActive == true {
             // Race the benchmark against a 15s timeout. Whichever finishes first wins;
             // if the timeout wins we still read whatever partial results landed.
@@ -629,39 +526,11 @@ final class AIPreflightCollector: ObservableObject {
             snapshot.vpnSitesReachable = mapped.isEmpty ? nil : mapped.filter { $0.reachable }.count
             let ok = !mapped.isEmpty
             setFeature("vpn_site_benchmark", ok)
-            await completeStep(12, status: ok ? .completed : .failed)
+            await completeStep(9, status: ok ? .completed : .failed)
         } else {
             // VPN not active — this benchmark is about VPN-dependent reachability.
             markSkipped("vpn_site_benchmark", reason: "vpn_inactive")
-            await completeStep(12, status: .failed)
-        }
-
-        // ---- History enrichment (trends) ----
-        let speedHistory = HistoryManager.shared.speedTestHistory
-        if !speedHistory.isEmpty {
-            let isoFormatter = ISO8601DateFormatter()
-            snapshot.speedHistory = speedHistory.prefix(5).map { entry in
-                AINetworkSnapshot.SpeedHistoryEntry(
-                    date: isoFormatter.string(from: entry.timestamp),
-                    downloadMbps: entry.downloadSpeed,
-                    uploadMbps: entry.uploadSpeed,
-                    pingMs: entry.ping.flatMap { $0 < 999 ? $0 : nil },  // strip legacy 999
-                    vpnActive: entry.vpnActive
-                )
-            }
-        }
-
-        let diagHistory = HistoryManager.shared.diagnosticHistory
-        if !diagHistory.isEmpty {
-            let isoFormatter = ISO8601DateFormatter()
-            snapshot.diagnosticHistory = diagHistory.prefix(5).map { entry in
-                AINetworkSnapshot.DiagnosticHistoryItem(
-                    date: isoFormatter.string(from: entry.timestamp),
-                    summary: entry.summary,
-                    issueCount: entry.issueCount,
-                    overallStatus: entry.overallStatus
-                )
-            }
+            await completeStep(9, status: .failed)
         }
 
         // Finalize
@@ -713,24 +582,16 @@ final class AIPreflightCollector: ObservableObject {
         featureSkipReasons[key] = reason
     }
 
-    /// Returns the most recent speed test from history if it's within the 5-minute cache window.
-    private func recentCachedSpeedTest() -> SpeedTestResult? {
-        guard let latest = HistoryManager.shared.speedTestHistory.first else { return nil }
-        let age = Date().timeIntervalSince(latest.timestamp)
-        guard age < Self.speedTestCacheWindow else { return nil }
-        return latest
-    }
-
     /// Copy speed test numbers into the snapshot, filtering out zero/sentinel values
     /// so the AI never sees "0 Mbps" or "999 ms" as if they were real measurements.
     private func applySpeedTestResult(_ speed: SpeedTestResult, to snapshot: inout AINetworkSnapshot) {
         snapshot.downloadMbps        = speed.downloadSpeed > 0 ? speed.downloadSpeed : nil
-        snapshot.uploadMbps          = speed.uploadSpeed   > 0 ? speed.uploadSpeed   : nil
+        snapshot.uploadMbps          = speed.measuredUploadSpeed
         // Phase 3: ping/jitter/packetLoss are optional (nil = unmeasurable). The
         // flatMap guards also strip legacy 999/100 sentinels from OLD decoded
         // records, so the AI snapshot never sees a fabricated value.
-        snapshot.pingMs              = speed.ping.flatMap       { $0 < 999 ? $0 : nil }
-        snapshot.jitterMs            = speed.jitter.flatMap     { $0 > 0   ? $0 : nil }
+        snapshot.pingMs              = LatencyValidation.normalize(speed.ping)
+        snapshot.jitterMs            = speed.jitter.flatMap     { $0 >= 0  ? $0 : nil }
         snapshot.packetLossPercent   = speed.packetLoss.flatMap { ($0 >= 0 && $0 < 100) ? $0 : nil }
         snapshot.speedTestServer     = speed.serverUsed
         snapshot.speedTestQuality    = speed.downloadSpeed > 0 ? speed.quality.rawValue : nil
@@ -759,6 +620,7 @@ final class AIPreflightCollector: ObservableObject {
 
     private static func verdictString(_ v: VPNLeakTestResult.Verdict) -> String {
         switch v {
+        case .unverified: return "unverified"
         case .noLeaks:    return "noLeaks"
         case .minorLeaks: return "minorLeaks"
         case .majorLeaks: return "majorLeaks"

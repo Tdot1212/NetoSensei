@@ -126,7 +126,7 @@ struct DeviceDetailView: View {
                     Circle()
                         .fill(device.isCurrentlyConnected ? Color.green : Color.gray)
                         .frame(width: 8, height: 8)
-                    Text(device.isCurrentlyConnected ? "Connected" : "Offline")
+                    Text(device.isCurrentlyConnected ? "Observed" : "Not observed")
                         .font(.subheadline)
                         .foregroundColor(device.isCurrentlyConnected ? .green : .secondary)
                 }
@@ -135,7 +135,7 @@ struct DeviceDetailView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "checkmark.shield.fill")
                             .font(.caption)
-                        Text("Trusted")
+                        Text("Labeled familiar")
                             .font(.caption)
                     }
                     .foregroundColor(.green)
@@ -154,7 +154,7 @@ struct DeviceDetailView: View {
         HStack(spacing: 12) {
             DeviceHistoryActionButton(
                 icon: device.isTrusted ? "shield.slash" : "checkmark.shield",
-                title: device.isTrusted ? "Untrust" : "Trust",
+                title: device.isTrusted ? "Remove label" : "Mark familiar",
                 color: device.isTrusted ? .orange : .green
             ) {
                 if device.isTrusted {

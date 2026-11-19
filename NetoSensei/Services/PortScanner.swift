@@ -29,7 +29,7 @@ struct ScannedPort: Identifiable, Hashable {
     }
 
     enum PortRisk: String {
-        case safe = "Safe"
+        case safe = "Review"
         case caution = "Caution"
         case danger = "Danger"
         case info = "Info"
@@ -47,7 +47,7 @@ struct DeviceScanResult: Identifiable {
     var riskLevel: ScannedPort.PortRisk {
         if openPorts.contains(where: { $0.risk == .danger }) { return .danger }
         if openPorts.contains(where: { $0.risk == .caution }) { return .caution }
-        if openPorts.isEmpty { return .safe }
+        if openPorts.isEmpty { return .info }
         return .info
     }
 
@@ -56,7 +56,7 @@ struct DeviceScanResult: Identifiable {
         let caution = openPorts.filter { $0.risk == .caution }.count
         if dangerous > 0 { return "\(dangerous) high-risk port\(dangerous > 1 ? "s" : "") open" }
         if caution > 0 { return "\(caution) port\(caution > 1 ? "s" : "") need attention" }
-        if openPorts.isEmpty { return "No open ports found" }
+        if openPorts.isEmpty { return "No TCP ports responded in this scan" }
         return "\(openPorts.count) port\(openPorts.count > 1 ? "s" : "") open"
     }
 }
@@ -152,7 +152,7 @@ class PortScanner: ObservableObject {
     private let connectionTimeout: TimeInterval = 1.0
     private let concurrentScans = 20
 
-    private init() {}
+    init() {}
 
     // MARK: - Scan Single Device
 
@@ -172,19 +172,15 @@ class PortScanner: ObservableObject {
     private func performScanDevice(ip: String, hostname: String? = nil, ports: [UInt16]? = nil) async -> DeviceScanResult {
         var portsToScan = ports ?? standardScanPorts
 
-        // ISSUE 12 FIX: When scanning the device's own IP, skip privileged ports (0-1023)
-        // iOS sandbox blocks connections to privileged ports on localhost
-        let localIP = await MainActor.run { NetworkMonitorService.shared.currentStatus.localIP }
-        let isSelfScan = (ip == localIP || ip == "127.0.0.1" || ip == "localhost")
-        if isSelfScan {
-            portsToScan = portsToScan.filter { $0 > 1023 }
+        portsToScan = Array(Set(portsToScan.filter { $0 > 0 })).sorted()
+        guard !isScanning else {
+            return DeviceScanResult(ipAddress: ip, hostname: hostname, openPorts: [], scanDuration: 0, timestamp: Date())
         }
-
         isScanning = true
         progress = 0
         currentIP = ip
 
-        let startTime = Date()
+        let startTime = ProcessInfo.processInfo.systemUptime
         var openPorts: [ScannedPort] = []
 
         // Scan in concurrent batches
@@ -193,6 +189,7 @@ class PortScanner: ObservableObject {
         }
 
         for (batchIndex, batch) in batches.enumerated() {
+            if Task.isCancelled { break }
             let batchResults = await withTaskGroup(of: ScannedPort?.self, returning: [ScannedPort].self) { group in
                 for port in batch {
                     group.addTask { [self] in
@@ -212,7 +209,7 @@ class PortScanner: ObservableObject {
             progress = Double(batchIndex + 1) / Double(batches.count)
         }
 
-        let duration = Date().timeIntervalSince(startTime)
+        let duration = ProcessInfo.processInfo.systemUptime - startTime
 
         let result = DeviceScanResult(
             ipAddress: ip,
@@ -252,7 +249,7 @@ class PortScanner: ObservableObject {
     }
 
     private func performScanRouter() async -> DeviceScanResult? {
-        let gatewayIP = NetworkMonitorService.shared.currentStatus.router.gatewayIP ?? "192.168.1.1"
+        guard let gatewayIP = DefaultRouteResolver.lanGateway()?.gateway else { return nil }
 
         let routerPorts: [UInt16] = [
             21, 22, 23, 53, 80, 443, 445,
@@ -274,9 +271,9 @@ class PortScanner: ObservableObject {
     private nonisolated func probePort(ip: String, port: UInt16) async -> ScannedPort? {
         await MainActor.run { currentPort = port }
 
-        let startTime = CFAbsoluteTimeGetCurrent()
+        let startTime = ProcessInfo.processInfo.systemUptime
         let isOpen = await checkPort(ip: ip, port: port)
-        let responseTime = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+        let responseTime = (ProcessInfo.processInfo.systemUptime - startTime) * 1000
 
         let portInfo = commonPorts.first { $0.port == port }
         let service = portInfo?.service ?? "Unknown"

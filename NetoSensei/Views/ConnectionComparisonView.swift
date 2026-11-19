@@ -201,14 +201,14 @@ struct ConnectionComparisonView: View {
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
             } else {
-                Image(systemName: "exclamationmark.triangle")
+                Image(systemName: "questionmark.circle")
                     .font(.system(size: 40))
                     .foregroundColor(.orange)
 
-                Text("Connection Issue")
+                Text(comparison.recommendation.title)
                     .font(.title3.bold())
 
-                Text("Unable to test both connections")
+                Text(comparison.recommendation.description)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
@@ -360,7 +360,7 @@ struct ConnectionComparisonView: View {
                 Image(systemName: "exclamationmark.triangle")
                     .foregroundColor(.orange)
                     .font(.caption)
-                Text("Note: This test uses data from both connections. Each test uses approximately 10MB.")
+                Text("Note: This test uses data from both connections. Each phase runs the full speed test and can transfer tens of megabytes or more. Cellular charges may apply.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -586,9 +586,9 @@ private struct ComparisonUseCaseRow: View {
             Spacer()
 
             HStack(spacing: 4) {
-                Image(systemName: useCase.recommended.icon)
+                Image(systemName: useCase.recommended?.icon ?? "questionmark.circle")
                     .font(.caption)
-                Text(useCase.recommended.rawValue)
+                Text(useCase.recommended?.rawValue ?? "Not enough data")
                     .font(.caption.bold())
             }
             .foregroundColor(useCase.recommended == .wifi ? .blue : .green)

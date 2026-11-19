@@ -38,7 +38,6 @@ class StreamingDiagnosticViewModel: ObservableObject {
     // MARK: - Services
     // FIXED: Removed nonisolated - these are @MainActor services accessed from @MainActor ViewModel
 
-    private let streamingService: StreamingDiagnosticService
     private let networkMonitor: NetworkMonitorService
     private let vpnEngine: VPNEngine
 
@@ -53,14 +52,12 @@ class StreamingDiagnosticViewModel: ObservableObject {
     // FIXED: All inits on MainActor since class is @MainActor
 
     init() {
-        self.streamingService = StreamingDiagnosticService.shared
         self.networkMonitor = NetworkMonitorService.shared
         self.vpnEngine = VPNEngine.shared
     }
 
     // Dependency injection init - also on MainActor
-    init(streamingService: StreamingDiagnosticService, networkMonitor: NetworkMonitorService, vpnEngine: VPNEngine) {
-        self.streamingService = streamingService
+    init(networkMonitor: NetworkMonitorService, vpnEngine: VPNEngine) {
         self.networkMonitor = networkMonitor
         self.vpnEngine = vpnEngine
     }
@@ -84,12 +81,12 @@ class StreamingDiagnosticViewModel: ObservableObject {
         let networkSnapshot = networkMonitor.currentStatus
 
         // STEP 1: Test CDN Ping (0.1 = 10%)
-        currentTest = "Testing CDN latency for \(selectedPlatform.rawValue)..."
+        currentTest = "Checking HTTPS responses for \(selectedPlatform.rawValue)..."
         progress = 0.1
         let cdnPing = await testCDNPing()
 
         // STEP 2: Test Streaming Throughput (0.25 = 25%)
-        currentTest = "Measuring streaming throughput..."
+        currentTest = "Checking measurement coverage..."
         progress = 0.25
         let throughput = await testStreamingThroughput()
 
@@ -97,24 +94,23 @@ class StreamingDiagnosticViewModel: ObservableObject {
         // FIXED: iOS cannot measure WiFi signal - use network status instead
         currentTest = "Checking local network quality..."
         progress = 0.40
-        let wifi = -50  // Assume decent WiFi since we can't measure on iOS
+        let wifi = networkSnapshot.wifi.rssi
 
         // STEP 4: Test DNS Latency (0.55 = 55%)
         currentTest = "Testing DNS resolution speed..."
         progress = 0.55
-        let dns = networkSnapshot.dns.latency ?? 50.0
+        let dns = networkSnapshot.dns.displayableLatency
 
         // STEP 5: Test ISP Congestion (0.70 = 70%)
-        currentTest = "Detecting ISP congestion..."
+        currentTest = "Checking available evidence..."
         progress = 0.70
-        let internetLatency = networkSnapshot.internet.latencyToExternal ?? 0
-        let congestion = internetLatency > 150
+        let congestion = false // High RTT alone cannot identify ISP congestion.
 
         // STEP 6: Compare VPN Impact (0.85 = 85%)
-        currentTest = "Analyzing VPN impact on streaming..."
+        currentTest = "Checking VPN state..."
         progress = 0.85
         let vpnActive = networkSnapshot.vpn.isActive
-        let vpnImpact: Double? = vpnActive ? 20.0 : nil
+        let vpnImpact: Double? = nil // No paired VPN-off baseline was collected.
 
         // STEP 7: Evaluate and produce result (1.0 = 100%)
         currentTest = "Analyzing streaming performance..."
@@ -127,6 +123,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
             dnsLatency: dns,
             ispCongestion: congestion,
             vpnImpact: vpnImpact,
+            vpnActive: vpnActive,
             isIPv6Enabled: networkSnapshot.isIPv6Enabled
         )
 
@@ -182,83 +179,21 @@ class StreamingDiagnosticViewModel: ObservableObject {
         return successCount > 0 ? totalPing / Double(successCount) : nil
     }
 
-    /// Test streaming throughput
-    private func testStreamingThroughput() async -> Double {
-        // Simulate downloading a video chunk to measure throughput
-        let testURL = getTestURL(for: selectedPlatform)
+    /// Website/trace bytes are not a media payload and cannot measure CDN capacity.
+    /// Until licensed platform test payloads are available, leave this unmeasured.
+    private func testStreamingThroughput() async -> Double { 0 }
 
-        do {
-            guard let url = URL(string: testURL) else {
-                debugLog("⚠️ Invalid test URL: \(testURL)")
-                return 0.0
-            }
-            let startTime = Date()
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let duration = Date().timeIntervalSince(startTime)
-
-            // Calculate throughput in Mbps
-            let bytes = Double(data.count)
-            let bits = bytes * 8
-            let megabits = bits / 1_000_000
-            let mbps = megabits / duration
-
-            return mbps
-        } catch {
-            return 0.0
-        }
-    }
-
-    /// Get local network status
-    /// NOTE: iOS cannot measure WiFi signal - returns default value
-    private func testWiFiStrength() async -> Int {
-        // FIXED: iOS has no public API for WiFi RSSI - return assumed value
-        return -50  // Assume decent WiFi since we can't measure on iOS
-    }
-
-    /// Test DNS latency
-    private func testDNSLatency() async -> Double {
-        // Use existing DNS latency from network status
-        return networkMonitor.currentStatus.dns.latency ?? 50.0
-    }
-
-    /// Test ISP congestion
-    private func testISPCongestion() async -> Bool {
-        // Test multiple endpoints to detect congestion patterns
-        let internetLatency = networkMonitor.currentStatus.internet.latencyToExternal ?? 0
-
-        // If latency is high, it indicates possible congestion
-        return internetLatency > 150
-    }
-
-    /// Compare VPN impact on streaming
-    private func compareVPNImpact() async -> Double? {
-        let vpnActive = networkMonitor.currentStatus.vpn.isActive
-
-        if !vpnActive {
-            return nil // No VPN impact if VPN not active
-        }
-
-        // Estimate VPN overhead
-        // In a real implementation, this would:
-        // 1. Test speed with VPN
-        // 2. Disconnect VPN
-        // 3. Test speed without VPN
-        // 4. Calculate percentage difference
-        // 5. Reconnect VPN
-
-        // For now, estimate a typical VPN impact
-        // In production, would actually measure with/without VPN
-        return 20.0 // Default estimate of 20% slowdown
-    }
+    private func compareVPNImpact() async -> Double? { nil }
 
     /// Evaluate streaming diagnostic results
     private func evaluate(
         cdnPing: Double?,
         throughput: Double,
-        wifiStrength: Int,
-        dnsLatency: Double,
+        wifiStrength: Int?,
+        dnsLatency: Double?,
         ispCongestion: Bool,
         vpnImpact: Double?,
+        vpnActive: Bool,
         isIPv6Enabled: Bool = false
     ) -> StreamingDiagnosticResult {
         // Determine primary bottleneck
@@ -270,26 +205,23 @@ class StreamingDiagnosticViewModel: ObservableObject {
         // VPN-server-switching guidance instead.
         var bottleneck: StreamingDiagnosticResult.BottleneckType = .none
         var secondaryFactors: [StreamingDiagnosticResult.BottleneckType] = []
-        let vpnActive = vpnImpact != nil
-
-        if wifiStrength < -75 {
+        if let wifiStrength, wifiStrength < -75 {
             bottleneck = .wifi
         } else if let ping = cdnPing, ping > 150 {
-            bottleneck = vpnActive ? .vpn : .cdn
+            // RTT identifies slow endpoint response, not its root cause.
+            bottleneck = .none
         } else if let impact = vpnImpact, impact > 30 {
             bottleneck = .vpn
         } else if ispCongestion && !vpnActive {
             // FIX (Speed Issue 4): ISP congestion is meaningless when traffic
             // is tunneled — only relevant when VPN is OFF.
             bottleneck = .isp
-        } else if dnsLatency > 100 {
+        } else if let dnsLatency, dnsLatency > 100 {
             bottleneck = .dns
-        } else if throughput < 5.0 {
-            bottleneck = .router
         }
 
         // Identify secondary factors
-        if bottleneck != .wifi && wifiStrength < -60 {
+        if bottleneck != .wifi, let wifiStrength, wifiStrength < -60 {
             secondaryFactors.append(.wifi)
         }
         // FIX (Speed Issue 4): drop ISP from contributing factors when VPN
@@ -318,14 +250,14 @@ class StreamingDiagnosticViewModel: ObservableObject {
             cdnThroughput: throughput,
             cdnReachable: cdnPing != nil,                    // an unmeasured ping is not "reachable"
             cdnRegion: nil,
-            cdnRoutingIssue: cdnPing.map { $0 > 200 } ?? false,
+            cdnRoutingIssue: false, // RTT alone does not establish routing trouble.
             wifiStrength: wifiStrength,
             routerLatency: nil,
             jitter: nil,
             packetLoss: nil,
-            vpnActive: vpnImpact != nil,
+            vpnActive: vpnActive,
             vpnImpact: vpnImpact,
-            throughputWithVPN: vpnImpact != nil ? throughput : nil,
+            throughputWithVPN: vpnActive && throughput > 0 ? throughput : nil,
             throughputWithoutVPN: nil,
             vpnServerLocation: nil,
             ispCongestion: ispCongestion,
@@ -377,7 +309,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
         case .device:
             return "Close background applications or upgrade your device"
         case .none:
-            return "Your network is optimized for streaming"
+            return "Play the same video in the streaming app. If it stalls, try one change and repeat playback."
         }
     }
 
@@ -414,7 +346,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
 
     /// Generate actionable steps for user
     /// FIXED: Remove WiFi signal advice - iOS cannot measure WiFi signal
-    private func generateActionableSteps(for bottleneck: StreamingDiagnosticResult.BottleneckType, wifiStrength: Int, vpnImpact: Double?) -> [String] {
+    private func generateActionableSteps(for bottleneck: StreamingDiagnosticResult.BottleneckType, wifiStrength: Int?, vpnImpact: Double?) -> [String] {
         var steps: [String] = []
         let vpnActive = vpnImpact != nil
 
@@ -467,8 +399,8 @@ class StreamingDiagnosticViewModel: ObservableObject {
             steps.append("Check device storage and performance")
 
         case .none:
-            steps.append("Your network is optimized for streaming")
-            steps.append("Enjoy your \(selectedPlatform.rawValue) content!")
+            steps.append("Stay on the same Wi-Fi and try the same video after changing one setting, such as the VPN server.")
+            steps.append("Try playback in \(selectedPlatform.rawValue) to check actual quality")
         }
 
         return steps
@@ -563,7 +495,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
     /// WiFi strength text formatted
     var wifiStrengthText: String {
         guard let result = result else { return "-- dBm" }
-        return "\(result.wifiStrength) dBm"
+        return result.wifiStrength.map { "\($0) dBm" } ?? "Unmeasured"
     }
 
     // MARK: - Additional Computed Properties
@@ -587,7 +519,7 @@ class StreamingDiagnosticViewModel: ObservableObject {
     /// Estimated video quality
     var estimatedQuality: String {
         guard let result = result else { return "Unknown" }
-        return result.estimatedVideoQuality.description
+        return result.cdnThroughput > 0 ? result.estimatedVideoQuality.description : "Unmeasured"
     }
 
     /// Recommended fix action available

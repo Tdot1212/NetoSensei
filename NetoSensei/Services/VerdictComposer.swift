@@ -145,7 +145,7 @@ enum VerdictComposer {
         // even when the number lands in the "good" band.
         if real.contains(where: { $0.severity <= .fair }) { return .degraded }
         if let s = score, s.band <= .fair { return .degraded }
-        if !findings.isEmpty && findings.allSatisfy({ $0.byDesign }) { return .degraded }
+        if real.isEmpty && findings.contains(where: { $0.kind != .proxyInterception }) { return .degraded }
         return score == nil ? .unknown : .working
     }
 
@@ -331,7 +331,7 @@ enum VerdictComposer {
         case .unknown:
             return coverage.attempted.isEmpty
                 ? "Nothing could be checked yet"
-                : "Not enough checks completed to judge this connection"
+                : primary?.headline ?? "Not enough checks completed to judge this connection"
         }
     }
 }

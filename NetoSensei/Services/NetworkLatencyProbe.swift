@@ -79,8 +79,8 @@ final class NetworkLatencyProbe: Sendable {
     }
 
     /// Time a TCP handshake to `host` on the first port that accepts, in
-    /// **seconds**. `allowUDPFallback` adds a last-resort UDP-association probe
-    /// (for gateways that expose no open TCP port). Returns nil on total failure.
+    /// **seconds**, timing only the successful port. Returns nil on total failure.
+    /// `allowUDPFallback` is retained for compatibility but cannot produce RTT.
     func measureHandshake(
         host: String,
         ports: [UInt16],
@@ -89,20 +89,16 @@ final class NetworkLatencyProbe: Sendable {
     ) async -> TimeInterval? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                let start = Date()
-
                 for port in ports {
+                    let start = ProcessInfo.processInfo.systemUptime
                     if Self.tcpHandshakeSucceeds(host: host, port: port, timeout: timeout) {
-                        continuation.resume(returning: Date().timeIntervalSince(start))
+                        continuation.resume(returning: ProcessInfo.processInfo.systemUptime - start)
                         return
                     }
                 }
 
-                if allowUDPFallback, Self.udpReachable(host: host, port: 7, timeout: timeout) {
-                    continuation.resume(returning: Date().timeIntervalSince(start))
-                    return
-                }
-
+                // UDP connect only associates a local socket; it measures no RTT.
+                // Keep the argument for source compatibility, never invent a sample.
                 continuation.resume(returning: nil)
             }
         }
@@ -153,27 +149,4 @@ final class NetworkLatencyProbe: Sendable {
         return soError == 0
     }
 
-    /// UDP-association probe — succeeds when the kernel accepts the association.
-    /// Used only as a last-resort gateway-reachability signal.
-    private static func udpReachable(host: String, port: UInt16, timeout: TimeInterval) -> Bool {
-        let fd = socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0 else { return false }
-        defer { close(fd) }
-
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = port.bigEndian
-        guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return false }
-
-        let result = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        return result == 0
-    }
 }

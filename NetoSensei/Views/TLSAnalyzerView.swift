@@ -12,6 +12,7 @@ struct TLSAnalyzerView: View {
     @StateObject private var analyzer = TLSAnalyzer.shared
 
     @State private var hostInput = ""
+    @FocusState private var hostFocused: Bool
 
     var body: some View {
         ScrollView {
@@ -88,6 +89,9 @@ struct TLSAnalyzerView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                     .keyboardType(.URL)
+                    .focused($hostFocused)
+                    .submitLabel(.go)
+                    .onSubmit { if !hostInput.isEmpty { startAnalysis(hostInput) } }
 
                 if !hostInput.isEmpty {
                     Button(action: { hostInput = "" }) {
@@ -100,7 +104,7 @@ struct TLSAnalyzerView: View {
             .background(Color(UIColor.secondarySystemGroupedBackground))
             .cornerRadius(10)
 
-            Button(action: { Task { await analyzer.analyzeHost(hostInput) } }) {
+            Button(action: { startAnalysis(hostInput) }) {
                 HStack {
                     if analyzer.isAnalyzing {
                         ProgressView()
@@ -135,7 +139,7 @@ struct TLSAnalyzerView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(Array(analyzer.commonTestSites.enumerated()), id: \.offset) { _, site in
-                        Button(action: { Task { await analyzer.analyzeHost(site.0) } }) {
+                        Button(action: { startAnalysis(site.0) }) {
                             Text(site.1)
                                 .font(.subheadline)
                                 .foregroundColor(.primary)
@@ -149,6 +153,11 @@ struct TLSAnalyzerView: View {
                 }
             }
         }
+    }
+
+    private func startAnalysis(_ host: String) {
+        hostFocused = false
+        Task { await analyzer.analyzeHost(host) }
     }
 
     // MARK: - Progress

@@ -23,6 +23,7 @@ struct ConnectionTestResult: Identifiable {
     let packetLoss: Double?
     let timestamp: Date
     let error: String?
+    var serverUsed: String? = nil
 
     enum ConnectionType: String {
         case wifi = "Wi-Fi"
@@ -40,12 +41,13 @@ struct ConnectionTestResult: Identifiable {
         error == nil && downloadSpeedMbps != nil
     }
 
-    var overallScore: Double {
+    var overallScore: Double? {
         guard let download = downloadSpeedMbps,
-              let latency = latencyMs else { return 0 }
+              let latency = latencyMs, let upload = uploadSpeedMbps,
+              [download, latency, upload].allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
 
         let downloadScore = min(download / 100.0 * 100, 100)
-        let uploadScore = min((uploadSpeedMbps ?? 0) / 50.0 * 100, 100)
+        let uploadScore = min(upload / 50.0 * 100, 100)
         let latencyScore = max(0, 100 - latency)
 
         return (downloadScore * 0.5) + (uploadScore * 0.2) + (latencyScore * 0.3)
@@ -112,7 +114,7 @@ struct ComparisonResult {
         let id = UUID()
         let activity: String
         let icon: String
-        let recommended: ConnectionTestResult.ConnectionType
+        let recommended: ConnectionTestResult.ConnectionType?
         let reason: String
     }
 }
@@ -174,18 +176,19 @@ class ConnectionComparator: ObservableObject {
             },
             resultFormatter: { result in
                 guard let r = result else { return "Failed" }
-                let download = r.wifiResult.downloadSpeedMbps ?? 0
-                return "Download: \(String(format: "%.1f", download)) Mbps"
+                return r.wifiResult.downloadSpeedMbps.map { String(format: "Download: %.1f Mbps", $0) } ?? "Wi-Fi not measured"
             }
         )
     }
 
     private func performComparison() async -> ComparisonResult? {
+        guard !isRunning else { return nil }
         isRunning = true
+        defer { isRunning = false; currentTest = nil }
         progress = 0
         error = nil
-        wifiResult = nil
-        cellularResult = nil
+        if let previous = wifiResult, previous.timestamp.timeIntervalSinceNow < -600 { wifiResult = nil }
+        if let previous = cellularResult, previous.timestamp.timeIntervalSinceNow < -600 { cellularResult = nil }
         comparisonResult = nil
 
         // FIX (Issue 1/6): Detect both interfaces AND which is primary so we
@@ -193,23 +196,23 @@ class ConnectionComparator: ObservableObject {
         let interfaces = await detectInterfaces()
 
         // Test Wi-Fi
-        if interfaces.wifi {
+        if interfaces.wifiIsPrimary {
             currentTest = .wifi
             progress = 0.1
             wifiResult = await testWiFiConnection()
             progress = 0.45
         } else {
-            wifiResult = unavailableResult(type: .wifi)
+            if wifiResult == nil { wifiResult = unavailableResult(type: .wifi) }
         }
 
         // Test Cellular
-        if interfaces.cellular {
+        if interfaces.cellular && !interfaces.wifiIsPrimary {
             currentTest = .cellular
             progress = 0.5
             cellularResult = await testCellularConnection(wifiIsPrimary: interfaces.wifiIsPrimary)
             progress = 0.9
         } else {
-            cellularResult = unavailableResult(type: .cellular)
+            if cellularResult == nil { cellularResult = unavailableResult(type: .cellular, reason: interfaces.wifiIsPrimary ? Self.manualToggleError : nil) }
         }
 
         guard let wifi = wifiResult, let cellular = cellularResult else {
@@ -217,7 +220,7 @@ class ConnectionComparator: ObservableObject {
             return nil
         }
 
-        let comparison = generateComparison(wifi: wifi, cellular: cellular)
+        let comparison = Self.generateComparison(wifi: wifi, cellular: cellular)
         comparisonResult = comparison
 
         progress = 1.0
@@ -245,6 +248,16 @@ class ConnectionComparator: ObservableObject {
 
         let wifiIsPrimary = primary?.usesInterfaceType(.wifi) ?? false
         return (wifiReachable, cellularReachable, wifiIsPrimary)
+    }
+
+    private final class OnceFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !done else { return false }
+            done = true; return true
+        }
     }
 
     private nonisolated func primaryPath() async -> NWPath? {
@@ -289,7 +302,7 @@ class ConnectionComparator: ObservableObject {
         }
     }
 
-    private func unavailableResult(type: ConnectionTestResult.ConnectionType) -> ConnectionTestResult {
+    private func unavailableResult(type: ConnectionTestResult.ConnectionType, reason: String? = nil) -> ConnectionTestResult {
         ConnectionTestResult(
             connectionType: type,
             downloadSpeedMbps: nil,
@@ -298,320 +311,47 @@ class ConnectionComparator: ObservableObject {
             jitterMs: nil,
             packetLoss: nil,
             timestamp: Date(),
-            error: "\(type.rawValue) not available"
+            error: reason ?? "\(type.rawValue) not available"
         )
     }
 
-    // MARK: - Test WiFi (URLSession with cellular blocked)
-
-    /// FIX (Issue 1): WiFi test now uses the SAME methodology as the main
-    /// Speed Test (SpeedTestEngine): 25MB Cloudflare endpoint, URLSession
-    /// configured to block cellular fallback. Eliminates the "28 Mbps vs
-    /// 122 Mbps" discrepancy between this tool and the main Speed Test.
+    // All throughput, latency and jitter use the primary engine in separate
+    // phases. Simultaneous transfers must not contaminate the idle latency.
     private nonisolated func testWiFiConnection() async -> ConnectionTestResult {
-        let session = wifiOnlySession()
-
-        async let latency = measureLatency(session: session)
-        async let jitter = measureJitter(session: session)
-        async let downloadSpeed = measureDownloadSpeed(session: session)
-        async let uploadSpeed = measureUploadSpeed(session: session)
-
-        let (lat, jit, dl, ul) = await (latency, jitter, downloadSpeed, uploadSpeed)
-
-        return ConnectionTestResult(
-            connectionType: .wifi,
-            downloadSpeedMbps: dl,
-            uploadSpeedMbps: ul,
-            latencyMs: lat,
-            jitterMs: jit,
-            packetLoss: nil,
-            timestamp: Date(),
-            error: nil
-        )
+        await measure(type: .wifi)
     }
 
-    // MARK: - Test Cellular (NWConnection-based forcing or fallback message)
-
-    /// FIX (Issue 6): URLSession cannot be reliably forced onto a non-primary
-    /// interface. Strategy:
-    ///   1. Probe `NWConnection` with `requiredInterfaceType = .cellular`. If
-    ///      it does not reach `.ready` within 5s (state goes `.failed` /
-    ///      `.waiting`), surface the manual-toggle instructions.
-    ///   2. If WiFi is the primary path, URLSession will silently use WiFi and
-    ///      give meaningless numbers — surface manual-toggle instructions even
-    ///      when the cellular probe succeeds.
-    ///   3. Only when WiFi is OFF (cellular IS the primary path) do we run the
-    ///      same URLSession-based test as WiFi, against cellular.
     private nonisolated func testCellularConnection(wifiIsPrimary: Bool) async -> ConnectionTestResult {
-        let cellularProbeOK = await probeCellularReachable(timeout: 5.0)
-        guard cellularProbeOK else {
-            return ConnectionTestResult(
-                connectionType: .cellular,
-                downloadSpeedMbps: nil,
-                uploadSpeedMbps: nil,
-                latencyMs: nil,
-                jitterMs: nil,
-                packetLoss: nil,
-                timestamp: Date(),
-                error: Self.manualToggleError
-            )
-        }
-
-        // Cellular is reachable. But if WiFi is primary, URLSession will use
-        // WiFi — running the test would mislabel WiFi numbers as cellular.
-        if wifiIsPrimary {
-            return ConnectionTestResult(
-                connectionType: .cellular,
-                downloadSpeedMbps: nil,
-                uploadSpeedMbps: nil,
-                latencyMs: nil,
-                jitterMs: nil,
-                packetLoss: nil,
-                timestamp: Date(),
-                error: Self.manualToggleError
-            )
-        }
-
-        // WiFi is off — cellular is the only available interface, so URLSession
-        // is implicitly using cellular. Run the standard test.
-        let session = URLSession(configuration: .ephemeral)
-        async let latency = measureLatency(session: session)
-        async let jitter = measureJitter(session: session)
-        async let downloadSpeed = measureDownloadSpeed(session: session)
-        async let uploadSpeed = measureUploadSpeed(session: session)
-
-        let (lat, jit, dl, ul) = await (latency, jitter, downloadSpeed, uploadSpeed)
-
-        return ConnectionTestResult(
-            connectionType: .cellular,
-            downloadSpeedMbps: dl,
-            uploadSpeedMbps: ul,
-            latencyMs: lat,
-            jitterMs: jit,
-            packetLoss: nil,
-            timestamp: Date(),
-            error: nil
-        )
+        await measure(type: .cellular)
     }
 
-    /// URLSession that refuses cellular fallback (forces WiFi if WiFi is up).
-    private nonisolated func wifiOnlySession() -> URLSession {
-        let config = URLSessionConfiguration.ephemeral
-        config.allowsCellularAccess = false
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: config)
-    }
-
-    /// Tries to open a TCP connection to `1.1.1.1:443` constrained to the
-    /// cellular interface. Returns `true` if it reaches `.ready` within
-    /// `timeout`; otherwise `false` (state .failed / .waiting / timeout).
-    private nonisolated func probeCellularReachable(timeout: TimeInterval) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            let parameters = NWParameters.tcp
-            parameters.requiredInterfaceType = .cellular
-            let endpoint = NWEndpoint.hostPort(host: "1.1.1.1", port: 443)
-            let connection = NWConnection(to: endpoint, using: parameters)
-            let flag = OnceFlag()
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if flag.claim() {
-                        connection.cancel()
-                        continuation.resume(returning: true)
-                    }
-                case .failed, .cancelled:
-                    if flag.claim() {
-                        continuation.resume(returning: false)
-                    }
-                case .waiting:
-                    // .waiting means we can't establish on the requested
-                    // interface — treat as unavailable per the user's spec.
-                    if flag.claim() {
-                        connection.cancel()
-                        continuation.resume(returning: false)
-                    }
-                default:
-                    break
-                }
-            }
-
-            connection.start(queue: .global(qos: .userInitiated))
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                if flag.claim() {
-                    connection.cancel()
-                    continuation.resume(returning: false)
-                }
-            }
+    private nonisolated func measure(type: ConnectionTestResult.ConnectionType) async -> ConnectionTestResult {
+        let result = await SpeedTestEngine.shared.runSpeedTest()
+        let expected = type == .wifi ? "WiFi" : "Cellular"
+        guard result.testUnavailableReason == nil, result.connectionType == expected, result.downloadSpeed > 0 else {
+            return ConnectionTestResult(connectionType: type, downloadSpeedMbps: nil, uploadSpeedMbps: nil,
+                latencyMs: nil, jitterMs: nil, packetLoss: nil, timestamp: Date(),
+                error: result.testUnavailableReason ?? "Select the intended connection in Settings and repeat.")
         }
-    }
-
-    // MARK: - Latency
-
-    private nonisolated func measureLatency(session: URLSession) async -> Double? {
-        var latencies: [Double] = []
-
-        for host in latencyTestHosts {
-            if let ms = await pingHost(host) {
-                latencies.append(ms)
-            }
-        }
-
-        guard !latencies.isEmpty else { return nil }
-        return latencies.sorted()[latencies.count / 2]
-    }
-
-    /// Thread-safe once-guard for NWConnection callbacks.
-    private final class OnceFlag: @unchecked Sendable {
-        private var _done = false
-        private let lock = NSLock()
-        func claim() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            if _done { return false }
-            _done = true
-            return true
-        }
-    }
-
-    private nonisolated func pingHost(_ host: String) async -> Double? {
-        let start = CFAbsoluteTimeGetCurrent()
-
-        return await withCheckedContinuation { (continuation: CheckedContinuation<Double?, Never>) in
-            let endpoint = NWEndpoint.hostPort(
-                host: NWEndpoint.Host(host),
-                port: 443
-            )
-            let connection = NWConnection(to: endpoint, using: .tcp)
-            let flag = OnceFlag()
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if flag.claim() {
-                        let latency = (CFAbsoluteTimeGetCurrent() - start) * 1000
-                        connection.cancel()
-                        continuation.resume(returning: latency)
-                    }
-                case .failed, .cancelled:
-                    if flag.claim() {
-                        continuation.resume(returning: nil)
-                    }
-                case .waiting:
-                    if flag.claim() {
-                        connection.cancel()
-                        continuation.resume(returning: nil)
-                    }
-                default:
-                    break
-                }
-            }
-
-            connection.start(queue: .global(qos: .userInitiated))
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-                if flag.claim() {
-                    connection.cancel()
-                    continuation.resume(returning: nil)
-                }
-            }
-        }
-    }
-
-    // MARK: - Jitter
-
-    private nonisolated func measureJitter(session: URLSession) async -> Double? {
-        var latencies: [Double] = []
-
-        for _ in 0..<5 {
-            if let ms = await pingHost("1.1.1.1") {
-                latencies.append(ms)
-            }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-
-        guard latencies.count >= 3 else { return nil }
-
-        let mean = latencies.reduce(0, +) / Double(latencies.count)
-        let variance = latencies.reduce(0) { $0 + pow($1 - mean, 2) } / Double(latencies.count)
-        return sqrt(variance)
-    }
-
-    // MARK: - Download Speed
-
-    /// FIX (Issue 1): SAME methodology as SpeedTestEngine — 25 MB primary,
-    /// 10 MB fallback. Smaller payloads were under-measuring fast connections
-    /// (TCP slow-start dominated).
-    private nonisolated func measureDownloadSpeed(session: URLSession) async -> Double? {
-        for urlString in [primaryDownloadURL, fallbackDownloadURL] {
-            guard let url = URL(string: urlString) else { continue }
-            let start = CFAbsoluteTimeGetCurrent()
-            do {
-                let (data, response) = try await session.data(from: url)
-                let duration = CFAbsoluteTimeGetCurrent() - start
-
-                guard let httpResponse = response as? HTTPURLResponse,
-                      httpResponse.statusCode == 200,
-                      duration > 0,
-                      data.count > 1_000_000 else { continue }
-
-                let megabits = Double(data.count) * 8 / 1_000_000
-                return megabits / duration
-            } catch {
-                continue
-            }
-        }
-        return nil
-    }
-
-    // MARK: - Upload Speed
-
-    /// FIX (Issue 1): 10 MB upload to match SpeedTestEngine and provide a
-    /// reliable measurement on fast uplinks.
-    private nonisolated func measureUploadSpeed(session: URLSession) async -> Double? {
-        guard let url = URL(string: uploadTestURL) else { return nil }
-
-        let testData = Data(repeating: 0, count: 10_000_000)
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = testData
-        request.timeoutInterval = 30
-
-        let start = CFAbsoluteTimeGetCurrent()
-
-        do {
-            let (_, response) = try await session.data(for: request)
-            let duration = CFAbsoluteTimeGetCurrent() - start
-
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200...299).contains(httpResponse.statusCode),
-                  duration > 0 else { return nil }
-
-            let megabits = Double(testData.count) * 8 / 1_000_000
-            return megabits / duration
-        } catch {
-            return nil
-        }
+        var value = ConnectionTestResult(connectionType: type, downloadSpeedMbps: result.downloadSpeed,
+            uploadSpeedMbps: result.measuredUploadSpeed, latencyMs: result.ping, jitterMs: result.jitter,
+            packetLoss: result.packetLoss, timestamp: result.timestamp, error: nil)
+        value.serverUsed = result.serverUsed
+        return value
     }
 
     // MARK: - Generate Comparison
 
-    private func generateComparison(wifi: ConnectionTestResult, cellular: ConnectionTestResult) -> ComparisonResult {
+    nonisolated static func generateComparison(wifi: ConnectionTestResult, cellular: ConnectionTestResult) -> ComparisonResult {
         var winner: ConnectionTestResult.ConnectionType?
 
-        if wifi.isSuccessful && cellular.isSuccessful {
-            winner = wifi.overallScore > cellular.overallScore ? .wifi : .cellular
-        } else if wifi.isSuccessful {
-            winner = .wifi
-        } else if cellular.isSuccessful {
-            winner = .cellular
+        let comparable = wifi.isSuccessful && cellular.isSuccessful && wifi.serverUsed != nil && wifi.serverUsed == cellular.serverUsed
+            && abs(wifi.timestamp.timeIntervalSince(cellular.timestamp)) < 600
+        if comparable, let wifiScore = wifi.overallScore, let cellularScore = cellular.overallScore, wifiScore != cellularScore {
+            winner = wifiScore > cellularScore ? .wifi : .cellular
         }
 
-        let useCases = generateUseCases(wifi: wifi, cellular: cellular)
+        let useCases = comparable ? generateUseCases(wifi: wifi, cellular: cellular) : []
         let recommendation = generateRecommendation(wifi: wifi, cellular: cellular, winner: winner)
 
         return ComparisonResult(
@@ -624,7 +364,7 @@ class ConnectionComparator: ObservableObject {
         )
     }
 
-    private func generateUseCases(wifi: ConnectionTestResult, cellular: ConnectionTestResult) -> [ComparisonResult.UseCase] {
+    nonisolated private static func generateUseCases(wifi: ConnectionTestResult, cellular: ConnectionTestResult) -> [ComparisonResult.UseCase] {
         guard wifi.isSuccessful || cellular.isSuccessful else { return [] }
 
         return [
@@ -655,48 +395,47 @@ class ConnectionComparator: ObservableObject {
         ]
     }
 
-    private func bestFor(
-        activity: String,
-        wifi: ConnectionTestResult,
-        cellular: ConnectionTestResult
-    ) -> ConnectionTestResult.ConnectionType {
-        guard wifi.isSuccessful && cellular.isSuccessful else {
-            return wifi.isSuccessful ? .wifi : .cellular
-        }
-
+    nonisolated private static func bestFor(activity: String, wifi: ConnectionTestResult,
+                        cellular: ConnectionTestResult) -> ConnectionTestResult.ConnectionType? {
+        let w: Double?, c: Double?
         switch activity {
         case "video":
-            let wifiScore = (wifi.latencyMs ?? 100) + (wifi.jitterMs ?? 50) * 2
-            let cellScore = (cellular.latencyMs ?? 100) + (cellular.jitterMs ?? 50) * 2
-            return wifiScore < cellScore ? .wifi : .cellular
-
-        case "streaming":
-            return (wifi.downloadSpeedMbps ?? 0) > (cellular.downloadSpeedMbps ?? 0) ? .wifi : .cellular
-
-        case "download":
-            let wifiSpeed = wifi.downloadSpeedMbps ?? 0
-            let cellSpeed = cellular.downloadSpeedMbps ?? 0
-            return cellSpeed > wifiSpeed * 2 ? .cellular : .wifi
-
-        case "browsing":
-            return (wifi.latencyMs ?? 100) < (cellular.latencyMs ?? 100) ? .wifi : .cellular
-
-        default:
-            return wifi.overallScore > cellular.overallScore ? .wifi : .cellular
+            guard let wl = wifi.latencyMs, let wj = wifi.jitterMs,
+                  let cl = cellular.latencyMs, let cj = cellular.jitterMs else { return nil }
+            w = wl + 2 * wj; c = cl + 2 * cj
+        case "streaming", "download": w = wifi.downloadSpeedMbps; c = cellular.downloadSpeedMbps
+        case "browsing": w = wifi.latencyMs; c = cellular.latencyMs
+        default: w = wifi.overallScore; c = cellular.overallScore
         }
+        guard let w, let c, w.isFinite, c.isFinite, w != c else { return nil }
+        let higherBetter = activity == "streaming" || activity == "download"
+        return (higherBetter ? w > c : w < c) ? .wifi : .cellular
     }
 
-    private func generateRecommendation(
+    nonisolated private static func generateRecommendation(
         wifi: ConnectionTestResult,
         cellular: ConnectionTestResult,
         winner: ConnectionTestResult.ConnectionType?
     ) -> ComparisonResult.Recommendation {
-        guard let winner = winner else {
-            return ComparisonResult.Recommendation(
-                title: "No Connection Available",
-                description: "Neither Wi-Fi nor Cellular is currently available.",
-                suggestedConnection: nil
-            )
+        guard let winner else {
+            let title: String, detail: String
+            if !wifi.isSuccessful || !cellular.isSuccessful {
+                title = "Measure the missing path"
+                detail = "A separate measurement is needed for each connection. Wi-Fi must be switched off to test the cellular path."
+            } else if wifi.serverUsed == nil || wifi.serverUsed != cellular.serverUsed {
+                title = "Different test servers"
+                detail = "Both throughput samples were measured, but different endpoints prevent a fair overall comparison. Repeat against the same server."
+            } else if abs(wifi.timestamp.timeIntervalSince(cellular.timestamp)) >= 600 {
+                title = "Samples too far apart"
+                detail = "Both paths were measured. Repeat within ten minutes for a current comparison."
+            } else if wifi.overallScore == nil || cellular.overallScore == nil {
+                title = "Overall rating unavailable"
+                detail = "The throughput measurements remain valid. Missing latency or upload measurements prevent an overall winner."
+            } else {
+                title = "No unique overall winner"
+                detail = "The measured overall ratings are tied. Review the individual measurements below."
+            }
+            return ComparisonResult.Recommendation(title: title, description: detail, suggestedConnection: nil)
         }
 
         let wifiDL = wifi.downloadSpeedMbps ?? 0

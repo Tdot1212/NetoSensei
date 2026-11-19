@@ -13,7 +13,6 @@ import SwiftUI
 struct SecurityTabView: View {
     @StateObject private var privacyService = PrivacyShieldService.shared
     @ObservedObject private var vpnDetector = SmartVPNDetector.shared
-    @ObservedObject private var interpretationEngine = InterpretationEngine.shared
 
     // FIX: WiFi Safety + VPN Leak buttons replaced by a single
     // "Run Full Security Check" entry. Old standalone sheets are kept in the
@@ -21,12 +20,20 @@ struct SecurityTabView: View {
     @State private var showingFullSecurityCheck = false
     @State private var showingPortScanner = false
     @State private var showingDeviceHistory = false
+    @State private var showingDeviceAssistant = false
+    @State private var showingUniFi = false
 
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
-                    // Section 1: Privacy Shield
+                    Button {
+                        showingFullSecurityCheck = true
+                    } label: {
+                        Label("Check security and get next steps", systemImage: "checkmark.shield")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.borderedProminent)
                     privacyShieldSection
 
                     // Section 2: Exposure Check
@@ -45,11 +52,21 @@ struct SecurityTabView: View {
                     // secondary action ("Scan ports on these devices →")
                     // because port-scanning targets these LAN devices.
                     DeviceCountCard(onScanPorts: { showingPortScanner = true })
-
-                    // Diagnosis Evidence (5-score system with evidence/confidence)
-                    if let diagnosis = interpretationEngine.currentDiagnosis {
-                        DiagnosisEvidenceCard(diagnosis: diagnosis)
+                    Button {
+                        showingDeviceAssistant = true
+                    } label: {
+                        Label("Match and save device names", systemImage: "person.text.rectangle")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        showingUniFi = true
+                    } label: {
+                        Label("View UniFi connected clients", systemImage: "wifi.router")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.bordered)
 
                     // Section 3: Security Tools
                     securityToolsSection
@@ -71,6 +88,10 @@ struct SecurityTabView: View {
                 }
             }
             // Combined check sheet — replaces the two old standalone sheets.
+            .sheet(isPresented: $showingUniFi) { UniFiClientsView() }
+            .sheet(isPresented: $showingDeviceAssistant) {
+                WiFiAssistantView(guide: .security)
+            }
             .sheet(isPresented: $showingFullSecurityCheck) {
                 CombinedSecurityCheckSheet()
             }
@@ -248,11 +269,9 @@ struct SecurityTabView: View {
                             exposureRow(
                                 icon: "globe",
                                 title: "Your visible IP",
-                                value: exposure.publicIP ?? "Hidden",
-                                detail: exposure.isRealIP
-                                    ? "This is your REAL IP address"
-                                    : "This is your VPN server's IP",
-                                isWarning: exposure.isRealIP
+                                value: exposure.publicIP ?? "Unavailable",
+                                detail: "Observed public egress; subscriber identity and VPN coverage unverified",
+                                isWarning: false
                             )
 
                             Divider()
@@ -262,7 +281,7 @@ struct SecurityTabView: View {
                                 title: "Your visible location",
                                 value: exposure.visibleLocation ?? "Unknown",
                                 detail: exposure.locationDetail,
-                                isWarning: exposure.isRealIP
+                                isWarning: false
                             )
 
                             Divider()
@@ -271,10 +290,8 @@ struct SecurityTabView: View {
                                 icon: "building.2",
                                 title: "Your visible ISP",
                                 value: exposure.visibleISP ?? "Unknown",
-                                detail: exposure.isRealIP
-                                    ? "Your real ISP is visible"
-                                    : "Shows as VPN provider",
-                                isWarning: exposure.isRealIP
+                                detail: "Organization reported by the IP metadata provider",
+                                isWarning: false
                             )
 
                             Divider()
@@ -285,7 +302,7 @@ struct SecurityTabView: View {
                                 value: exposure.ipType,
                                 detail: exposure.ipType.contains("Data Center")
                                     ? "Some websites may detect this as VPN"
-                                    : "Appears as a normal connection",
+                                    : "IP type could not be verified",
                                 isWarning: false
                             )
                         }
@@ -350,7 +367,7 @@ struct SecurityTabView: View {
                 SecurityToolButton(
                     icon: "shield.lefthalf.filled.badge.checkmark",
                     title: "Run Full Security Check",
-                    subtitle: "WiFi safety + VPN leak detection",
+                    subtitle: "Connection and certificate checks with next steps",
                     duration: "~20s",
                     isLoading: privacyService.isCheckingWiFi || privacyService.isRunningLeakTest
                 ) {
@@ -386,15 +403,9 @@ struct SecurityTabView: View {
         case .protected:
             return "All privacy checks passed"
         case .partiallyProtected:
-            // FIX (Sec Issue 2): mention IPv6 leak by name when that's the
-            // specific reason we degraded the verdict.
-            if let ipv6 = privacyService.privacyStatus?.ipv6Leak,
-               ipv6.severity == .warning {
-                return "IPv6 leak detected — VPN protection is incomplete"
-            }
-            return "Some privacy measures are in place but improvements possible"
+            return "Several privacy checks are unverified. Review the evidence below; this is not a network safety certification."
         case .exposed:
-            return "Your online activity may be visible to others"
+            return "One or more checks could not complete successfully. Review the endpoint evidence; the cause may be a connection failure."
         }
     }
 }

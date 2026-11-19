@@ -62,6 +62,7 @@ enum LegacySpeedRecordMigration {
     /// Returns a corrected copy if the record carries legacy sentinels,
     /// nil if it is already clean.
     static func sanitize(_ record: SpeedTestResult) -> SpeedTestResult? {
+        guard (record.measurementVersion ?? 1) < 2 else { return nil }
         let pingIsSentinel = record.ping.map { $0 >= pingSentinel } ?? false
         let lossIsSentinel = record.packetLoss.map { $0 >= lossSentinel } ?? false
         guard pingIsSentinel || lossIsSentinel else { return nil }

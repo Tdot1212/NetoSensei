@@ -266,9 +266,9 @@ class NetworkDeviceDiscovery: ObservableObject {
         for device in uniqueSSDPDevices {
             allIPs.insert(device.ip)
         }
-        // Add Bonjour-only count estimate (Bonjour doesn't provide IPs directly)
-        let bonjourOnlyEstimate = max(0, uniqueBonjourDevices.count - allIPs.count)
-        return allIPs.count + bonjourOnlyEstimate
+        // Bonjour names are service advertisements, not authenticated unique
+        // devices. Count only distinct observed IP addresses across TCP/SSDP.
+        return allIPs.count
     }
 
     @discardableResult
@@ -288,6 +288,7 @@ class NetworkDeviceDiscovery: ObservableObject {
 
     private func performScanNetwork() async {
         guard !isScanning else { return }
+        let startingPath = ExitPath.lastPathChange
         isScanning = true
         scanProgress = 0
         discoveredDevices = []
@@ -304,7 +305,7 @@ class NetworkDeviceDiscovery: ObservableObject {
         startBonjourBrowsing()
 
         // Get local IP from NetworkMonitorService or fallback
-        guard let localIP = NetworkMonitorService.shared.currentStatus.localIP ?? getLocalIP() else {
+        guard (NetworkMonitorService.shared.currentStatus.localIP ?? getLocalIP()) != nil else {
             // Still wait a bit for Bonjour results
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             stopBonjourBrowsing()
@@ -312,10 +313,11 @@ class NetworkDeviceDiscovery: ObservableObject {
             return
         }
 
-        let parts = localIP.split(separator: ".")
-        guard parts.count == 4 else { return }
-        let subnet = "\(parts[0]).\(parts[1]).\(parts[2])"
-        let gatewayIP = "\(subnet).1"
+        guard let scope = IPv4Subnet.activeWiFi() else {
+            stopBonjourBrowsing(); scanProgress = 1; return
+        }
+        let targets = scope.candidates
+        let gatewayIP = DefaultRouteResolver.lanGateway()?.gateway
 
         // Launch SSDP discovery concurrently (runs for ~3s)
         let ssdpTask = Task.detached { [weak self] in
@@ -326,12 +328,12 @@ class NetworkDeviceDiscovery: ObservableObject {
 
         // Batch TCP sweep: 30 hosts per batch, 200ms timeout each
         let batchSize = 30
-        for batchStart in stride(from: 1, through: 254, by: batchSize) {
-            let batchEnd = min(batchStart + batchSize - 1, 254)
+        for batchStart in stride(from: 0, to: targets.count, by: batchSize) {
+            if Task.isCancelled { break }
+            let batchEnd = min(batchStart+batchSize, targets.count)
 
             let batchResults = await withTaskGroup(of: DiscoveredDevice?.self, returning: [DiscoveredDevice].self) { group in
-                for hostNum in batchStart...batchEnd {
-                    let ip = "\(subnet).\(hostNum)"
+                for ip in targets[batchStart..<batchEnd] {
                     let isGW = (ip == gatewayIP)
                     group.addTask {
                         await self.probeHostAsync(ip, isGateway: isGW)
@@ -348,11 +350,13 @@ class NetworkDeviceDiscovery: ObservableObject {
             }
 
             found.append(contentsOf: batchResults)
-            scanProgress = Double(batchEnd) / 254.0 * 0.7  // TCP = 70% of progress
+            scanProgress = Double(batchEnd) / Double(max(1, targets.count)) * 0.7  // TCP = 70% of progress
             discoveredDevices = found.sorted {
                 $0.ipAddress.localizedStandardCompare($1.ipAddress) == .orderedAscending
             }
         }
+
+        guard !Task.isCancelled else { ssdpTask.cancel(); stopBonjourBrowsing(); return }
 
         // Collect SSDP results
         scanProgress = 0.75
@@ -394,7 +398,11 @@ class NetworkDeviceDiscovery: ObservableObject {
 
         scanProgress = 1.0
 
-        // Update persistent device history
+        // A cancelled or changed-network scan cannot update presence history.
+        guard !Task.isCancelled, ExitPath.lastPathChange == startingPath else {
+            discoveredDevices = []; bonjourDevices = []; ssdpDevices = []
+            return
+        }
         DeviceHistoryManager.shared.onNetworkScanComplete()
     }
 
@@ -477,7 +485,7 @@ class NetworkDeviceDiscovery: ObservableObject {
         addr.sin_port = UInt16(80).bigEndian
         inet_pton(AF_INET, ip, &addr.sin_addr)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = ProcessInfo.processInfo.systemUptime
 
         let connectResult = withUnsafeMutablePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
@@ -487,7 +495,7 @@ class NetworkDeviceDiscovery: ObservableObject {
 
         if connectResult == 0 {
             // Connected immediately (unlikely but possible)
-            let latency = (CFAbsoluteTimeGetCurrent() - start) * 1000
+            let latency = (ProcessInfo.processInfo.systemUptime - start) * 1000
             return DiscoveredDevice(ipAddress: ip, responseTimeMs: latency, isGateway: isGateway)
         }
 
@@ -505,7 +513,7 @@ class NetworkDeviceDiscovery: ObservableObject {
             if error == 0 || error == ECONNREFUSED {
                 // error == 0: port open (connected)
                 // ECONNREFUSED: host is UP, port closed
-                let latency = (CFAbsoluteTimeGetCurrent() - start) * 1000
+                let latency = (ProcessInfo.processInfo.systemUptime - start) * 1000
                 return DiscoveredDevice(ipAddress: ip, responseTimeMs: latency, isGateway: isGateway)
             }
             // EHOSTUNREACH, ENETUNREACH = host is DOWN
@@ -570,9 +578,9 @@ class NetworkDeviceDiscovery: ObservableObject {
         var srcAddr = sockaddr_in()
         var srcLen = socklen_t(MemoryLayout<sockaddr_in>.size)
 
-        let deadline = CFAbsoluteTimeGetCurrent() + 3.0
+        let deadline = ProcessInfo.processInfo.systemUptime + 3.0
 
-        while CFAbsoluteTimeGetCurrent() < deadline {
+        while ProcessInfo.processInfo.systemUptime < deadline {
             let bytesRead = withUnsafeMutablePointer(to: &srcAddr) { addrPtr in
                 addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
                     recvfrom(sock, &buffer, buffer.count, 0, sockaddrPtr, &srcLen)
@@ -630,14 +638,14 @@ class NetworkDeviceDiscovery: ObservableObject {
     }
 
     /// Parse SSDP HTTP-like response headers
-    nonisolated private func parseSSDPHeaders(_ response: String) -> [String: String] {
+    nonisolated func parseSSDPHeaders(_ response: String) -> [String: String] {
         var headers: [String: String] = [:]
         for line in response.components(separatedBy: "\r\n") {
             if let colonRange = line.range(of: ":") {
                 let key = String(line[line.startIndex..<colonRange.lowerBound]).trimmingCharacters(in: .whitespaces)
                 let value = String(line[colonRange.upperBound...]).trimmingCharacters(in: .whitespaces)
                 if !key.isEmpty {
-                    headers[key] = value
+                    headers[key.lowercased()] = value
                 }
             }
         }
@@ -786,7 +794,8 @@ class NetworkDeviceDiscovery: ObservableObject {
     }
 
     /// Parse NetBIOS Node Status Response to extract the machine name
-    nonisolated private func parseNetBIOSResponse(buffer: [UInt8], length: Int) -> String? {
+    nonisolated func parseNetBIOSResponse(buffer: [UInt8], length: Int) -> String? {
+        guard length >= 12, length <= buffer.count else { return nil }
         // Skip the 12-byte header
         var offset = 12
 

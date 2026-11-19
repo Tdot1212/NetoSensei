@@ -321,11 +321,6 @@ struct NetoSenseiApp: App {
         _ = DiagnosticEngine.shared
         debugLog("📱 DiagnosticEngine initialized")
 
-        // 3. Streaming Diagnostic Service
-        debugLog("📱 Initializing StreamingDiagnosticService...")
-        _ = StreamingDiagnosticService.shared
-        debugLog("📱 StreamingDiagnosticService initialized")
-
         // 4. VPN Engine
         debugLog("📱 Initializing VPNEngine...")
         _ = VPNEngine.shared

@@ -74,7 +74,6 @@ class DashboardViewModel: ObservableObject {
     @Published var verdict: NetworkVerdict?
 
     // MARK: - Layer 3: Interpretation Engine Output
-    @Published var currentDiagnosis: NetworkDiagnosis?
 
     // MARK: - Services
 
@@ -135,10 +134,6 @@ class DashboardViewModel: ObservableObject {
                 MeasurementValidityTracker.shared.ingest(newStatus)
                 self?.updateUIStatus()
                 // Layer 3: Update diagnosis on each status change
-                self?.currentDiagnosis = InterpretationEngine.shared.diagnose(
-                    status: newStatus,
-                    vpnResult: SmartVPNDetector.shared.detectionResult
-                )
             }
             .store(in: &cancellables)
 
@@ -308,10 +303,6 @@ class DashboardViewModel: ObservableObject {
         updateUIStatus()
 
         // Layer 3: Run InterpretationEngine to produce ExplanationCards
-        currentDiagnosis = InterpretationEngine.shared.diagnose(
-            status: currentStatus,
-            vpnResult: SmartVPNDetector.shared.detectionResult
-        )
 
         lastUpdated = Date()
         isLoading = false
@@ -405,7 +396,7 @@ class DashboardViewModel: ObservableObject {
         case .unknown: stateEmoji = "❔"
         }
         items.append(SimpleSummaryItem(emoji: stateEmoji, title: v.headline, explanation: v.coverage.line))
-        for f in v.findings.prefix(3) {
+        for f in v.findings.filter({ $0.headline != v.headline }).prefix(2) {
             let emoji: String
             switch f.action {
             case .userFixable: emoji = "🔧"
@@ -596,7 +587,7 @@ class DashboardViewModel: ObservableObject {
     /// DNS warning
     /// STEP 4 Requirement: "If DNS slow → show warning"
     var hasDNSWarning: Bool {
-        if let latency = status.dns.latency {
+        if let latency = status.dns.displayableLatency {
             return latency > 100
         }
         return false
@@ -620,72 +611,12 @@ class DashboardViewModel: ObservableObject {
 
     // MARK: - VPN Health Calculations (FIXED: No more "Unknown")
 
-    /// Calculate VPN overhead from actual measurements
-    /// VPN overhead = External latency - Gateway latency
-    /// FIXED: Check both NetworkMonitor AND SmartVPNDetector for VPN status
-    var vpnOverhead: Double? {
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-        guard vpnActive else { return nil }
-        guard let externalLatency = status.internet.latencyToExternal,
-              let gatewayLatency = status.router.latency else { return nil }
+    /// VPN overhead needs paired on/off measurements against the same endpoint.
+    var vpnOverhead: Double? { nil }
 
-        let overhead = externalLatency - gatewayLatency
-        return overhead > 0 ? overhead : nil
-    }
-
-    /// VPN health score (0-100) based on overhead, stability, and reachability
-    var vpnHealthScore: Int? {
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-        guard vpnActive else { return nil }
-
-        var score = 100
-
-        // Factor 1: Latency overhead (biggest impact)
-        if let overhead = vpnOverhead {
-            if overhead > 200 { score -= 45 }
-            else if overhead > 150 { score -= 35 }
-            else if overhead > 100 { score -= 25 }
-            else if overhead > 50 { score -= 10 }
-        } else if let tunnelLatency = status.vpn.tunnelLatency {
-            if tunnelLatency > 200 { score -= 45 }
-            else if tunnelLatency > 150 { score -= 35 }
-            else if tunnelLatency > 100 { score -= 25 }
-            else if tunnelLatency > 50 { score -= 10 }
-        }
-
-        // Factor 2: Packet loss
-        if let loss = status.vpn.packetLoss {
-            if loss > 5 { score -= 30 }
-            else if loss > 2 { score -= 15 }
-            else if loss > 0 { score -= 5 }
-        }
-
-        // Factor 3: Tunnel reachability
-        if !status.vpn.tunnelReachable && vpnActive {
-            score -= 40
-        }
-
-        // Factor 4: DNS leak (from NetworkStatus)
-        if status.vpn.dnsLeakDetected {
-            score -= 15
-        }
-
-        // Factor 5: Leak test results (from PrivacyShieldService)
-        if let leakResult = PrivacyShieldService.shared.lastLeakTestResult,
-           leakResult.overallVerdict != .noVPN {
-            if leakResult.dnsLeak.isLeaking {
-                score -= (leakResult.dnsLeak.severity == .critical) ? 25 : 15
-            }
-            if leakResult.ipLeak.isLeaking {
-                score -= (leakResult.ipLeak.severity == .critical) ? 30 : 20
-            }
-            if leakResult.webRTCLeak.isLeaking {
-                score -= (leakResult.webRTCLeak.severity == .critical) ? 25 : 15
-            }
-        }
-
-        return max(0, min(100, score))
-    }
+    /// Reachability and endpoint RTT alone cannot quantify VPN health.
+    /// Until paired measurements exist, render the existing Active/Checking state.
+    var vpnHealthScore: Int? { nil }
 
     /// VPN health description based on calculated overhead
     /// FIXED: Never returns "Unknown" when VPN is active and internet works
@@ -795,8 +726,11 @@ class DashboardViewModel: ObservableObject {
         }
 
         // Smooth DNS latency
-        if let rawLatency = status.dns.latency {
+        if let rawLatency = status.dns.displayableLatency {
             smoothedDNSLatency = smoothLatency(rawLatency, history: &dnsLatencyHistory)
+        } else {
+            dnsLatencyHistory.removeAll()
+            smoothedDNSLatency = nil
         }
 
     }

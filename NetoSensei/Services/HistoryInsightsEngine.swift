@@ -20,7 +20,7 @@ struct HistoryInsightsEngine {
         let vpnImpact: VPNImpact?
         let topIssue: TopIssue?
         let entryCount: Int
-        let averageScore: Double
+        let averageScore: Double?
     }
 
     enum Trend: Equatable {
@@ -81,6 +81,9 @@ struct HistoryInsightsEngine {
     // MARK: - Main Analysis
 
     static func analyze(entries: [NetworkHistoryEntry]) -> Insights {
+        // Insights need scores from one identified network, not mixed Wi-Fi/cellular runs.
+        let latest = entries.max { $0.timestamp < $1.timestamp }
+        let entries = entries.filter { $0.healthScore != nil && $0.wifiSSID != nil && $0.wifiSSID == latest?.wifiSSID && $0.connectionType == latest?.connectionType && $0.vpnActive == latest?.vpnActive }
         guard entries.count >= 3 else {
             return Insights(
                 trend: .insufficient,
@@ -89,17 +92,16 @@ struct HistoryInsightsEngine {
                 vpnImpact: nil,
                 topIssue: nil,
                 entryCount: entries.count,
-                averageScore: 0
+                averageScore: nil
             )
         }
 
         let trend = computeTrend(entries: entries)
         let (bestHour, worstHour) = computePeakHours(entries: entries)
-        let vpnImpact = computeVPNImpact(entries: entries)
+        let vpnImpact: VPNImpact? = nil // Observational scores do not isolate VPN impact.
         let topIssue = computeTopIssue(entries: entries)
 
-        let avgScore = entries.isEmpty ? 0 :
-            Double(entries.map { $0.healthScore }.reduce(0, +)) / Double(entries.count)
+        let avgScore = MeasurementStatistics.mean(entries.map { $0.healthScore.map(Double.init) })
 
         return Insights(
             trend: trend,
@@ -122,8 +124,8 @@ struct HistoryInsightsEngine {
         let firstHalf = Array(sorted.prefix(half))
         let secondHalf = Array(sorted.suffix(half))
 
-        let firstAvg = Double(firstHalf.map { $0.healthScore }.reduce(0, +)) / Double(firstHalf.count)
-        let secondAvg = Double(secondHalf.map { $0.healthScore }.reduce(0, +)) / Double(secondHalf.count)
+        let firstAvg = MeasurementStatistics.mean(firstHalf.map { $0.healthScore.map(Double.init) }) ?? 0
+        let secondAvg = MeasurementStatistics.mean(secondHalf.map { $0.healthScore.map(Double.init) }) ?? 0
         let delta = Int(secondAvg - firstAvg)
 
         if delta > 5 { return .improving(delta: delta) }
@@ -139,7 +141,7 @@ struct HistoryInsightsEngine {
 
         for entry in entries {
             let hour = calendar.component(.hour, from: entry.timestamp)
-            hourBuckets[hour, default: []].append(entry.healthScore)
+            if let score = entry.healthScore { hourBuckets[hour, default: []].append(score) }
         }
 
         // Only consider hours with at least 2 measurements
@@ -184,19 +186,6 @@ struct HistoryInsightsEngine {
     }
 
     // MARK: - VPN Impact Computation
-
-    private static func computeVPNImpact(entries: [NetworkHistoryEntry]) -> VPNImpact? {
-        let withVPN = entries.filter { $0.vpnActive }
-        let withoutVPN = entries.filter { !$0.vpnActive }
-
-        // Need at least 3 measurements in each category
-        guard withVPN.count >= 3, withoutVPN.count >= 3 else { return nil }
-
-        let vpnAvg = Double(withVPN.map { $0.healthScore }.reduce(0, +)) / Double(withVPN.count)
-        let noVPNAvg = Double(withoutVPN.map { $0.healthScore }.reduce(0, +)) / Double(withoutVPN.count)
-
-        return VPNImpact(withVPNAvgScore: vpnAvg, withoutVPNAvgScore: noVPNAvg)
-    }
 
     // MARK: - Top Issue Computation
 
