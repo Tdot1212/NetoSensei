@@ -62,6 +62,8 @@ class DiagnosticViewModel: ObservableObject {
         progress = 0.0
         errorMessage = nil
         result = nil
+        verdict = nil
+        currentTest = "Checking gateway, internet, DNS and VPN…"
 
         // Disable idle timer to prevent screen from turning off during diagnostics
         UIApplication.shared.isIdleTimerDisabled = true
@@ -81,70 +83,19 @@ class DiagnosticViewModel: ObservableObject {
                 debugLog("✅ Diagnostic initialized, starting tests...")
                 try Task.checkCancellation()
 
-                // Capture network snapshot ONCE at the beginning (on MainActor)
-                let networkSnapshot = await MainActor.run {
-                    self.networkMonitor.currentStatus
+                let (networkSnapshot, path) = await MainActor.run {
+                    (self.networkMonitor.currentStatus, ExitPath.lastPathChange)
                 }
                 debugLog("✅ Network snapshot captured")
 
-                // STEP 1: Ping Router/Gateway (0.1 = 10%) - 3s timeout
+                async let gatewayProbe = self.testGateway(snapshot: networkSnapshot)
+                async let externalProbe = self.testExternal()
+                async let dnsProbe = self.testDNS()
+                async let httpProbe = self.testHTTP()
+                async let vpnProbe = self.testVPN()
+                let (gateway, external, dns, http, vpn) = await (gatewayProbe, externalProbe, dnsProbe, httpProbe, vpnProbe)
                 try Task.checkCancellation()
-                await MainActor.run {
-                    self.currentTest = "Testing router connection..."
-                    self.progress = 0.1
-                }
-                let gateway = try await withTimeout(seconds: 3) {
-                    await self.testGateway(snapshot: networkSnapshot)
-                }
-
-                // STEP 2: Ping External Servers (0.2 = 20%) - 3s timeout
-                try Task.checkCancellation()
-                await MainActor.run {
-                    self.currentTest = "Testing external connectivity..."
-                    self.progress = 0.2
-                }
-                let external = try await withTimeout(seconds: 3) {
-                    await self.testExternal()
-                }
-
-                // STEP 3: DNS Tests (0.3 = 30%) - 3s timeout
-                try Task.checkCancellation()
-                await MainActor.run {
-                    self.currentTest = "Testing DNS resolution..."
-                    self.progress = 0.3
-                }
-                let dns = try await withTimeout(seconds: 3) {
-                    await self.testDNS()
-                }
-
-                // STEP 4: HTTP GET Test (0.4 = 40%) - 5s timeout
-                try Task.checkCancellation()
-                await MainActor.run {
-                    self.currentTest = "Testing HTTP connectivity..."
-                    self.progress = 0.5
-                }
-                let http = try await withTimeout(seconds: 5) {
-                    await self.testHTTP()
-                }
-
-                // STEP 5: VPN Tunnel Check (0.5 = 50%) - 3s timeout
-                try Task.checkCancellation()
-                await MainActor.run {
-                    self.currentTest = "Checking VPN tunnel..."
-                    self.progress = 0.6
-                }
-                let vpn = try await withTimeout(seconds: 3) {
-                    await self.testVPN()
-                }
-
-                // STEP 6: ISP Congestion Check (0.6 = 60%) - 3s timeout
-                try Task.checkCancellation()
-                await MainActor.run {
-                    self.currentTest = "Testing ISP performance..."
-                    self.progress = 0.7
-                }
                 let isp = self.ispPlaceholder()
-                debugLog("✅ ISP step recorded as not run (superseded by the Internet check)")
 
                 // STEP 7: Evaluate and produce result (0.7+ = 70-100%)
                 await MainActor.run {
@@ -173,7 +124,13 @@ class DiagnosticViewModel: ObservableObject {
                 debugLog("📱 Updating UI on MainActor...")
 
                 // FIXED: Use re-entry guard to prevent cascading updates
-                let composed: NetworkVerdict = await MainActor.run {
+                let composed: NetworkVerdict? = await MainActor.run {
+                    guard !Task.isCancelled, ExitPath.lastPathChange == path else {
+                        self.isRunning = false
+                        self.errorMessage = "The connection changed during diagnosis."
+                        UIApplication.shared.isIdleTimerDisabled = false
+                        return nil
+                    }
                     let v = VerdictInputs.verdict(forQuickCheck: diagnosticResult, status: self.networkMonitor.currentStatus)
                     guard !self.isUpdatingUI else {
                         debugLog("⚠️ Skipping re-entrant UI update")
@@ -203,6 +160,8 @@ class DiagnosticViewModel: ObservableObject {
                     debugLog("🧭 Verdict: \(v.state.rawValue) score=\(v.scoreText) — \(v.headline) [\(v.coverage.line)]")
                     return v
                 }
+
+                guard let composed else { return }
 
                 // FIXED: Save history AFTER UI update completes, in background task
                 // This prevents @Published property updates from triggering cascading refreshes
@@ -294,6 +253,16 @@ class DiagnosticViewModel: ObservableObject {
             }
 
             debugLog("========== DIAGNOSTIC FINISHED ==========")
+        }
+    }
+
+    func runFullDiagnosticAndWait() async {
+        runFullDiagnostic()
+        guard let task = diagnosticTask else { return }
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
         }
     }
 
@@ -412,13 +381,8 @@ class DiagnosticViewModel: ObservableObject {
     private func testDNS() async -> DiagnosticTest {
         debugLog("🔍 testDNS() started")
 
-        let start = Date()
-        let success = await safeDNSLookup(hostname: "www.apple.com", timeout: 2.0)
-        let latency = Date().timeIntervalSince(start) * 1000
-
-        debugLog("🔍 testDNS() - success: \(success), latency: \(success ? String(format: "%.1f", latency) : "nil")")
-
-        if !success {
+        let reply = await SystemDNSResolver.resolve("www.apple.com", timeout: 2.0)
+        if reply == nil {
             // Commit 6: the elapsed time of a FAILED lookup is the timeout, not a
             // resolution time — it must not be stored as latency.
             return DiagnosticTest(
@@ -428,7 +392,7 @@ class DiagnosticViewModel: ObservableObject {
                 details: "DNS lookup failed - DNS servers not responding",
                 timestamp: Date()
             )
-        } else if latency > 100 {
+        } else if let latency = reply?.latencyMs, latency > 100 {
             return DiagnosticTest(
                 name: "DNS Resolution",
                 result: .warning,
@@ -440,7 +404,7 @@ class DiagnosticViewModel: ObservableObject {
             return DiagnosticTest(
                 name: "DNS Resolution",
                 result: .pass,
-                latency: latency,
+                latency: reply?.latencyMs,
                 details: "DNS working well",
                 timestamp: Date()
             )
@@ -535,34 +499,6 @@ class DiagnosticViewModel: ObservableObject {
     }
 
     // MARK: - Helper Functions
-
-    private func safeDNSLookup(hostname: String, timeout: TimeInterval) async -> Bool {
-        do {
-            return try await withTimeout(seconds: timeout) {
-                await withCheckedContinuation { continuation in
-                    var hints = addrinfo(
-                        ai_flags: AI_DEFAULT,
-                        ai_family: AF_UNSPEC,
-                        ai_socktype: SOCK_STREAM,
-                        ai_protocol: 0,
-                        ai_addrlen: 0,
-                        ai_canonname: nil,
-                        ai_addr: nil,
-                        ai_next: nil
-                    )
-
-                    var result: UnsafeMutablePointer<addrinfo>?
-                    let status = getaddrinfo(hostname, nil, &hints, &result)
-                    if result != nil {
-                        freeaddrinfo(result)
-                    }
-                    continuation.resume(returning: status == 0)
-                }
-            }
-        } catch {
-            return false
-        }
-    }
 
     private func safeHTTPCheck(url: String, timeout: TimeInterval) async -> Bool {
         do {

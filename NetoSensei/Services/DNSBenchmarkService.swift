@@ -177,21 +177,30 @@ final class DNSBenchmarkService {
 
     func benchmark(progressHandler: ((Double, String) -> Void)? = nil) async -> QuickDNSBenchmarkResult {
         let (vpn, country) = await environment.vpn()
-        var results: [QuickDNSServerResult] = []
         let domains = ["www.apple.com", "www.microsoft.com", "www.cloudflare.com"]
-        for (index, server) in Self.servers.enumerated() {
-            if Task.isCancelled { break }
-            progressHandler?(Double(index)/Double(Self.servers.count), "Querying \(server.name)…")
-            var samples: [Double] = []
-            for domain in domains {
-                if Task.isCancelled { break }
-                if server.address == "system" {
-                    if let reply = await environment.system(domain), reply.latencyMs.isFinite, reply.latencyMs >= 0 { samples.append(reply.latencyMs) }
-                } else if let reply = await environment.query(server.address, domain), reply.resolved, reply.latencyMs.isFinite, reply.latencyMs >= 0 {
-                    samples.append(reply.latencyMs)
+        let environment = self.environment
+        let servers = Self.servers
+        var results = await withTaskGroup(of: (Int, QuickDNSServerResult).self) { group in
+            for (index, server) in servers.enumerated() {
+                group.addTask {
+                    var samples: [Double] = []
+                    for domain in domains {
+                        if Task.isCancelled { break }
+                        if server.address == "system" {
+                            if let reply = await environment.system(domain), reply.latencyMs.isFinite, reply.latencyMs >= 0 { samples.append(reply.latencyMs) }
+                        } else if let reply = await environment.query(server.address, domain), reply.resolved, reply.latencyMs.isFinite, reply.latencyMs >= 0 {
+                            samples.append(reply.latencyMs)
+                        }
+                    }
+                    return (index, Self.result(server: server, samples: samples, total: domains.count, fastest: false))
                 }
             }
-            results.append(Self.result(server: server, samples: samples, total: domains.count, fastest: false))
+            var completed: [(Int, QuickDNSServerResult)] = []
+            for await entry in group {
+                completed.append(entry)
+                progressHandler?(Double(completed.count) / Double(servers.count), "Finished \(entry.1.name)")
+            }
+            return completed.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
         // System API time includes local cache/OS work; do not rank it against
         // direct-wire resolver RTT or infer caching from a sub-2ms observation.

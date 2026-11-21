@@ -42,6 +42,8 @@ struct CertificateInspection: Identifiable {
     let severity: Severity
     /// One-line user-facing label suitable for a row.
     let summary: String
+    var protocolVersion: String? = nil
+    var handshakeMs: Double? = nil
 
     struct Counts {
         let proxyLike: Int, otherTrusted: Int, untrusted: Int, unavailable: Int
@@ -155,7 +157,9 @@ final class CertificateInspector {
             isProxyIntercepted: isProxyIntercepted,
             proxyAppName: proxyApp,
             severity: severity,
-            summary: summary
+            summary: summary,
+            protocolVersion: result.tlsVersion.version == "Unknown" ? nil : result.tlsVersion.version,
+            handshakeMs: result.handshakeLatencyMs
         )
     }
 

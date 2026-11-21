@@ -160,41 +160,22 @@ class ThrottleDetectionService {
         let expectedMinBytes: Int   // Minimum bytes expected (to detect error pages)
     }
 
-    // FIX (Phase 6.2): Use 10MB+ payloads where the endpoint supports it so
-    // TCP slow-start doesn't dominate the measurement. Tiny files (favicons)
-    // produced wildly inaccurate Mbps numbers (Apple 0.7, Akamai 0.1 over
-    // a 122 Mbps connection). Throttle detection only runs when VPN is OFF
-    // — see `detectThrottling`. Under VPN the numbers are meaningless.
-    static let endpoints: [TestEndpoint] = [
-        // Cloudflare speed test — 10 MB
-        TestEndpoint(
-            name: "Cloudflare",
-            url: "https://speed.cloudflare.com/__down?bytes=10000000",
-            category: "CDN",
-            expectedMinBytes: 5_000_000
-        ),
-        // Hetzner mirror — 10 MB random-data file (used by speed-test sites)
-        TestEndpoint(
-            name: "Hetzner",
-            url: "https://speed.hetzner.de/10MB.bin",
-            category: "CDN",
-            expectedMinBytes: 5_000_000
-        ),
-        // OVHcloud — 10 MB sample file
-        TestEndpoint(
-            name: "OVH",
-            url: "https://proof.ovh.net/files/10Mb.dat",
-            category: "CDN",
-            expectedMinBytes: 5_000_000
-        ),
-        // ThinkBroadband — 10 MB test file (UK)
-        TestEndpoint(
-            name: "ThinkBroadband",
-            url: "http://ipv4.download.thinkbroadband.com/10MB.zip",
-            category: "CDN",
-            expectedMinBytes: 5_000_000
-        ),
-    ]
+    // Use HTTPS test payloads large enough for a meaningful throughput sample.
+    // Samples describe the active route, including a VPN when present.
+    static let endpoints: [TestEndpoint] = {
+        let minimumBytes = 5_000_000
+        let endpoints = [
+            TestEndpoint(name: "Cloudflare",
+                         url: "https://speed.cloudflare.com/__down?bytes=10000000",
+                         category: "CDN", expectedMinBytes: minimumBytes),
+            TestEndpoint(name: "OVH", url: "https://proof.ovh.net/files/10Mb.dat",
+                         category: "CDN", expectedMinBytes: minimumBytes)
+        ]
+        let libreSpeed = SpeedTestServerSelection.libreSpeedLosAngeles
+        guard let url = libreSpeed.downloadURL(bytes: 10_000_000) else { return endpoints }
+        return endpoints + [TestEndpoint(name: libreSpeed.label, url: url.absoluteString,
+                                          category: "Speed test", expectedMinBytes: minimumBytes)]
+    }()
 
     private let injectedSession: URLSession?
     private let vpn: @MainActor () -> Bool
@@ -218,6 +199,7 @@ class ThrottleDetectionService {
         let totalEndpoints = Double(Self.endpoints.count)
 
         for (index, endpoint) in Self.endpoints.enumerated() {
+            if Task.isCancelled { break }
             progressHandler?(Double(index) / totalEndpoints, "Testing \(endpoint.name)...")
 
             let result = await testEndpoint(endpoint)
@@ -242,6 +224,7 @@ class ThrottleDetectionService {
         config.timeoutIntervalForResource = 15
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         let session = injectedSession ?? URLSession(configuration: config)
+        defer { if injectedSession == nil { session.invalidateAndCancel() } }
 
         guard let url = URL(string: endpoint.url) else {
             return ThrottleResult(

@@ -30,22 +30,14 @@ final class RemainingFeaturesUITests: XCTestCase {
         app.tabBars.buttons["History"].tap()
         capture(app,"History after actual speed test")
         app.tabBars.buttons["Diagnose"].tap()
-        app.buttons["detailedChecks"].tap(); app.buttons["detailed.security"].tap()
-        XCTAssertTrue(app.staticTexts["WiFi Safety"].waitForExistence(timeout: 100))
-        XCTAssertFalse(app.staticTexts["No native IPv6 leak detected"].exists)
-        XCTAssertFalse(app.staticTexts["Assessed Checks Passed"].exists)
-        capture(app,"Combined security - measured and unverified states")
-        done(app); done(app)
-        let advanced = app.buttons.matching(NSPredicate(format:"label CONTAINS %@","Advanced Tools (for power users)")).firstMatch
-        reveal(advanced,in:app); advanced.tap()
-        let endpoints = app.buttons.matching(NSPredicate(format:"label CONTAINS %@","Endpoint Speeds")).firstMatch
-        reveal(endpoints,in:app); endpoints.tap()
-        let compare = app.buttons["Compare Endpoint Speeds"]
-        reveal(compare,in:app); compare.tap()
-        XCTAssertTrue(app.staticTexts["Test Results"].waitForExistence(timeout: 120))
-        XCTAssertFalse(app.staticTexts["No Throttling"].exists)
-        capture(app,"Endpoint comparison - current route samples")
-        app.buttons["Close"].tap()
+        let run = app.buttons["diagnose.run"]
+        reveal(run, in: app)
+        run.tap()
+        XCTAssertTrue(app.staticTexts["All checks finished."].waitForExistence(timeout: 330))
+        let endpoints = app.staticTexts["Endpoint speeds"]
+        reveal(endpoints, in: app)
+        XCTAssertTrue(endpoints.exists)
+        capture(app, "Unified diagnostics after actual transfers")
         app.tabBars.buttons["Home"].tap()
     }
     @MainActor func testCombinedPerformanceAndSecurityNextStep() {

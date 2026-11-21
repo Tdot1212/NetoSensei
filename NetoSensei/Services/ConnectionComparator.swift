@@ -167,12 +167,12 @@ class ConnectionComparator: ObservableObject {
 
     // MARK: - Run Comparison
 
-    func runComparison() async -> ComparisonResult? {
+    func runComparison(currentSpeed: SpeedTestResult? = nil, reuseCurrentSpeed: Bool = false) async -> ComparisonResult? {
         return await BackgroundTaskManager.shared.runInBackground(
             id: "speedComparison",
             name: "Speed Test",
             operation: {
-                return await self.performComparison()
+                return await self.performComparison(currentSpeed: currentSpeed, reuseCurrentSpeed: reuseCurrentSpeed)
             },
             resultFormatter: { result in
                 guard let r = result else { return "Failed" }
@@ -181,7 +181,7 @@ class ConnectionComparator: ObservableObject {
         )
     }
 
-    private func performComparison() async -> ComparisonResult? {
+    private func performComparison(currentSpeed: SpeedTestResult?, reuseCurrentSpeed: Bool) async -> ComparisonResult? {
         guard !isRunning else { return nil }
         isRunning = true
         defer { isRunning = false; currentTest = nil }
@@ -199,7 +199,11 @@ class ConnectionComparator: ObservableObject {
         if interfaces.wifiIsPrimary {
             currentTest = .wifi
             progress = 0.1
-            wifiResult = await testWiFiConnection()
+            if reuseCurrentSpeed {
+                wifiResult = currentSpeed.map { Self.connectionResult($0, type: .wifi) } ?? unavailableResult(type: .wifi)
+            } else {
+                wifiResult = await testWiFiConnection()
+            }
             progress = 0.45
         } else {
             if wifiResult == nil { wifiResult = unavailableResult(type: .wifi) }
@@ -209,7 +213,11 @@ class ConnectionComparator: ObservableObject {
         if interfaces.cellular && !interfaces.wifiIsPrimary {
             currentTest = .cellular
             progress = 0.5
-            cellularResult = await testCellularConnection(wifiIsPrimary: interfaces.wifiIsPrimary)
+            if reuseCurrentSpeed {
+                cellularResult = currentSpeed.map { Self.connectionResult($0, type: .cellular) } ?? unavailableResult(type: .cellular)
+            } else {
+                cellularResult = await testCellularConnection(wifiIsPrimary: interfaces.wifiIsPrimary)
+            }
             progress = 0.9
         } else {
             if cellularResult == nil { cellularResult = unavailableResult(type: .cellular, reason: interfaces.wifiIsPrimary ? Self.manualToggleError : nil) }
@@ -327,6 +335,10 @@ class ConnectionComparator: ObservableObject {
 
     private nonisolated func measure(type: ConnectionTestResult.ConnectionType) async -> ConnectionTestResult {
         let result = await SpeedTestEngine.shared.runSpeedTest()
+        return Self.connectionResult(result, type: type)
+    }
+
+    nonisolated private static func connectionResult(_ result: SpeedTestResult, type: ConnectionTestResult.ConnectionType) -> ConnectionTestResult {
         let expected = type == .wifi ? "WiFi" : "Cellular"
         guard result.testUnavailableReason == nil, result.connectionType == expected, result.downloadSpeed > 0 else {
             return ConnectionTestResult(connectionType: type, downloadSpeedMbps: nil, uploadSpeedMbps: nil,

@@ -1,417 +1,237 @@
-//
-//  DiagnoseTabView.swift
-//  NetoSensei
-//
-//  Diagnose tab with Quick Check and Deep Scan
-//  Quick Check: ~5s basic test, Deep Scan: ~30s full analysis
-//  Tools: DNS Benchmark, Throttle Test
-//
-
 import SwiftUI
 
 struct DiagnoseTabView: View {
-    @StateObject private var diagnosticVM = DiagnosticViewModel()
+    @StateObject private var diagnosis = FullDiagnosticViewModel()
+    @ObservedObject private var monitor = NetworkMonitorService.shared
+    @State private var host = "www.apple.com"
     @State private var showingWiFiAssistant = false
-    @State private var showingAdvanced = false
-    @State private var showingDNSBenchmark = false
-    @State private var showingThrottleTest = false
-    @State private var showingTraceroute = false
-    @State private var showingDNSAnalyzer = false
-    @State private var showingConnectionComparison = false
-    @State private var showingTLSAnalyzer = false
-    // FIX (Phase 3): Privacy moved out of the Diagnose tab — it's not a network
-    // diagnostic tool and was crowding the UI.
-    // FIX (Phase 3): power-user tools collapse by default.
-    @State private var advancedToolsExpanded = false
+    @FocusState private var editingHost: Bool
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ScrollView {
-                VStack(spacing: 20) {
-                    // Main Diagnostic Card
-                    mainDiagnosticCard
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    connectionSnapshot
+                    runCard
 
                     Button { showingWiFiAssistant = true } label: {
                         Label("Wi-Fi Assistant", systemImage: "wifi")
-                            .font(.headline)
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .buttonStyle(.bordered)
+                    .disabled(diagnosis.isRunning)
 
-                    // Quick Tools Section
-                    quickToolsSection
-
-                    // Results Section (if available)
-                    if diagnosticVM.hasResult {
-                        resultsSection
+                    ForEach(FullDiagnosticViewModel.Check.allCases) { check in
+                        checkCard(check)
                     }
+
+
                 }
                 .padding()
             }
             .navigationTitle("Diagnose")
-            .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                if diagnosticVM.isRunning {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("Cancel", role: .destructive) {
-                            diagnosticVM.cancelDiagnostic()
-                        }
-                    }
-                } else if diagnosticVM.hasResult {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        HStack(spacing: 16) {
-                            // Share button
-                            ShareLink(
-                                item: generateReport(),
-                                subject: Text("NetoSensei Diagnostic Report"),
-                                message: Text("Network diagnostic results")
-                            ) {
-                                Image(systemName: "square.and.arrow.up")
-                            }
-
-                            // Run again button
-                            Button(action: {
-                                diagnosticVM.runFullDiagnostic()
-                            }) {
-                                Image(systemName: "arrow.clockwise")
-                            }
-                        }
+                if !diagnosis.isRunning, let report = diagnosis.report(status: monitor.currentStatus) {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        ShareLink(item: report) { Label("Share diagnostic report", systemImage: "square.and.arrow.up") }
                     }
                 }
             }
-            .sheet(isPresented: $showingWiFiAssistant) {
-                WiFiAssistantView()
-            }
-            .sheet(isPresented: $showingAdvanced) {
-                NewAdvancedDiagnosticView()
-            }
-            .sheet(isPresented: $showingDNSBenchmark) {
-                DNSBenchmarkView()
-            }
-            .sheet(isPresented: $showingThrottleTest) {
-                ThrottleDetectionView()
-            }
-            .sheet(isPresented: $showingTraceroute) {
-                NavigationView {
-                    TracerouteView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarTrailing) {
-                                Button("Done") { showingTraceroute = false }
-                            }
-                        }
-                }
-            }
-            .sheet(isPresented: $showingDNSAnalyzer) {
-                NavigationView {
-                    DNSAnalyzerView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarTrailing) {
-                                Button("Done") { showingDNSAnalyzer = false }
-                            }
-                        }
-                }
-            }
-            .sheet(isPresented: $showingConnectionComparison) {
-                NavigationView {
-                    ConnectionComparisonView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarTrailing) {
-                                Button("Done") { showingConnectionComparison = false }
-                            }
-                        }
-                }
-            }
-            .sheet(isPresented: $showingTLSAnalyzer) {
-                NavigationView {
-                    TLSAnalyzerView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarTrailing) {
-                                Button("Done") { showingTLSAnalyzer = false }
-                            }
-                        }
-                }
-            }
-        }
-        .navigationViewStyle(.stack)
-    }
-
-    // MARK: - Main Diagnostic Card (PART 3: Added Quick Check & Deep Scan)
-
-    private var mainDiagnosticCard: some View {
-        VStack(spacing: 12) {
-            // Quick Check Button (~5 seconds)
-            Button(action: {
-                diagnosticVM.runFullDiagnostic()
-            }) {
-                HStack {
-                    Image(systemName: "bolt.circle.fill")
-                        .font(.title2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Quick Check")
-                            .font(.headline)
-                        Text("Router • Internet • DNS • Web • VPN")
-                            .font(.caption)
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-
-                    Spacer()
-
-                    Text("Run")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.8))
-                }
-                .frame(maxWidth: .infinity)
-                .padding()
-                .background(AppColors.accent)
-                .foregroundColor(.white)
-                .cornerRadius(12)
-            }
-            .buttonStyle(.plain)
-            .disabled(diagnosticVM.isRunning)
-
-            // Deep Scan Button (~30 seconds)
-            Button(action: {
-                showingAdvanced = true
-            }) {
-                HStack {
-                    Image(systemName: "waveform.badge.magnifyingglass")
-                        .font(.title2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Detailed Checks")
-                            .font(.headline)
-                        Text("Performance • DNS • TLS • Endpoint checks")
-                            .font(.caption)
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-
-                    Spacer()
-
-                    Text("Tools")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.8))
-                }
-                .frame(maxWidth: .infinity)
-                .padding()
-                .background(LinearGradient(
-                    colors: [Color.purple, Color.indigo],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                ))
-                .foregroundColor(.white)
-                .cornerRadius(12)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("detailedChecks")
-
-            // Running indicator
-            if diagnosticVM.isRunning {
-                CardView {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                            .scaleEffect(1.2)
-                        Text(diagnosticVM.currentTest)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding()
-                }
-            }
-
-            // Last result summary
-            // Diagnosis v2: rendered from the ONE verdict — number ("—" below the
-            // coverage floor), its band word, the primary finding, and coverage.
-            if let verdict = diagnosticVM.verdict, !diagnosticVM.isRunning {
-                CardView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 20) {
-                            VStack {
-                                Text(verdict.scoreText)
-                                    .font(.title.bold())
-                                    .foregroundColor(verdict.score?.band.color ?? .gray)
-                                Text(verdict.score?.band.word ?? verdict.state.word)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Divider()
-                                .frame(height: 40)
-
-                            VStack(alignment: .leading) {
-                                Text(verdict.primary?.headline ?? verdict.headline)
-                                    .font(.subheadline.bold())
-                                Text(verdict.primary?.cause ?? verdict.headline)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(2)
-                            }
-
-                            Spacer()
-                        }
-                        CoverageLine(coverage: verdict.coverage)
-                    }
-                }
-            }
+            .sheet(isPresented: $showingWiFiAssistant) { WiFiAssistantView() }
         }
     }
 
-    // MARK: - Quick Tools Section
-    // FIX (Phase 3): collapsed by default. Most users want answers (Quick Check
-    // / Deep Scan), not a toolkit. The 6 individual tools live behind a
-    // disclosure for power users who want to test specific things. "Privacy"
-    // was removed from the Diagnose tab — not a network diagnostic.
-
-    private var quickToolsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    advancedToolsExpanded.toggle()
+    private var connectionSnapshot: some View {
+        let status = monitor.currentStatus
+        return CardView {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Current connection", systemImage: "network").font(.headline)
+                reading("Interface", status.connectionType?.displayName ??
+                        (monitor.isInitializing ? "Reading connection…" : "Unavailable"))
+                if let name = status.wifi.ssid { reading("Wi-Fi", name) }
+                if let ip = status.localIP { reading("Device address", ip) }
+                if let gateway = status.router.gatewayIP { reading("Gateway address", gateway) }
+                if status.measurementsPending {
+                    if let latency = status.router.latency { reading("Gateway response", ms(latency)) }
+                    if let latency = status.dns.displayableLatency { reading("DNS lookup", ms(latency)) }
+                    if let latency = status.internet.displayableLatency { reading("Internet delay", ms(latency)) }
+                    Text("Live readings are still being checked.").font(.footnote).foregroundStyle(.secondary)
+                } else if !monitor.isInitializing {
+                    reading("Gateway response", ms(status.router.latency))
+                    reading("DNS lookup", ms(status.dns.displayableLatency))
+                    reading("Internet delay", ms(status.internet.displayableLatency))
+                    if status.measurementsIncomplete { note("Some live readings did not finish.") }
                 }
-            }) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Advanced Tools (for power users)")
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                        Text("Run individual tests with custom parameters")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: advancedToolsExpanded ? "chevron.up" : "chevron.down")
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 4)
             }
-            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("diagnose.connectionSnapshot")
+    }
 
-            if advancedToolsExpanded {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    // DNS Benchmark
-                    ToolButton(
-                        icon: "server.rack",
-                        title: "DNS Benchmark",
-                        subtitle: "Test DNS servers",
-                        color: .blue
-                    ) {
-                        showingDNSBenchmark = true
-                    }
-
-                    // Throttle Detection
-                    ToolButton(
-                        icon: "gauge.with.dots.needle.bottom.50percent",
-                        title: "Endpoint Speeds",
-                        subtitle: "Compare endpoint throughput",
-                        color: .orange
-                    ) {
-                        showingThrottleTest = true
-                    }
-
-                    // Network Path (Traceroute)
-                    ToolButton(
-                        icon: "point.topleft.down.to.point.bottomright.curvepath",
-                        title: "Endpoint Checks",
-                        subtitle: "Compare endpoint responses",
-                        color: .purple
-                    ) {
-                        showingTraceroute = true
-                    }
-
-                    // DNS Analyzer
-                    ToolButton(
-                        icon: "lock.shield",
-                        title: "DNS Analyzer",
-                        subtitle: "Observed resolver information",
-                        color: .green
-                    ) {
-                        showingDNSAnalyzer = true
-                    }
-
-                    // Wi-Fi vs Cellular
-                    ToolButton(
-                        icon: "arrow.left.arrow.right",
-                        title: "Wi-Fi vs Cell",
-                        subtitle: "Compare connections",
-                        color: .teal
-                    ) {
-                        showingConnectionComparison = true
-                    }
-
-                    // TLS Analyzer
-                    ToolButton(
-                        icon: "lock.shield.fill",
-                        title: "TLS Analyzer",
-                        subtitle: "Check TLS & certificates",
-                        color: .indigo
-                    ) {
-                        showingTLSAnalyzer = true
-                    }
+    private var runCard: some View {
+        CardView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Full connection check").font(.title2.bold())
+                Text("Run connection, DNS, endpoint, certificate, VPN and performance checks together.")
+                    .foregroundStyle(.secondary)
+                DisclosureGroup("Choose a website") {
+                    TextField("Website hostname", text: $host)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textFieldStyle(.roundedBorder)
+                        .focused($editingHost)
+                        .accessibilityIdentifier("diagnose.hostname")
+                        .padding(.vertical, 6)
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .disabled(diagnosis.isRunning)
+                if diagnosis.isRunning {
+                    ProgressView(value: Double(diagnosis.results.count), total: Double(FullDiagnosticViewModel.Check.allCases.count))
+                    Text("\(diagnosis.results.count) of \(FullDiagnosticViewModel.Check.allCases.count) checks finished")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    Button("Stop checks", role: .cancel) { diagnosis.cancel() }
+                        .buttonStyle(.bordered)
+                } else {
+                    Button(diagnosis.results.isEmpty ? "Run full check" : "Run full check again") {
+                        editingHost = false
+                        diagnosis.run(host: host)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("diagnose.run")
+                    .disabled(monitor.isInitializing)
+                    Text("Speed checks transfer data on the active connection, including cellular when it’s active.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if let message = diagnosis.message {
+                    Text(message).font(.subheadline)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    // MARK: - Results Section
-
-    private var resultsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Results")
-                .font(.headline)
-                .padding(.leading, 4)
-
-            DiagnosticContentView(vm: diagnosticVM)
-        }
-    }
-
-    // MARK: - Report Generation
-
-    private func generateReport() -> String {
-        DiagnosticReportGenerator.shared.generateReport(
-            diagnostic: diagnosticVM.result,
-            speedTest: HistoryManager.shared.speedTestHistory.first,
-            vpnInfo: SmartVPNDetector.shared.detectionResult,
-            verdict: diagnosticVM.verdict,
-            networkStatus: NetworkMonitorService.shared.currentStatus
-        )
-    }
-}
-
-// MARK: - Tool Button
-
-struct ToolButton: View {
-    let icon: String
-    let title: String
-    let subtitle: String
-    let color: Color
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.title2)
-                    .foregroundColor(color)
-
-                Text(title)
-                    .font(.subheadline.bold())
-                    .foregroundColor(.primary)
-
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
+    private func checkCard(_ check: FullDiagnosticViewModel.Check) -> some View {
+        CardView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(check.rawValue).font(.headline)
+                if diagnosis.path == ExitPath.lastPathChange, let result = diagnosis.results[check] {
+                    checkDetails(result)
+                } else if diagnosis.running.contains(check) {
+                    ProgressView("Checking…").font(.subheadline)
+                } else if diagnosis.isRunning {
+                    note("Waiting for earlier checks.")
+                } else if diagnosis.path != nil && diagnosis.path != ExitPath.lastPathChange {
+                    note("Run on the current connection to see these readings.")
+                } else if diagnosis.path != nil {
+                    note("No reading collected.")
+                } else {
+                    note("Ready to check")
+                }
             }
-            .frame(maxWidth: .infinity)
-            .padding()
-            .background(Color(UIColor.secondarySystemGroupedBackground))
-            .cornerRadius(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(.plain)
     }
-}
 
-// MARK: - Preview
+    @ViewBuilder private func checkDetails(_ result: FullDiagnosticViewModel.Result) -> some View {
+        switch result {
+        case .connection(let result, let verdict):
+            if let verdict {
+                Text(verdict.headline).font(.subheadline.bold())
+                note(verdict.coverage.line)
+            }
+            ForEach(Array(result.testsPerformed.enumerated()), id: \.offset) { _, check in
+                reading(check.name, check.latency.map { ms($0) } ?? testStatus(check.result))
+                note(check.details)
+            }
+        case .endpoints(let result):
+            ForEach(result.hops) { hop in
+                reading(hop.ipAddress, ms(hop.latency))
+                if let method = hop.hostname { note(method) }
+            }
+            if result.hops.isEmpty { note("No endpoint responses were measured.") }
+        case .dns(let analysis, let benchmark):
+            reading("System resolver", analysis.systemDNS.first?.ipAddress ?? "Address unavailable")
+            ForEach(benchmark.results) { resolver in
+                reading(resolver.name, ms(resolver.latencyMs))
+                note("\(resolver.individualLatencies.count) of 3 replies")
+            }
+            note(benchmark.recommendation.detail)
+        case .security(let result):
+            Text(result.verdict.displayText).font(.subheadline.bold())
+            if let leak = result.vpnLeak { reading("VPN leak checks", leak.overallVerdict.displayText) }
+            if let portal = result.captivePortal {
+                Text(portal.recommendation).font(.subheadline)
+            }
+            if let encryption = result.dnsEncryption {
+                reading("DNS over HTTPS probe", encryption.dohReachable ? "Valid reply" : "No valid reply")
+                reading("DNS over TLS probe", encryption.dotReachable ? "Valid reply" : "No valid reply")
+                note(encryption.recommendation)
+            }
+            ForEach(result.certificateInspections) { inspection in
+                Text(inspection.hostname).font(.subheadline.bold())
+                note(inspection.summary)
+                if inspection.realIssuer != "—" { reading("Issuer", inspection.realIssuer) }
+                if let version = inspection.protocolVersion { reading("TLS version", version) }
+                if let latency = inspection.handshakeMs { reading("TLS handshake", ms(latency)) }
+            }
+            ForEach(result.recommendations, id: \.self) { note($0) }
+        case .speed(let result):
+            if let server = result.serverUsed { note(server) }
+            reading("Download", String(format: "%.1f Mbps", result.downloadSpeed))
+            reading("Upload", result.measuredUploadSpeed.map { String(format: "%.1f Mbps", $0) } ?? "Unavailable")
+            if let response = result.responsiveness {
+                reading("Idle HTTPS response", ms(response.idleMs))
+                reading("During download", ms(response.downloadMs))
+                reading("During upload", ms(response.uploadMs))
+            }
+        case .endpointSpeeds(let result):
+            ForEach(result.results) { sample in
+                reading(sample.endpoint, sample.displaySpeed)
+                if let detail = sample.note { note(detail) }
+            }
+            note(result.explanation)
+        case .comparison(let result):
+            comparisonRow(result.wifiResult)
+            comparisonRow(result.cellularResult)
+            note(result.recommendation.description)
+        case .unavailable(let explanation):
+            note(explanation)
+        }
+    }
 
-#Preview {
-    DiagnoseTabView()
+    private func testStatus(_ result: DiagnosticTest.TestResult) -> String {
+        switch result {
+        case .pass: return "Confirmed"
+        case .warning: return "Needs attention"
+        case .fail: return "No response"
+        case .notApplicable: return "Not applicable"
+        case .skipped: return "Skipped"
+        }
+    }
+
+    private func comparisonRow(_ result: ConnectionTestResult) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            reading(result.connectionType.rawValue,
+                    result.downloadSpeedMbps.map { String(format: "%.1f Mbps", $0) } ?? "Not measured")
+            if let error = result.error { note(error) }
+            else {
+                Text(result.timestamp, style: .time).font(.footnote).foregroundStyle(.secondary)
+                if let server = result.serverUsed { note(server) }
+            }
+        }
+        .accessibilityIdentifier("diagnose.comparison.\(result.connectionType.rawValue)")
+    }
+
+    private func reading(_ label: String, _ value: String) -> some View {
+        LabeledContent(label) { Text(value).monospacedDigit().multilineTextAlignment(.trailing) }
+            .font(.subheadline)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text).font(.footnote).foregroundStyle(.secondary)
+    }
+
+    private func ms(_ value: Double?) -> String {
+        value.map { String(format: "%.0f ms", $0) } ?? "Unavailable"
+    }
 }

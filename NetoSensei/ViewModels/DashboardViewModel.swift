@@ -128,11 +128,14 @@ class DashboardViewModel: ObservableObject {
                 // smoothing so the rolling averages can't blend across networks.
                 self?.clearSmoothingIfNetworkChanged(newStatus)
                 self?.status = newStatus
-                self?.updateSmoothedValues()  // Apply smoothing
+                if !newStatus.measurementsPending { self?.updateSmoothedValues() }
                 // FIX (Issue 3/6): debounce probe failures so a single timeout
                 // can't trigger "DNS Resolution Failed" / "Router Unreachable".
-                MeasurementValidityTracker.shared.ingest(newStatus)
+                if !newStatus.measurementsPending && !newStatus.measurementsIncomplete { MeasurementValidityTracker.shared.ingest(newStatus) }
                 self?.updateUIStatus()
+                if newStatus.measurementsPending && self?.publicIPPath != ExitPath.lastPathChange {
+                    self?.refreshPublicIPInBackground()
+                }
                 // Layer 3: Update diagnosis on each status change
             }
             .store(in: &cancellables)
@@ -255,89 +258,30 @@ class DashboardViewModel: ObservableObject {
 
     private func performRefresh(trigger: RefreshTrigger) async {
         lastRefreshTime = Date()
-        let forceMonitor = Self.forcesMonitorUpdate(trigger)
-        debugLog("🔄 Dashboard refresh() called (\(trigger)\(forceMonitor ? ", forcing a fresh network read" : ""))")
-        // The overlay reflects real work for the two explicit triggers; a
-        // foreground re-read is quiet.
-        isLoading = trigger != .foreground
-
-        // Use a timeout to prevent infinite loading
-        do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                // Add timeout task
-                group.addTask {
-                    try await Task.sleep(nanoseconds: 15_000_000_000)  // 15 second max
-                    throw RefreshError.timeout
-                }
-
-                // Add actual refresh task
-                group.addTask { [weak self] in
-                    guard let self = self else { return }
-
-                    // Step 1: Force VPN re-detection on manual refresh
-                    if forceMonitor {
-                        await self.networkMonitor.forceRefreshVPN()
-                    }
-
-                    // Step 2: Update network status. Forced = re-evaluate the
-                    // path even if a periodic update is already running.
-                    await self.networkMonitor.updateNetworkStatus(force: forceMonitor)
-
-                    // Step 3: Fetch public IP (don't wait if slow)
-                    await self.fetchPublicIPWithTimeout()
-                }
-
-                // Wait for first completion (either success or timeout)
-                _ = try await group.next()
-                group.cancelAll()
-            }
-        } catch {
-            debugLog("⚠️ Dashboard refresh timeout or error: \(error)")
-        }
-
-        // Update UI with whatever data we have
-        let currentStatus = networkMonitor.currentStatus
-        debugLog("📊 Got network status: WiFi connected=\(currentStatus.wifi.isConnected), SSID=\(currentStatus.wifi.ssid ?? "nil")")
-
-        status = currentStatus
-        updateUIStatus()
-
-        // Layer 3: Run InterpretationEngine to produce ExplanationCards
-
+        isLoading = true
+        defer { isLoading = false }
+        if trigger == .userInitiated { networkMonitor.invalidateVPNCache() }
+        if !networkMonitor.isInitializing { refreshPublicIPInBackground() }
+        await networkMonitor.updateNetworkStatus(force: Self.forcesMonitorUpdate(trigger))
         lastUpdated = Date()
-        isLoading = false
-        debugLog("✅ Dashboard refresh complete")
     }
 
-    private enum RefreshError: Error {
-        case timeout
-    }
+    private var publicIPRefresh: Task<Void, Never>?
+    private var publicIPPath: Date?
 
-    /// Fetch public IP with timeout
-    private func fetchPublicIPWithTimeout() async {
-        do {
-            try await withThrowingTaskGroup(of: GeoIPInfo.self) { group in
-                group.addTask {
-                    try await Task.sleep(nanoseconds: 5_000_000_000)  // 5 second timeout
-                    throw RefreshError.timeout
-                }
-
-                group.addTask { [weak self] in
-                    guard let self = self else { return .empty }
-                    return await self.geoIPService.fetchGeoIPInfo()
-                }
-
-                if let result = try await group.next() {
-                    await MainActor.run { [weak self] in
-                        self?.geoIPInfo = result
-                        self?.publicIP = result.publicIP
-                        self?.ispName = result.ispDisplay
-                    }
-                }
-                group.cancelAll()
-            }
-        } catch {
-            debugLog("⚠️ GeoIP fetch timeout")
+    private func refreshPublicIPInBackground() {
+        let path = ExitPath.lastPathChange
+        guard publicIPPath != path || publicIPRefresh == nil else { return }
+        publicIPPath = path
+        publicIPRefresh?.cancel()
+        publicIPRefresh = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.publicIPPath == path { self.publicIPRefresh = nil } }
+            let info = await self.geoIPService.fetchGeoIPInfo()
+            guard !Task.isCancelled, ExitPath.lastPathChange == path else { return }
+            self.geoIPInfo = info
+            self.publicIP = info.publicIP
+            self.ispName = info.ispDisplay
         }
     }
 
@@ -364,7 +308,8 @@ class DashboardViewModel: ObservableObject {
         isUpdatingUIStatus = true
         defer { isUpdatingUIStatus = false }
 
-        if isInitializing {
+        if isInitializing || status.measurementsPending || status.measurementsIncomplete {
+            verdict = nil
             connectionQuality = "Detecting..."
             return
         }
@@ -500,7 +445,8 @@ class DashboardViewModel: ObservableObject {
     /// The status now states connectivity only; the single, smoothed,
     /// network-layer latency is shown once in the dedicated "Latency" row.
     var internetStatusText: String {
-        if isInitializing { return "Detecting..." }
+        if isInitializing || status.measurementsPending { return "Checking internet…" }
+        if status.measurementsIncomplete && !status.internet.isReachable { return "Internet check incomplete" }
         return status.internet.isReachable ? "Connected" : "No Internet"
     }
 

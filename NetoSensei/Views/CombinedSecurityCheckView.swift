@@ -91,7 +91,7 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
 
     private let privacy = PrivacyShieldService.shared
 
-    func runFullCheck() async {
+    func runFullCheck(hosts: [String] = CertificateInspector.defaultHosts, refreshVPN: Bool = true) async {
         guard !isRunning else { return }
         isRunning = true
         result = nil
@@ -100,13 +100,13 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
         AppLoadTracker.shared.begin("securityCheck")         // Commit 7: cert fetches to blocked hosts are self-load
         defer { isRunning = false; AppLoadTracker.shared.end("securityCheck") }
 
-        let vpnSnapshot = await SmartVPNDetector.shared.detectVPN(forceRefresh: true)
+        let vpnSnapshot = await SmartVPNDetector.shared.detectVPN(forceRefresh: refreshVPN)
         async let leakTask = privacy.runVPNLeakTest(prefetchedVPNResult: vpnSnapshot)
         async let captiveTask = CaptivePortalDetector.shared.detectCaptivePortal(
             vpnLikelyActive: vpnSnapshot.vpnState.isLikelyOn
         )
         async let dnsEncTask = DNSEncryptionChecker.shared.checkDNSEncryption()
-        async let certTask = CertificateInspector.shared.inspectCertificates()
+        async let certTask = CertificateInspector.shared.inspectCertificates(hosts: hosts)
 
         let captive = await captiveTask
         async let wifiTask = privacy.checkWiFiSafety(portal: captive, vpn: vpnSnapshot)
@@ -131,6 +131,7 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
             leak: leak, captive: captive, certs: certs, vpnLikelyActive: vpnSnapshot.vpnState.isLikelyOn
         )
 
+        guard !Task.isCancelled else { return }
         guard path == ExitPath.lastPathChange else {
             error = "The connection changed. Run the security check again."
             return

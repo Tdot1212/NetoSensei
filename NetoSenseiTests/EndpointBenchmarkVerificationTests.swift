@@ -32,7 +32,9 @@ struct EndpointBenchmarkVerificationTests {
         let clock = EndpointClock(), transport = session("valid")
         defer { transport.invalidateAndCancel() }
         let result = await ThrottleDetectionService(session: transport, vpn: { true }, clock: { clock.tick() }).detectThrottling()
-        #expect(result.validTestCount == 4 && result.results.allSatisfy { $0.speedMbps == 48 })
+        #expect(ThrottleDetectionService.endpoints.count >= 3)
+        #expect(result.results.allSatisfy { URL(string: $0.url)?.scheme == "https" })
+        #expect(result.validTestCount == ThrottleDetectionService.endpoints.count && result.results.allSatisfy { $0.speedMbps == 48 })
         #expect(!result.wasSkipped && result.overallStatus == "Similar sampled speeds")
         #expect(!result.summary.contains("No throttling") && result.isVPNActive)
     }

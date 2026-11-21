@@ -21,9 +21,6 @@ class NetworkMonitorService: ObservableObject {
     @Published var isMonitoring = false
     @Published var isInitializing = true
 
-    // FIXED: Prevent update accumulation when updates take longer than interval
-    private var isUpdating = false
-
     // FIXED: NWPathMonitor cannot be restarted after cancel, so we create new ones as needed
     // Using nonisolated(unsafe) to allow access from nonisolated methods
     nonisolated(unsafe) private var monitor: NWPathMonitor?
@@ -102,12 +99,12 @@ class NetworkMonitorService: ObservableObject {
     /// fetchCurrent populates SSID/BSSID/security type only (Apple documentation).
     nonisolated func getSSIDViaHotspotNetwork() async -> (ssid: String?, signalStrength: Double?) {
         await withCheckedContinuation { continuation in
-            if #available(iOS 14.0, *) {
-                NEHotspotNetwork.fetchCurrent { network in
-                    continuation.resume(returning: (network?.ssid, nil))
-                }
-            } else {
-                continuation.resume(returning: (nil, nil))
+            let completion = TimeoutContinuation(continuation)
+            NEHotspotNetwork.fetchCurrent { network in
+                completion.resume(returning: (network?.ssid, nil))
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                completion.resume(returning: (nil, nil))
             }
         }
     }
@@ -122,32 +119,19 @@ class NetworkMonitorService: ObservableObject {
         let newMonitor = NWPathMonitor()
         self.monitor = newMonitor
 
-        // NWPathMonitor fires on every path attribute change. Commit 10: only an
-        // IDENTITY change (status / physical interface / Wi-Fi subnet / tunnel
-        // routing) triggers a full rebuild. Handovers and tunnel flag churn are
-        // logged and skipped; the radio label follows handovers on its own
-        // (CellularRadioInfo observes CoreTelephony directly).
-        newMonitor.pathUpdateHandler = { [weak self] path in
-            guard let self else { return }
+        newMonitor.pathUpdateHandler = { [weak self, weak newMonitor] path in
+            guard let self, let newMonitor else { return }
             let identity = self.pathIdentity(for: path)
-            let desc = path.debugDescription
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                if let reason = PathIdentity.rebuildReason(from: self.lastPathIdentity, to: identity) {
-                    self.lastPathIdentity = identity
-                    debugLog("[Network] Path changed (\(reason)) — running full update [\(identity)]")
-                    // Commit 13: this is the event that makes every cached view
-                    // of the exit path wrong. Drop them here, then re-read.
-                    ExitPath.pathIdentityChanged()
-                    await self.forceRefreshVPN()
-                    // force: a change during an in-flight rebuild waits for it and
-                    // re-runs, so a burst (tunnel negotiation) coalesces into at
-                    // most one extra rebuild and the final identity is measured.
-                    await self.performUpdate(force: true)
-                } else {
-                    let radio = await MainActor.run { CellularRadioInfo.shared.generation ?? "unknown" }
-                    debugLog("[Network] Path changed but identity unchanged (radio \(radio); \(desc)) — no rebuild")
-                }
+                guard let self, self.monitor === newMonitor,
+                      PathIdentity.rebuildReason(from: self.lastPathIdentity, to: identity) != nil else { return }
+                self.lastPathIdentity = identity
+                self.pathGeneration += 1
+                ExitPath.pathIdentityChanged()
+                self.invalidateVPNCache()
+                self.currentStatus = self.localSnapshot(path: path)
+                self.isInitializing = false
+                await self.performUpdate(force: true)
             }
         }
         newMonitor.start(queue: monitorQueue)
@@ -160,13 +144,13 @@ class NetworkMonitorService: ObservableObject {
             }
         }
 
-        Task {
-            await performUpdate()
-        }
     }
 
     func stopMonitoring() {
         isMonitoring = false
+        lastPathIdentity = nil
+        pathGeneration += 1
+        inFlightUpdate?.cancel()
         monitor?.cancel()
         monitor = nil
         updateTimer?.invalidate()
@@ -175,140 +159,92 @@ class NetworkMonitorService: ObservableObject {
 
     // MARK: - Status Update (Non-blocking)
 
-    /// The update currently running, so a FORCED update can wait for it.
+    private var pathGeneration = 0
     private var inFlightUpdate: Task<Void, Never>?
 
-    /// - Parameter force: Commit 8 — a user-initiated refresh. If a periodic
-    ///   or path-change update is already running, wait for it and then run
-    ///   again, so the caller always gets a status built AFTER its request.
-    ///   The default (periodic timer) keeps the old skip-if-busy behaviour.
-    private func performUpdate(force: Bool = false) async {
-        if isUpdating {
-            guard force else {
-                // ISSUE 10 FIX: Only log this once per burst, not every skip
-                return
-            }
-            debugLog("[Network] Forced update requested while one is running — waiting, then re-evaluating")
-            // Loop: another update may start while we wait (MainActor hops).
-            while isUpdating { await inFlightUpdate?.value }
-        }
-        if force { debugLog("[Network] Forced update (user refresh) — re-evaluating path") }
+    private func localSnapshot(path: Network.NWPath) -> NetworkStatus {
+        var status = NetworkStatus.empty
+        guard path.status == .satisfied else { return status }
+        let interface = getCurrentInterface()
+        status.connectionType = interface
+        status.localIP = getLocalIP()
+        status.isIPv4Enabled = path.supportsIPv4
+        status.isIPv6Enabled = path.supportsIPv6
+        status.wifi = WiFiInfo(isConnected: interface == .wifi || pathHasWiFiAvailable(path) || hasIPOnInterface(named: "en0"))
+        status.router.gatewayIP = estimateGateway()
+        status.measurementsPending = true
+        return status
+    }
 
-        // Claim the slot synchronously (we are on the MainActor) so two forced
-        // callers arriving together cannot both start a build.
-        isUpdating = true
+    private func performUpdate(force: Bool = false) async {
+        guard isMonitoring, lastPathIdentity?.status == .satisfied else { return }
+        if let active = inFlightUpdate {
+            if force { await active.value }
+            return
+        }
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isUpdating = false }
-            // Run all checks in parallel with individual timeouts
-            let status = await self.buildStatus()
-            self.currentStatus = status
-            if self.isInitializing { self.isInitializing = false }
+            defer { self.inFlightUpdate = nil }
+            while self.isMonitoring, self.lastPathIdentity?.status == .satisfied, !Task.isCancelled {
+                let generation = self.pathGeneration
+                await self.readStatus(generation: generation)
+                guard self.isMonitoring, !Task.isCancelled else { return }
+                if generation == self.pathGeneration { return }
+            }
         }
         inFlightUpdate = task
         await task.value
-        if inFlightUpdate == task { inFlightUpdate = nil }
     }
 
-    nonisolated private func buildStatus() async -> NetworkStatus {
-        // FIXED: Enforce actual timeout with Task.withTimeout pattern
-        // Use shorter timeout on cellular for faster response
-        guard let currentMonitor = monitor else {
-            return NetworkStatus.empty
-        }
-        let path = currentMonitor.currentPath
-        let isCellular = path.usesInterfaceType(.cellular)
-        let maxTimeout: UInt64 = isCellular ? 5_000_000_000 : 8_000_000_000 // 5s cellular, 8s WiFi
+    private enum Reading {
+        case wifi(WiFiInfo), router(RouterInfo), internet(InternetInfo), dns(DNSInfo), vpn(VPNInfo)
+        case deadline
+    }
 
-        // Run with enforced timeout
-        do {
-            return try await withThrowingTaskGroup(of: NetworkStatus.self) { group in
-                // Main task
-                group.addTask {
-                    async let wifi = self.getWiFi()
-                    async let router = self.getRouter()
-                    async let internet = self.getInternet()
-                    async let dns = self.getDNS()
-                    async let vpn = self.getVPN()
-
-                    let results = await (wifi, router, internet, dns, vpn)
-
-                    return NetworkStatus(
-                        timestamp: Date(),
-                        wifi: results.0,
-                        router: results.1,
-                        internet: results.2,
-                        dns: results.3,
-                        vpn: results.4,
-                        publicIP: nil,
-                        localIP: self.getLocalIP(),
-                        ipv6Address: nil,
-                        isCGNAT: nil,
-                        isProxyDetected: false,
-                        isIPv4Enabled: true,
-                        isIPv6Enabled: self.currentPath?.supportsIPv6 ?? false,
-                        connectionType: self.getCurrentInterface(),
-                        isHotspot: self.isConnectedToHotspot()
-                    )
-                }
-
-                // Timeout task
-                group.addTask {
-                    try await Task.sleep(nanoseconds: maxTimeout)
-                    throw TimeoutError.timedOut
-                }
-
-                // Return first result (either success or timeout)
-                // FIXED: Safe unwrap instead of force unwrap
-                guard let result = try await group.next() else {
-                    group.cancelAll()
-                    throw TimeoutError.timedOut
-                }
-                group.cancelAll()
-                return result
+    private func readStatus(generation: Int) async {
+        guard let path = currentPath else { return }
+        let timeout: Duration = path.usesInterfaceType(.cellular) ? .seconds(5) : .seconds(8)
+        var snapshot = localSnapshot(path: path)
+        await withTaskGroup(of: Reading.self) { group in
+            group.addTask { .wifi(await self.getWiFi()) }
+            group.addTask { .router(await self.getRouter()) }
+            group.addTask { .internet(await self.getInternet()) }
+            group.addTask { .dns(await self.getDNS()) }
+            group.addTask { .vpn(await VPNEngine.shared.getVPNInfo()) }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return .deadline
             }
-        } catch {
-            // Timeout/error: return best-effort status using SYNCHRONOUS checks.
-            // Do NOT clobber WiFi/router with sentinel "disconnected" values when we can
-            // verify connectivity locally — that's what cascaded into the false-negative
-            // dashboard ("Not connected to Wi-Fi", "Gateway: Unknown", etc.).
-            let localIP = getLocalIP()
-            let nwPathSaysWiFi = currentPath?.usesInterfaceType(NWInterface.InterfaceType.wifi) ?? false
-            let wifiAvailable = pathHasWiFiAvailable(currentPath)
-            let en0HasIP = hasIPOnInterface(named: "en0")
-            let wifiConnected = nwPathSaysWiFi || wifiAvailable || en0HasIP
-            let estimatedGateway = estimateGateway()
 
-            return NetworkStatus(
-                timestamp: Date(),
-                wifi: WiFiInfo(isConnected: wifiConnected),
-                router: RouterInfo(gatewayIP: estimatedGateway, isReachable: estimatedGateway != nil),
-                internet: InternetInfo(
-                    isReachable: wifiConnected,
-                    externalPingSuccess: false,
-                    latencyToExternal: nil,
-                    httpTestSuccess: false,
-                    cdnReachable: false
-                ),
-                // FIX: nil latency, NOT 999 sentinel. The UI must distinguish
-                // "test failed/not run" from "999ms result".
-                dns: DNSInfo(resolverIP: nil, latency: nil, lookupSuccess: false),
-                vpn: VPNInfo(),
-                publicIP: nil,
-                localIP: localIP,
-                ipv6Address: nil,
-                isCGNAT: nil,
-                isProxyDetected: false,
-                isIPv4Enabled: true,
-                isIPv6Enabled: currentPath?.supportsIPv6 ?? false,
-                connectionType: getCurrentInterface(),
-                isHotspot: false
-            )
+            var completed = 0
+            for await reading in group {
+                guard generation == pathGeneration, !Task.isCancelled else {
+                    group.cancelAll()
+                    return
+                }
+                switch reading {
+                case .wifi(let value): snapshot.wifi = value
+                case .router(let value): snapshot.router = value
+                case .internet(let value): snapshot.internet = value
+                case .dns(let value): snapshot.dns = value
+                case .vpn(let value): snapshot.vpn = value
+                case .deadline:
+                    completed = 4
+                    snapshot.measurementsIncomplete = true
+                }
+                completed += 1
+                snapshot.timestamp = Date()
+                let finished = completed == 5
+                snapshot.measurementsPending = !finished
+                // On a same-path refresh, keep the prior readings visible
+                // until the replacement is ready.
+                if finished || currentStatus.measurementsPending { currentStatus = snapshot }
+                if finished {
+                    group.cancelAll()
+                    return
+                }
+            }
         }
-    }
-
-    enum TimeoutError: Error {
-        case timedOut
     }
 
     // MARK: - WiFi Check (iOS-safe)
@@ -336,7 +272,7 @@ class NetworkMonitorService: ObservableObject {
         var (ssid, bssid) = getWiFiInfoSafely()
 
         // Fetch the current SSID as fallback; this API does not populate signal strength.
-        let hotspotResult = await getSSIDViaHotspotNetwork()
+        let hotspotResult = ssid == nil ? await getSSIDViaHotspotNetwork() : (ssid: nil, signalStrength: nil)
         let signalStrength = hotspotResult.signalStrength
 
         // Method 2: If SSID is nil despite permission, use NEHotspotNetwork SSID
@@ -700,39 +636,9 @@ class NetworkMonitorService: ObservableObject {
 
     // Cache to prevent VPN detection spam
     // ISSUE 1 FIX: Increased from 5s → 30s to match polling interval
-    nonisolated(unsafe) private static var cachedVPNInfo: VPNInfo?
-    nonisolated(unsafe) private static var lastVPNCheck: Date = .distantPast
-    nonisolated private static let vpnCacheDuration: TimeInterval = 30.0
-
-    nonisolated private func getVPN() async -> VPNInfo {
-        // Return cached VPN info if recent (within 5 seconds)
-        let now = Date()
-        if let cached = Self.cachedVPNInfo,
-           now.timeIntervalSince(Self.lastVPNCheck) < Self.vpnCacheDuration {
-            return cached
-        }
-
-        // Only fetch fresh VPN info if cache expired
-        let vpnEngine = await MainActor.run { VPNEngine.shared }
-        let result = await vpnEngine.getVPNInfo()
-
-        // Update cache
-        Self.cachedVPNInfo = result
-        Self.lastVPNCheck = now
-
-        return result
-    }
-
-    /// Force refresh VPN status (call on significant network changes or manual refresh)
-    func forceRefreshVPN() async {
-        Self.cachedVPNInfo = nil
-        Self.lastVPNCheck = .distantPast
-        let vpnEngine = await MainActor.run { VPNEngine.shared }
-        vpnEngine.invalidateCache()
-        await MainActor.run { SmartVPNDetector.shared.invalidate() }   // Commit 13: the detector's own 30 s cooldown too
-        let result = await vpnEngine.getVPNInfo()
-        Self.cachedVPNInfo = result
-        Self.lastVPNCheck = Date()
+    func invalidateVPNCache() {
+        VPNEngine.shared.invalidateCache()
+        SmartVPNDetector.shared.invalidate()
     }
 
     // MARK: - Safe Helpers (All with timeouts)

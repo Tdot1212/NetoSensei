@@ -302,6 +302,8 @@ struct VPNInfo {
 
 struct NetworkStatus {
     var timestamp: Date
+    var measurementsPending = false
+    var measurementsIncomplete = false
 
     // Core components
     var wifi: WiFiInfo
@@ -335,6 +337,7 @@ struct NetworkStatus {
     // FIXED: Prevents "Excellent" when components show issues
     // Based on actual user experience impact, not equal weight
     var overallHealth: NetworkHealth {
+        if measurementsPending || measurementsIncomplete { return .unknown }
         // FIXED: Check for critical issues first - prevents "Excellent" + "Issue" contradiction
         // If any fundamental component is poor, overall cannot be excellent
         if router.health == .poor || wifi.health == .poor {

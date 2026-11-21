@@ -25,15 +25,14 @@ final class PhysicalPathUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.tabBars.buttons["Diagnose"].waitForExistence(timeout: 20))
         app.tabBars.buttons["Diagnose"].tap()
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Advanced Tools (for power users)")).firstMatch.tap()
-        app.swipeUp()
-        let comparison = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Wi-Fi vs Cell")).firstMatch
-        for _ in 0..<3 where !comparison.exists { app.swipeUp() }
-        comparison.tap()
-        let start = app.buttons["Compare Connections"]
-        XCTAssertTrue(start.waitForExistence(timeout: 10)); start.tap()
-        XCTAssertTrue(app.buttons["Test Again"].waitForExistence(timeout: 180))
-        XCTAssertGreaterThanOrEqual(app.staticTexts.matching(identifier: "Mbps").count, 1, "Wi-Fi must produce measured throughput")
+        let start = app.buttons["diagnose.run"]
+        for _ in 0..<4 where !start.isHittable { app.swipeUp() }
+        XCTAssertTrue(start.isHittable); start.tap()
+        XCTAssertTrue(app.staticTexts["All checks finished."].waitForExistence(timeout: 330))
+        let wireless = app.descendants(matching: .any)["diagnose.comparison.Wi-Fi"].firstMatch
+        for _ in 0..<16 where !wireless.exists { app.swipeUp() }
+        XCTAssertTrue(wireless.exists)
+        XCTAssertTrue(wireless.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Mbps")).firstMatch.exists)
         capture(app, "Wi-Fi phase actual results")
         print("WIFI_PHASE_BEGIN\n"+app.debugDescription+"\nWIFI_PHASE_END")
         settings.activate()
@@ -46,10 +45,13 @@ final class PhysicalPathUITests: XCTestCase {
         // Let the monitor receive the changed radio path before starting another measurement.
         let waitUntil = Date().addingTimeInterval(5)
         while Date() < waitUntil { RunLoop.current.run(until: Date().addingTimeInterval(0.25)) }
-        app.buttons["Test Again"].tap()
-        XCTAssertTrue(app.buttons["Test Again"].waitForExistence(timeout: 180))
-        XCTAssertGreaterThanOrEqual(app.staticTexts.matching(identifier: "Mbps").count, 2, "Both paths must produce measured throughput")
-        XCTAssertFalse(app.staticTexts["Connection Issue"].exists)
+        for _ in 0..<16 where !start.isHittable { app.swipeDown() }
+        start.tap()
+        XCTAssertTrue(app.staticTexts["All checks finished."].waitForExistence(timeout: 330))
+        let mobile = app.descendants(matching: .any)["diagnose.comparison.Cellular"].firstMatch
+        for _ in 0..<16 where !mobile.exists { app.swipeUp() }
+        XCTAssertTrue(mobile.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Mbps")).firstMatch.exists)
+        XCTAssertTrue(wireless.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Mbps")).firstMatch.exists)
         capture(app, "Cellular phase actual results")
         print("CELL_PHASE_BEGIN\n"+app.debugDescription+"\nCELL_PHASE_END")
         settings.activate()

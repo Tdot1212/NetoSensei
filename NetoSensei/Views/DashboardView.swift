@@ -25,87 +25,81 @@ struct DashboardView: View {
 
     var body: some View {
         NavigationView {
-            ZStack {
-                ScrollView {
-                    VStack(spacing: UIConstants.spacingL) {
-                        // Header with smoothed health score
-                        headerView
+            ScrollView {
+                VStack(spacing: UIConstants.spacingL) {
+                    // Header with smoothed health score
+                    headerView
 
-                        // PART 2: Simple Summary Section (plain-English)
-                        simpleSummaryView
+                    // PART 2: Simple Summary Section (plain-English)
+                    simpleSummaryView
 
-                        // Signal Strength Card (only when iOS gave us a REAL value)
-                        // FIX (Issue 5): NEHotspotNetwork returns 0.0 when iOS doesn't
-                        // know — never render "0% Poor" from that. SignalStrengthTracker
-                        // already drops 0.0 samples, but guard here too in case
-                        // currentStrength is exactly 0 from an older state.
-                        if let s = signalTracker.currentStrength, s > 0 {
-                            signalStrengthCard
-                        }
-
-                        // Commit 9: cellular is a first-class connection. On
-                        // cellular-only the Wi-Fi card is HIDDEN (its absence is
-                        // not a failure); on dual-stack both cards show.
-                        if ConnectionCards.showsCellularCard(vm.status) {
-                            cellularCard
-                        }
-                        if ConnectionCards.showsWiFiCard(vm.status) {
-                            wifiCard
-                        }
-
-                        // Router Card (FIXED: yellow warning when VPN active)
-                        routerCard
-
-                        // Router Admin Button (only when available)
-                        if let adminURL = vm.status.router.adminURL,
-                           let url = URL(string: adminURL) {
-                            routerAdminButton(url: url)
-                        }
-
-                        // Internet Card (uses smoothed latency)
-                        internetCard
-
-                        // VPN Card (conditional)
-                        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-                        if vpnActive {
-                            vpnCard
-                        }
-
-                        // DNS Card (uses smoothed latency)
-                        dnsCard
-
-                        // Public IP Card
-                        publicIPCard
-
-                        // Trend Insights (from speed + diagnostic history)
-                        trendsCard
-
-                        // Connection Stability Card
-                        StabilityCard(stabilityMonitor: ConnectionStabilityMonitor.shared)
-
-                        // Diagnosis v2: findings from the ONE verdict replace the
-                        // Smart Recommendations and Issues & Solutions engines.
-                        if let v = vm.verdict {
-                            FindingsCard(verdict: v)
-                        }
-
-                        // Version label with hidden debug tap
-                        versionLabel
+                    // Signal Strength Card (only when iOS gave us a REAL value)
+                    // FIX (Issue 5): NEHotspotNetwork returns 0.0 when iOS doesn't
+                    // know — never render "0% Poor" from that. SignalStrengthTracker
+                    // already drops 0.0 samples, but guard here too in case
+                    // currentStrength is exactly 0 from an older state.
+                    if let s = signalTracker.currentStrength, s > 0 {
+                        signalStrengthCard
                     }
-                    .padding()
-                }
-                .refreshable {
-                    // Commit 8: never rate-limited, forces a fresh network read,
-                    // and waits for + re-runs after any in-flight refresh so
-                    // the gesture always ends with post-gesture data.
-                    await vm.refresh(trigger: .userInitiated)
-                }
 
-                // Loading overlay
-                if vm.isLoading {
-                    LoadingOverlay(message: "Refreshing network status...")
+                    // Commit 9: cellular is a first-class connection. On
+                    // cellular-only the Wi-Fi card is HIDDEN (its absence is
+                    // not a failure); on dual-stack both cards show.
+                    if ConnectionCards.showsCellularCard(vm.status) {
+                        cellularCard
+                    }
+                    if ConnectionCards.showsWiFiCard(vm.status) {
+                        wifiCard
+                    }
+
+                    // Router Card (FIXED: yellow warning when VPN active)
+                    routerCard
+
+                    // Router Admin Button (only when available)
+                    if let adminURL = vm.status.router.adminURL,
+                       let url = URL(string: adminURL) {
+                        routerAdminButton(url: url)
+                    }
+
+                    // Internet Card (uses smoothed latency)
+                    internetCard
+
+                    // VPN Card (conditional)
+                    let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
+                    if vpnActive {
+                        vpnCard
+                    }
+
+                    // DNS Card (uses smoothed latency)
+                    dnsCard
+
+                    // Public IP Card
+                    publicIPCard
+
+                    // Trend Insights (from speed + diagnostic history)
+                    trendsCard
+
+                    // Connection Stability Card
+                    StabilityCard(stabilityMonitor: ConnectionStabilityMonitor.shared)
+
+                    // Diagnosis v2: findings from the ONE verdict replace the
+                    // Smart Recommendations and Issues & Solutions engines.
+                    if let v = vm.verdict {
+                        FindingsCard(verdict: v)
+                    }
+
+                    // Version label with hidden debug tap
+                    versionLabel
                 }
+                .padding()
             }
+            .refreshable {
+                // Commit 8: never rate-limited, forces a fresh network read,
+                // and waits for + re-runs after any in-flight refresh so
+                // the gesture always ends with post-gesture data.
+                await vm.refresh(trigger: .userInitiated)
+            }
+
             .overlay(alignment: .bottomTrailing) {
                 aiAssistantFAB
             }
@@ -693,8 +687,8 @@ struct DashboardView: View {
                 // Health status - using pre-computed values
                 StatusRow(
                     title: "Status",
-                    value: vm.isInitializing ? "Detecting..." : healthText,
-                    color: vm.isInitializing ? .secondary : healthColor
+                    value: vm.isInitializing || vm.status.measurementsPending ? "Checking router…" : healthText,
+                    color: vm.isInitializing || vm.status.measurementsPending ? .secondary : healthColor
                 )
 
                 // Latency (use smoothed value, but never a sentinel)
@@ -772,7 +766,7 @@ struct DashboardView: View {
                 StatusRow(
                     title: "Status",
                     value: vm.internetStatusText,
-                    color: vm.isInitializing ? .secondary : (vm.isConnected ? AppColors.green : AppColors.red)
+                    color: vm.isInitializing || vm.status.measurementsPending || vm.status.measurementsIncomplete ? .secondary : (vm.isConnected ? AppColors.green : AppColors.red)
                 )
 
                 // PART 1: smoothed network-layer latency (single source of truth).

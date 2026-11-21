@@ -1,6 +1,6 @@
 # NetoSensei
 
-An iOS Wi-Fi and network diagnostic app. Current local development build: **1.0 (25)**.
+An iOS Wi-Fi and network diagnostic app. Current local development build: **1.0 (28)**.
 
 NetoSensei reports observed measurements, unavailable checks and interpretations
 separately. A speed test measures application throughput through the current
@@ -15,8 +15,10 @@ internet/VPN path; it does not measure Wi-Fi PHY link rate or prove an ISP fault
   before/three after throughput and idle-delay comparisons under compatible conditions.
   The repair guide covers lag, downloads, and identifying unfamiliar devices.
   Device names include reported hostnames and service names where available.
-- Detailed Checks routes to the same performance, security, DNS and endpoint tools
-  used elsewhere, rather than a separate duplicate diagnostic engine.
+- Diagnose shows local connection details immediately and runs connection,
+  DNS, TLS, VPN, endpoint and throughput checks from one screen. Completed
+  sections appear while the rest of the run continues. Throughput tests run
+  in sequence so they do not compete with each other.
 - Endpoint Checks compares independent responses. It is not an IP-hop traceroute.
 - TLS/certificate inspection, DNS benchmarks, local port inspection and history.
 - The Wi-Fi Assistant can use DeepSeek to prioritize an existing repair step from
@@ -32,9 +34,8 @@ inspection. Current-network Wi-Fi information is entitlement/permission dependen
 `NEHotspotNetwork.fetchCurrent` does not populate signal strength.
 
 Local discovery is partial and cannot prove device ownership. A responding IP or
-advertised name is not an authenticated device identity. The app has no supported
-router administration adapters and cannot automatically block devices or change
-router settings. Wi-Fi credentials may differ from administrator credentials.
+advertised name is not an authenticated device identity. The optional UniFi connector can read connected clients. Device blocking and
+router settings changes are performed in the router’s own controls. Wi-Fi credentials may differ from administrator credentials.
 
 TCP/HTTP attempt failure is not IP packet loss. DNS/VPN/browser leak protection
 remains unverified when the app lacks the necessary route or browser evidence.

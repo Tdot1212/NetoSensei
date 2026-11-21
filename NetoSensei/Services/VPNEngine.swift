@@ -140,9 +140,9 @@ class VPNEngine: ObservableObject {
     private var lastVPNInfoFetch: Date?
 
     func getVPNInfo() async -> VPNInfo {
-        // Return cache if fresh (within 5 seconds for real-time accuracy)
+        let path = ExitPath.lastPathChange
         if let cached = cachedVPNInfo,
-           let lastFetch = lastVPNInfoFetch,
+           let lastFetch = lastVPNInfoFetch, lastFetch >= path,
            Date().timeIntervalSince(lastFetch) < 5 {
             return cached
         }
@@ -150,7 +150,7 @@ class VPNEngine: ObservableObject {
         // Check SmartVPNDetector's cached result
         if let cached = SmartVPNDetector.shared.detectionResult {
             let resultAge = Date().timeIntervalSince(cached.timestamp)
-            if resultAge < 5 {
+            if cached.timestamp >= path, resultAge < 5 {
                 let result = buildVPNInfo(from: cached)
                 cachedVPNInfo = result
                 lastVPNInfoFetch = Date()
@@ -160,6 +160,7 @@ class VPNEngine: ObservableObject {
 
         // Run fresh detection
         let smartResult = await SmartVPNDetector.shared.detectVPN()
+        guard ExitPath.lastPathChange == path, smartResult.timestamp >= path else { return VPNInfo() }
         let result = buildVPNInfo(from: smartResult)
         cachedVPNInfo = result
         lastVPNInfoFetch = Date()

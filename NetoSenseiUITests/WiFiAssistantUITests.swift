@@ -70,24 +70,22 @@ final class AccuracySmokeUITests: XCTestCase {
             app.tabBars.buttons[tab].tap()
             XCTAssertTrue(app.tabBars.buttons[tab].isSelected)
         }
-        let tools = app.buttons["detailedChecks"]
-        XCTAssertTrue(tools.waitForExistence(timeout: 10))
-        tools.tap()
-        XCTAssertTrue(app.staticTexts["Detailed Checks"].firstMatch.waitForExistence(timeout: 5))
-        let toolsShot = XCTAttachment(screenshot: app.screenshot())
-        toolsShot.name = "Detailed Checks - shared tools"
-        toolsShot.lifetime = .keepAlways
-        add(toolsShot)
-        app.buttons["detailed.endpoints"].tap()
-        let hostname = app.textFields["Endpoint hostname"]
+        XCTAssertTrue(app.staticTexts["Current connection"].waitForExistence(timeout: 5))
+        let run = app.buttons["diagnose.run"]
+        let chooser = app.buttons["Choose a website"]
+        for _ in 0..<4 where !chooser.isHittable { app.swipeUp() }
+        chooser.tap()
+        let hostname = app.textFields["diagnose.hostname"]
         XCTAssertTrue(hostname.waitForExistence(timeout: 5))
         hostname.tap()
         // Replace text using the keyboard; invalid input must fail before I/O.
         let value = (hostname.value as? String) ?? ""
         hostname.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count))
         hostname.typeText("invalid/path")
-        app.buttons["Check endpoints"].tap()
-        XCTAssertTrue(app.staticTexts["Enter a hostname, such as www.apple.com, without a URL or path."].waitForExistence(timeout: 5))
+        if app.keyboards.firstMatch.exists { app.swipeUp() }
+        for _ in 0..<4 where !run.isHittable { app.swipeUp() }
+        run.tap()
+        XCTAssertTrue(app.staticTexts["Enter a hostname such as www.apple.com, without a URL or path."].waitForExistence(timeout: 5))
         let endpointShot = XCTAttachment(screenshot: app.screenshot())
         endpointShot.name = "Endpoint Checks - validation"
         endpointShot.lifetime = .keepAlways
@@ -104,53 +102,63 @@ final class ResolverToolsUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.tabBars.buttons["Diagnose"].waitForExistence(timeout: 20))
         app.tabBars.buttons["Diagnose"].tap()
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Advanced Tools (for power users)")).firstMatch.tap()
-        app.swipeUp()
-        let dnsInfo = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "DNS Analyzer")).firstMatch
-        for _ in 0..<4 where !dnsInfo.exists { app.swipeUp() }
-        XCTAssertTrue(dnsInfo.waitForExistence(timeout: 5)); dnsInfo.tap()
-        XCTAssertTrue(app.buttons["Read DNS information"].waitForExistence(timeout: 5))
-        app.buttons["Read DNS information"].tap()
-        XCTAssertTrue(app.staticTexts["Encryption: unverified"].waitForExistence(timeout: 10))
-        let info = XCTAttachment(screenshot: app.screenshot()); info.name = "DNS information - observed and unverified"; info.lifetime = .keepAlways; add(info)
-        app.buttons["Done"].tap()
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "DNS Benchmark")).firstMatch.tap()
-        XCTAssertTrue(app.buttons["Start Benchmark"].waitForExistence(timeout: 5))
-        app.buttons["Start Benchmark"].tap()
-        XCTAssertTrue(app.buttons["Run Again"].waitForExistence(timeout: 65))
+        let run = app.buttons["diagnose.run"]
+        for _ in 0..<4 where !run.isHittable { app.swipeUp() }
+        run.tap()
+        let systemDNS = app.staticTexts["System resolver"]
+        for _ in 0..<6 where !systemDNS.isHittable { app.swipeUp() }
+        XCTAssertTrue(systemDNS.waitForExistence(timeout: 65))
         XCTAssertTrue(app.staticTexts["System Default"].exists)
-        let benchmark = XCTAttachment(screenshot: app.screenshot()); benchmark.name = "DNS benchmark - real query results"; benchmark.lifetime = .keepAlways; add(benchmark)
-        app.buttons["Close"].tap()
+        let benchmark = XCTAttachment(screenshot: app.screenshot())
+        benchmark.name = "Full check - resolver evidence"
+        benchmark.lifetime = .keepAlways
+        add(benchmark)
     }
 }
 
 final class LiveDiagnosticToolsUITests: XCTestCase {
-    @MainActor func testQuickCheckAndTLSAnalysisFinishWithEvidence() throws {
+    @MainActor func testFullCheckFinishesWithConnectionAndTLSReadings() {
         continueAfterFailure = false
-        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["-hasCompletedOnboarding", "YES"]
         app.launch()
-        XCTAssertTrue(app.tabBars.buttons["Diagnose"].waitForExistence(timeout: 20))
-        app.tabBars.buttons["Diagnose"].tap()
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Quick Check")).firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Results"].waitForExistence(timeout: 65))
-        let quick = XCTAttachment(screenshot: app.screenshot()); quick.name = "Quick Check - actual network"; quick.lifetime = .keepAlways; add(quick)
-        app.swipeDown()
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Advanced Tools (for power users)")).firstMatch.tap()
-        app.swipeUp()
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "TLS Analyzer")).firstMatch.tap()
-        XCTAssertTrue(app.buttons["Analyze"].waitForExistence(timeout: 5))
-        let host = app.textFields["example.com"]
-        host.tap(); host.typeText("www.apple.com")
-        app.buttons["Analyze"].tap()
-        let finished = NSPredicate { _, _ in app.buttons["Analyze"].exists && app.buttons["Analyze"].isEnabled }
-        expectation(for: finished, evaluatedWith: nil)
-        waitForExpectations(timeout: 45)
-        // A completed analysis presents a rating or an explicit unavailable reason.
-        XCTAssertTrue(app.staticTexts["Security Rating"].exists || app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Couldn't assess")).firstMatch.exists)
-        XCTAssertFalse(app.keyboards.firstMatch.exists)
-        let tls = XCTAttachment(screenshot: app.screenshot()); tls.name = "TLS - actual connection evidence"; tls.lifetime = .keepAlways; add(tls)
+        let diagnose = app.tabBars.buttons["Diagnose"]
+        XCTAssertTrue(diagnose.waitForExistence(timeout: 20))
+        diagnose.tap()
+        XCTAssertTrue(app.staticTexts["Current connection"].waitForExistence(timeout: 5))
+        let run = app.buttons["diagnose.run"]
+        for _ in 0..<4 where !run.isHittable { app.swipeUp() }
+        run.tap()
+        XCTAssertTrue(app.buttons["Stop checks"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["All checks finished."].waitForExistence(timeout: 330))
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "Full connection check"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let hostname = app.staticTexts["www.apple.com"]
+        for _ in 0..<12 where !hostname.exists { app.swipeUp() }
+        XCTAssertTrue(hostname.exists)
+    }
+
+    @MainActor func testStoppingFullCheckKeepsNavigationResponsive() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-hasCompletedOnboarding", "YES"]
+        app.launch()
+        let diagnose = app.tabBars.buttons["Diagnose"]
+        XCTAssertTrue(diagnose.waitForExistence(timeout: 20))
+        diagnose.tap()
+        let run = app.buttons["diagnose.run"]
+        for _ in 0..<4 where !run.isHittable { app.swipeUp() }
+        run.tap()
+        let stop = app.buttons["Stop checks"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5))
+        let history = app.tabBars.buttons["History"]
+        history.tap()
+        XCTAssertTrue(history.isSelected)
+        diagnose.tap()
+        stop.tap()
+        XCTAssertTrue(run.waitForExistence(timeout: 20))
     }
 }
 

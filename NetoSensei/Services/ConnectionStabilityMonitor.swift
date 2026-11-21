@@ -155,6 +155,7 @@ class ConnectionStabilityMonitor: ObservableObject {
         networkMonitor.$currentStatus
             .receive(on: DispatchQueue.main)
             .sink { [weak self] newStatus in
+                guard !newStatus.measurementsPending && !newStatus.measurementsIncomplete else { return }
                 self?.processStatusChange(newStatus)
             }
             .store(in: &cancellables)
