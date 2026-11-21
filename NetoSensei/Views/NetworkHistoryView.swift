@@ -41,18 +41,23 @@ struct NetworkHistoryView: View {
     var body: some View {
         NavigationView {
             ScrollView {
-                VStack(spacing: UIConstants.spacingL) {
-                    // Period picker
-                    Picker("Period", selection: $selectedPeriod) {
-                        ForEach(HistoryPeriod.allCases, id: \.self) { period in
-                            Text(period.rawValue).tag(period)
-                        }
-                    }
-                    .pickerStyle(.segmented)
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    CardView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Test period")
+                                .font(.headline)
+                                .accessibilityAddTraits(.isHeader)
+                            Picker("Period", selection: $selectedPeriod) {
+                                ForEach(HistoryPeriod.allCases, id: \.self) { period in
+                                    Text(period.rawValue).tag(period)
+                                }
+                            }
+                            .pickerStyle(.segmented)
 
-                    // NEW: Network filter chips
-                    if !historyManager.knownNetworks.isEmpty {
-                        networkFilterChips
+                            if !historyManager.knownNetworks.isEmpty {
+                                networkFilterChips
+                            }
+                        }
                     }
 
                     // Connection Stability Card
@@ -90,8 +95,9 @@ struct NetworkHistoryView: View {
                         emptyStateCard
                     }
                 }
-                .padding()
+                .connectionBriefColumn()
             }
+            .background(ConnectionBriefStyle.canvas)
             .navigationTitle("History")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
@@ -253,7 +259,15 @@ struct NetworkHistoryView: View {
 
     @available(iOS 16, *)
     private var chartCard: some View {
-        CardView {
+        let entries = filteredEntries
+        let latestReading = entries.first { entry in
+            switch selectedMetric {
+            case .healthScore: return entry.entryType == .diagnostic && entry.healthScore != nil
+            case .latency: return entry.latency != nil
+            case .speed: return entry.downloadSpeed != nil
+            }
+        }
+        return CardView {
             VStack(alignment: .leading, spacing: UIConstants.spacingM) {
                 HStack {
                     Text(chartTitle)
@@ -261,7 +275,7 @@ struct NetworkHistoryView: View {
                     Spacer()
 
                     // Score label showing current zone
-                    if selectedMetric == .healthScore, let latest = filteredEntries.first {
+                    if selectedMetric == .healthScore, let latest = latestReading {
                         Text(healthZoneLabel(latest.healthScore))
                             .font(.caption.bold())
                             .foregroundColor(healthColor(latest.healthScore))
@@ -272,76 +286,82 @@ struct NetworkHistoryView: View {
                     }
                 }
 
-                Chart {
-                    // Zone backgrounds for health score only
-                    if selectedMetric == .healthScore {
-                        // Green zone: 70-100
-                        RectangleMark(
-                            xStart: nil, xEnd: nil,
-                            yStart: .value("", 70),
-                            yEnd: .value("", 100)
-                        )
-                        .foregroundStyle(AppColors.green.opacity(0.08))
-
-                        // Yellow zone: 40-69
-                        RectangleMark(
-                            xStart: nil, xEnd: nil,
-                            yStart: .value("", 40),
-                            yEnd: .value("", 70)
-                        )
-                        .foregroundStyle(AppColors.yellow.opacity(0.08))
-
-                        // Red zone: 0-39
-                        RectangleMark(
-                            xStart: nil, xEnd: nil,
-                            yStart: .value("", 0),
-                            yEnd: .value("", 40)
-                        )
-                        .foregroundStyle(AppColors.red.opacity(0.08))
-                    }
-
-                    ForEach(filteredEntries) { entry in
-                        switch selectedMetric {
-                        case .healthScore:
-                            if entry.entryType == .diagnostic, let score = entry.healthScore {
-                            PointMark(
-                                x: .value("Time", entry.timestamp),
-                                y: .value("Health", score)
+                if latestReading == nil {
+                    Text("No readings for this selection. Choose another metric or time range, or run a new check.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Chart {
+                        // Zone backgrounds for health score only
+                        if selectedMetric == .healthScore {
+                            // Green zone: 70-100
+                            RectangleMark(
+                                xStart: nil, xEnd: nil,
+                                yStart: .value("", 70),
+                                yEnd: .value("", 100)
                             )
-                            .foregroundStyle(healthColor(score))
+                            .foregroundStyle(AppColors.green.opacity(0.08))
 
-                            }
-                        case .latency:
-                            // Phase 4: unmeasured latency is nil — skip the
-                            // point rather than plot a fake 0 ms.
-                            if let latency = entry.latency {
+                            // Yellow zone: 40-69
+                            RectangleMark(
+                                xStart: nil, xEnd: nil,
+                                yStart: .value("", 40),
+                                yEnd: .value("", 70)
+                            )
+                            .foregroundStyle(AppColors.yellow.opacity(0.08))
+
+                            // Red zone: 0-39
+                            RectangleMark(
+                                xStart: nil, xEnd: nil,
+                                yStart: .value("", 0),
+                                yEnd: .value("", 40)
+                            )
+                            .foregroundStyle(AppColors.red.opacity(0.08))
+                        }
+
+                        ForEach(entries) { entry in
+                            switch selectedMetric {
+                            case .healthScore:
+                                if entry.entryType == .diagnostic, let score = entry.healthScore {
                                 PointMark(
                                     x: .value("Time", entry.timestamp),
-                                    y: .value("Latency", latency)
+                                    y: .value("Health", score)
                                 )
-                                .foregroundStyle(latencyColor(latency))
-                            }
+                                .foregroundStyle(healthColor(score))
 
-                        case .speed:
-                            if let speed = entry.downloadSpeed {
-                                BarMark(
-                                    x: .value("Time", entry.timestamp),
-                                    y: .value("Speed", speed)
-                                )
-                                .foregroundStyle(speedColor(speed))
+                                }
+                            case .latency:
+                                // Phase 4: unmeasured latency is nil — skip the
+                                // point rather than plot a fake 0 ms.
+                                if let latency = entry.latency {
+                                    PointMark(
+                                        x: .value("Time", entry.timestamp),
+                                        y: .value("Latency", latency)
+                                    )
+                                    .foregroundStyle(latencyColor(latency))
+                                }
+
+                            case .speed:
+                                if let speed = entry.downloadSpeed {
+                                    BarMark(
+                                        x: .value("Time", entry.timestamp),
+                                        y: .value("Speed", speed)
+                                    )
+                                    .foregroundStyle(speedColor(speed))
+                                }
                             }
                         }
                     }
-                }
-                .frame(height: 200)
-                .chartYAxis {
-                    AxisMarks(position: .leading)
-                }
-                .modifier(HealthScoreYScaleModifier(isHealthScore: selectedMetric == .healthScore))
+                    .frame(height: 200)
+                    .chartYAxis {
+                        AxisMarks(position: .leading)
+                    }
+                    .modifier(HealthScoreYScaleModifier(isHealthScore: selectedMetric == .healthScore))
 
-                // Zone legend for health score
-                if selectedMetric == .healthScore {
-                    healthScoreZoneLegend
+                    // Zone legend for health score
+                    if selectedMetric == .healthScore {
+                        healthScoreZoneLegend
+                    }
                 }
             }
         }

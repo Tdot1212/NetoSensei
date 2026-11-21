@@ -24,14 +24,8 @@ struct SecurityTabView: View {
     var body: some View {
         NavigationView {
             ScrollView {
-                VStack(spacing: 20) {
-                    Button {
-                        tool = .fullCheck
-                    } label: {
-                        Label("Check security and get next steps", systemImage: "checkmark.shield")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.borderedProminent)
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    securityActions
                     deviceTools
                     privacyShieldSection
 
@@ -52,8 +46,9 @@ struct SecurityTabView: View {
                     // because port-scanning targets these LAN devices.
                     DeviceCountCard(onScanPorts: { tool = .portScanner })
                 }
-                .padding()
+                .connectionBriefColumn()
             }
+            .background(ConnectionBriefStyle.canvas)
             .navigationTitle("Network Security")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
@@ -100,7 +95,7 @@ struct SecurityTabView: View {
 
     private var privacyShieldSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Am I Protected?")
+            Text("Privacy checks")
                 .font(.headline)
                 .padding(.leading, 4)
 
@@ -236,7 +231,7 @@ struct SecurityTabView: View {
 
     private var exposureCheckSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("What Others Can See")
+            Text("Public network details")
                 .font(.headline)
                 .padding(.leading, 4)
 
@@ -324,32 +319,57 @@ struct SecurityTabView: View {
         }
     }
 
+    private var securityActions: some View {
+        CardView {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Security check", systemImage: "checkmark.shield")
+                    .font(.title2.bold())
+                    .accessibilityAddTraits(.isHeader)
+                Text("Review the evidence from certificate, DNS and VPN checks and see what to do next.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Button {
+                    tool = .fullCheck
+                } label: {
+                    Text("Check security and get next steps")
+                        .multilineTextAlignment(.leading)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private var deviceTools: some View {
         CardView {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 0) {
                 Text("Network devices")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
+                    .padding(.bottom, 6)
                 Button {
                     tool = .deviceAssistant
                 } label: {
-                    Label("Match and save device names", systemImage: "person.text.rectangle")
+                    BriefActionLabel(title: "Match and save device names", icon: "person.text.rectangle")
                 }
                 .accessibilityIdentifier("security.deviceAssistant")
+                Divider()
                 Button {
                     tool = .uniFi
                 } label: {
-                    Label("View UniFi connected clients", systemImage: "wifi.router")
+                    BriefActionLabel(title: "View UniFi connected clients", icon: "wifi.router")
                 }
                 .accessibilityIdentifier("security.uniFi")
+                Divider()
                 Button {
                     tool = .deviceHistory
                 } label: {
-                    Label("Device History", systemImage: "clock.arrow.circlepath")
+                    BriefActionLabel(title: "Device History", icon: "clock.arrow.circlepath")
                 }
                 .accessibilityIdentifier("security.deviceHistory")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

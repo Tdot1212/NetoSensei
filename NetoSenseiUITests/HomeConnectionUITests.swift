@@ -3,6 +3,7 @@ import XCTest
 final class HomeConnectionUITests: XCTestCase {
     @MainActor func testCellularHomeWithUnavailableLatency() {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["-hasCompletedOnboarding", "YES", "-testCellularHome"]
         app.launch()
@@ -22,19 +23,23 @@ final class HomeConnectionUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Connection quality score unavailable"].exists)
         capture(app, "Home - check details")
 
-        let radio = app.buttons["About cellular measurements"]
-        for _ in 0..<4 where !radio.isHittable { app.swipeUp() }
-        XCTAssertTrue(radio.isHittable)
-        radio.tap()
-        XCTAssertTrue(app.staticTexts["Signal strength"].waitForExistence(timeout: 3))
-        app.buttons["Done"].tap()
-
         let latency = app.buttons["How latency is measured"]
         for _ in 0..<4 where !latency.isHittable { app.swipeUp() }
         XCTAssertTrue(latency.isHittable)
         latency.tap()
         XCTAssertTrue(app.navigationBars["About Latency"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["162 ms"].exists)
+        XCTAssertTrue(app.navigationBars["About Latency"].exists)
+        XCTAssertTrue(app.staticTexts["162 ms"].firstMatch.exists)
+        app.navigationBars["About Latency"].buttons["Done"].tap()
+
+        let radio = app.buttons["About cellular measurements"]
+        for _ in 0..<5 {
+            if radio.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(radio.isHittable)
+        radio.tap()
+        XCTAssertTrue(app.staticTexts["Signal strength"].waitForExistence(timeout: 3))
         app.buttons["Done"].tap()
 
         app.buttons["Settings"].tap()
@@ -49,6 +54,35 @@ final class HomeConnectionUITests: XCTestCase {
         capture(app, "AI Assistant from Home")
         app.navigationBars["AI Assistant"].buttons["Done"].tap()
         XCTAssertTrue(app.buttons["AI Assistant"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor func testHomeShortcutsLeadToTheExistingWorkflows() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["-hasCompletedOnboarding", "YES", "-testCellularHome"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["home.internetStatus"].waitForExistence(timeout: 5))
+        for (identifier, tab, label) in [
+            ("home.openDiagnose", "Diagnose", "diagnose.run"),
+            ("home.openSpeed", "Speed", "performance.runAll"),
+            ("home.openSecurity", "Security", "Check security and get next steps")
+        ] {
+            let shortcut = app.buttons[identifier]
+            for _ in 0..<4 {
+                if shortcut.isHittable { break }
+                app.swipeUp()
+            }
+            XCTAssertTrue(shortcut.isHittable, identifier)
+            shortcut.tap()
+            XCTAssertTrue(app.tabBars.buttons[tab].isSelected)
+            XCTAssertTrue(app.buttons[label].waitForExistence(timeout: 8), label)
+            capture(app, "Connection brief - " + tab)
+            app.tabBars.buttons["Home"].tap()
+        }
+        app.tabBars.buttons["History"].tap()
+        XCTAssertTrue(app.segmentedControls.buttons["24h"].waitForExistence(timeout: 5))
+        capture(app, "Connection brief - History")
     }
 
     @MainActor func testHistoryRangesAndDeleteConfirmation() {

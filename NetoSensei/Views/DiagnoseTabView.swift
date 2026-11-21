@@ -6,29 +6,31 @@ struct DiagnoseTabView: View {
     @State private var host = "www.apple.com"
     @State private var showingWiFiAssistant = false
     @FocusState private var editingHost: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    connectionSnapshot
                     runCard
+                    connectionSnapshot
 
                     Button { showingWiFiAssistant = true } label: {
-                        Label("Wi-Fi Assistant", systemImage: "wifi")
-                            .frame(maxWidth: .infinity, minHeight: 44)
+                        CardView {
+                            BriefActionLabel(title: "Wi-Fi Assistant", icon: "wifi")
+                        }
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.plain)
                     .disabled(diagnosis.isRunning)
 
+                    BriefSectionTitle(title: "Check results")
                     ForEach(FullDiagnosticViewModel.Check.allCases) { check in
                         checkCard(check)
                     }
-
-
                 }
-                .padding()
+                .connectionBriefColumn()
             }
+            .background(ConnectionBriefStyle.canvas)
             .navigationTitle("Diagnose")
             .toolbar {
                 if !diagnosis.isRunning, let report = diagnosis.report(status: monitor.currentStatus) {
@@ -72,8 +74,11 @@ struct DiagnoseTabView: View {
     private var runCard: some View {
         CardView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Full connection check").font(.title2.bold())
-                Text("Run connection, DNS, endpoint, certificate, VPN and performance checks together.")
+                Label("Full connection check", systemImage: "waveform.path")
+                    .font(.title2.bold())
+                    .accessibilityAddTraits(.isHeader)
+                Text("Check DNS, site responses, security and performance on your current connection.")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                 DisclosureGroup("Choose a website") {
                     TextField("Website hostname", text: $host)
@@ -87,9 +92,11 @@ struct DiagnoseTabView: View {
                 }
                 .disabled(diagnosis.isRunning)
                 if diagnosis.isRunning {
-                    ProgressView(value: Double(diagnosis.results.count), total: Double(FullDiagnosticViewModel.Check.allCases.count))
+                    checkProgress
                     Text("\(diagnosis.results.count) of \(FullDiagnosticViewModel.Check.allCases.count) checks finished")
-                        .font(.subheadline).foregroundStyle(.secondary)
+                        .font(.subheadline.weight(.medium))
+                        .contentTransition(reduceMotion ? .identity : .numericText())
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: diagnosis.results.count)
                     if diagnosis.running.contains(.speed) {
                         DiagnosticSpeedProgress()
                     } else if diagnosis.running.contains(.endpointSpeeds) {
@@ -105,6 +112,7 @@ struct DiagnoseTabView: View {
                         diagnosis.run(host: host)
                     }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     .accessibilityIdentifier("diagnose.run")
                     .disabled(monitor.isInitializing)
                     Text("Speed checks transfer data on the active connection, including cellular when it’s active.")
@@ -118,25 +126,56 @@ struct DiagnoseTabView: View {
         }
     }
 
+    private var checkProgress: some View {
+        HStack(spacing: 5) {
+            ForEach(FullDiagnosticViewModel.Check.allCases) { check in
+                Capsule()
+                    .fill(diagnosis.results[check] != nil ? AppColors.accent :
+                            diagnosis.running.contains(check) ? AppColors.accent.opacity(0.48) : ConnectionBriefStyle.rule)
+                    .frame(height: 5)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: diagnosis.results.count)
+        .accessibilityHidden(true)
+    }
+
     private func checkCard(_ check: FullDiagnosticViewModel.Check) -> some View {
-        CardView {
+        let isCurrent = diagnosis.path == ExitPath.lastPathChange
+        let result = isCurrent ? diagnosis.results[check] : nil
+        let isChecking = isCurrent && diagnosis.running.contains(check)
+        return CardView {
             VStack(alignment: .leading, spacing: 10) {
-                Text(check.rawValue).font(.headline)
-                if diagnosis.path == ExitPath.lastPathChange, let result = diagnosis.results[check] {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: checkIcon(result: result, isChecking: isChecking))
+                        .foregroundStyle(result != nil || isChecking ? AppColors.accent : .secondary)
+                        .frame(width: 22)
+                        .accessibilityHidden(true)
+                    Text(check.rawValue)
+                        .font(.headline)
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 0)
+                }
+                if let result {
                     checkDetails(result)
-                } else if diagnosis.running.contains(check) {
+                } else if isChecking {
                     ProgressView("Checking…").font(.subheadline)
                 } else if diagnosis.isRunning {
                     note("Waiting for earlier checks.")
-                } else if diagnosis.path != nil && diagnosis.path != ExitPath.lastPathChange {
+                } else if diagnosis.path != nil && !isCurrent {
                     note("Run on the current connection to see these readings.")
                 } else if diagnosis.path != nil {
                     note("No reading collected.")
-                } else {
-                    note("Ready to check")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func checkIcon(result: FullDiagnosticViewModel.Result?, isChecking: Bool) -> String {
+        switch result {
+        case .unavailable: return "minus.circle"
+        case .some: return "doc.text"
+        case .none: return isChecking ? "waveform" : "circle.dotted"
         }
     }
 

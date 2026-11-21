@@ -8,46 +8,36 @@
 
 import SwiftUI
 
-/// Main tab-based navigation for the app
+enum NetoTab: Hashable {
+    case home, diagnose, speed, security, history
+}
+
 struct MainTabView: View {
+    @State private var selection: NetoTab = .home
+
     var body: some View {
-        TabView {
-            // Tab 1: Home (Dashboard) — also hosts the AI Assistant toolbar action
-            DashboardView()
-                .tabItem {
-                    Label("Home", systemImage: "house.fill")
-                }
-                .tag(0)
+        TabView(selection: $selection) {
+            DashboardView(openTab: { selection = $0 })
+                .tabItem { Label("Home", systemImage: "house.fill") }
+                .tag(NetoTab.home)
 
-            // Tab 2: Diagnose (Full diagnostic + Advanced + DNS Benchmark + Throttle Test)
             DiagnoseTabView()
-                .tabItem {
-                    Label("Diagnose", systemImage: "stethoscope")
-                }
-                .tag(1)
+                .tabItem { Label("Diagnose", systemImage: "stethoscope") }
+                .tag(NetoTab.diagnose)
 
-            // Tab 3: Speed (Speed Test + Streaming Capability)
             SpeedTabView()
-                .tabItem {
-                    Label("Speed", systemImage: "speedometer")
-                }
-                .tag(2)
+                .tabItem { Label("Speed", systemImage: "speedometer") }
+                .tag(NetoTab.speed)
 
-            // Tab 4: Security (VPN Tools + Network Security Audit)
             SecurityTabView()
-                .tabItem {
-                    Label("Security", systemImage: "shield.checkerboard")
-                }
-                .tag(3)
+                .tabItem { Label("Security", systemImage: "shield.checkerboard") }
+                .tag(NetoTab.security)
 
-            // Tab 5: History (Timeline, baseline, stability, past results)
             NetworkHistoryView()
-                .tabItem {
-                    Label("History", systemImage: "chart.line.uptrend.xyaxis")
-                }
-                .tag(4)
+                .tabItem { Label("History", systemImage: "chart.line.uptrend.xyaxis") }
+                .tag(NetoTab.history)
         }
-        .accentColor(AppColors.accent)
+        .tint(AppColors.accent)
     }
 }
 

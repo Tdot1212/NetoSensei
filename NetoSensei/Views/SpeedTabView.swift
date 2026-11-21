@@ -13,9 +13,39 @@ struct SpeedTabView: View {
     @StateObject private var vpnBenchmark = VPNBenchmark()
     @State private var selectedSection: SpeedSection = .overview
 
-    @State private var runPhase: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var runPhase: PerformancePhase?
     @State private var runSummary: PerformanceSummary?
     @State private var runNotice: String?
+
+    private enum PerformancePhase: Int, CaseIterable, Identifiable {
+        case speed, streaming, sites
+        var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .speed: return "Speed"
+            case .streaming: return "Streaming"
+            case .sites: return "Sites"
+            }
+        }
+
+        var status: String {
+            switch self {
+            case .speed: return "Measuring speed"
+            case .streaming: return "Checking streaming endpoints"
+            case .sites: return "Checking sites"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .speed: return "speedometer"
+            case .streaming: return "play.tv"
+            case .sites: return "globe"
+            }
+        }
+    }
 
     private struct PerformanceSummary {
         let speed: SpeedTestResult?
@@ -69,6 +99,7 @@ struct SpeedTabView: View {
                     vpnBenchmarkContent
                 }
             }
+            .background(ConnectionBriefStyle.canvas)
             .navigationTitle("Connection Test")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
@@ -97,21 +128,21 @@ struct SpeedTabView: View {
         ScrollView {
             VStack(spacing: 16) {
                 CardView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Check your connection")
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Performance check")
                             .font(.title2.bold())
-                        Text("Measure speed, sample the \(streamingVM.selectedPlatform.rawValue) endpoints and check popular sites in one run.")
+                            .accessibilityAddTraits(.isHeader)
+                        Text("Measure speed, sample \(streamingVM.selectedPlatform.rawValue) endpoints and check popular sites in one run.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
+                        performanceSteps
                         if let runPhase {
-                            HStack {
-                                ProgressView()
-                                Text(runPhase)
-                            }
-                            .accessibilityElement(children: .combine)
+                            ProgressView("\(runPhase.rawValue + 1) of 3 · \(runPhase.status)")
+                                .font(.subheadline.weight(.medium))
                         } else {
                             Button(runSummary == nil ? "Run all checks" : "Run all checks again", action: runAllChecks)
                                 .buttonStyle(.borderedProminent)
+                                .controlSize(.large)
                                 .disabled(speedVM.isRunning || streamingVM.isRunning || vpnBenchmark.isRunning)
                                 .accessibilityIdentifier("performance.runAll")
                         }
@@ -125,8 +156,36 @@ struct SpeedTabView: View {
                     summaryCard(summary)
                 }
             }
-            .padding()
+            .connectionBriefColumn()
         }
+    }
+
+    private var performanceSteps: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                ForEach(PerformancePhase.allCases) { phase in
+                    performanceStep(phase).fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(PerformancePhase.allCases) { phase in
+                    performanceStep(phase)
+                }
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: runPhase)
+    }
+
+    private func performanceStep(_ phase: PerformancePhase) -> some View {
+        let current = runPhase == phase
+        let completed = runSummary != nil || (runPhase.map { phase.rawValue < $0.rawValue } ?? false)
+        return Label(phase.title, systemImage: completed ? "checkmark.circle" : phase.icon)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(current || completed ? AppColors.accent : .secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(ConnectionBriefStyle.canvas, in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityValue(current ? "In progress" : completed ? "Finished" : "Waiting")
     }
 
     private func summaryCard(_ summary: PerformanceSummary) -> some View {
@@ -172,16 +231,16 @@ struct SpeedTabView: View {
         guard runPhase == nil, !speedVM.isRunning, !streamingVM.isRunning, !vpnBenchmark.isRunning else { return }
         runSummary = nil
         runNotice = nil
-        runPhase = "1 of 3 · Measuring speed"
+        runPhase = .speed
         Task { @MainActor in
             let path = ExitPath.lastPathChange
             defer { runPhase = nil }
             await speedVM.runSpeedTestAndWait()
             guard checkPath(path) else { return }
-            runPhase = "2 of 3 · Checking streaming endpoints"
+            runPhase = .streaming
             await streamingVM.runStreamingDiagnostic()
             guard checkPath(path) else { return }
-            runPhase = "3 of 3 · Checking sites"
+            runPhase = .sites
             await vpnBenchmark.runBenchmark()
             guard checkPath(path) else { return }
             runSummary = PerformanceSummary(speed: speedVM.result, streaming: streamingVM.result,

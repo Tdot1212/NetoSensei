@@ -16,10 +16,14 @@ struct CardView<Content: View>: View {
         VStack(alignment: .leading, spacing: UIConstants.spacingM) {
             content()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(AppColors.card)
-        .cornerRadius(UIConstants.cornerRadiusL)
-        .shadow(radius: UIConstants.cardShadowRadius, y: 2)
+        .background(ConnectionBriefStyle.surface, in: RoundedRectangle(cornerRadius: 20))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20)
+                .strokeBorder(ConnectionBriefStyle.rule, lineWidth: 1)
+                .allowsHitTesting(false)
+        }
     }
 }
 

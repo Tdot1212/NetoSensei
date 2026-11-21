@@ -9,6 +9,11 @@
 import SwiftUI
 
 struct DashboardView: View {
+    let openTab: (NetoTab) -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.horizontalSizeClass) private var widthClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showCoverage = false
     @StateObject private var vm = DashboardViewModel()
     @ObservedObject private var signalTracker = SignalStrengthTracker.shared
     // PART 3: Removed showingDiagnostic, showingAdvancedDiagnostic, showingVPNTools
@@ -26,70 +31,43 @@ struct DashboardView: View {
     var body: some View {
         NavigationView {
             ScrollView {
-                VStack(spacing: UIConstants.spacingL) {
+                LazyVStack(spacing: 20) {
                     headerView
+                    overviewDetails
 
-                    // Signal Strength Card (only when iOS gave us a REAL value)
-                    // FIX (Issue 5): NEHotspotNetwork returns 0.0 when iOS doesn't
-                    // know — never render "0% Poor" from that. SignalStrengthTracker
-                    // already drops 0.0 samples, but guard here too in case
-                    // currentStrength is exactly 0 from an older state.
-                    if vm.status.wifi.isConnected, let s = signalTracker.currentStrength, s > 0 {
-                        signalStrengthCard
+                    if let verdict = vm.verdict {
+                        FindingsCard(verdict: verdict)
                     }
 
-                    // Commit 9: cellular is a first-class connection. On
-                    // cellular-only the Wi-Fi card is HIDDEN (its absence is
-                    // not a failure); on dual-stack both cards show.
+                    BriefSectionTitle(title: "Connection details")
+                    if vm.status.wifi.isConnected, let strength = signalTracker.currentStrength, strength > 0 {
+                        signalStrengthCard
+                    }
                     if ConnectionCards.showsCellularCard(vm.status) {
                         cellularCard
                     }
                     if ConnectionCards.showsWiFiCard(vm.status) {
                         wifiCard
                     }
-
                     if ConnectionCards.showsRouterCard(vm.status) {
                         routerCard
-                        if let adminURL = vm.status.router.adminURL,
-                           let url = URL(string: adminURL) {
+                        if let adminURL = vm.status.router.adminURL, let url = URL(string: adminURL) {
                             routerAdminButton(url: url)
                         }
                     }
-
-                    // Internet Card (uses smoothed latency)
-                    internetCard
-
-                    // VPN Card (conditional)
-                    let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-                    if vpnActive {
+                    if SmartVPNDetector.shared.detectionResult?.isVPNActive == true {
                         vpnCard
                     }
-
-                    // DNS Card (uses smoothed latency)
-                    dnsCard
-
-                    // Public IP Card
+                    if vm.hasISPWarning { internetWarning }
+                    if vm.status.dns.resolverIP != nil || vm.hasDNSWarning { dnsCard }
                     publicIPCard
-
-                    // Trend Insights (from speed + diagnostic history)
                     trendsCard
-
-                    // Connection Stability Card
                     StabilityCard(stabilityMonitor: ConnectionStabilityMonitor.shared)
-
-                    // Diagnosis v2: findings from the ONE verdict replace the
-                    // Smart Recommendations and Issues & Solutions engines.
-                    if let v = vm.verdict {
-                        FindingsCard(verdict: v)
-                    }
-
-                    // Version label with hidden debug tap
                     versionLabel
                 }
-                .padding()
-                .frame(maxWidth: 760)
-                .frame(maxWidth: .infinity)
+                .connectionBriefColumn()
             }
+            .background(ConnectionBriefStyle.canvas)
             .refreshable {
                 // Commit 8: never rate-limited, forces a fresh network read,
                 // and waits for + re-runs after any in-flight refresh so
@@ -98,7 +76,7 @@ struct DashboardView: View {
             }
 
             .navigationTitle("Netosensei")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button {
@@ -183,60 +161,179 @@ struct DashboardView: View {
     // MARK: - Connection overview
 
     private var headerView: some View {
-        CardView {
-            VStack(alignment: .leading, spacing: UIConstants.spacingM) {
-                Label {
-                    Text(vm.internetStatusText)
-                        .font(.title2.bold())
-                        .accessibilityIdentifier("home.internetStatus")
-                } icon: {
-                    Image(systemName: vm.isConnected ? "checkmark.circle.fill" : "globe")
-                        .foregroundStyle(vm.isConnected ? AppColors.green : .secondary)
-                        .accessibilityHidden(true)
-                }
+        VStack(alignment: .leading, spacing: 15) {
+            HStack(spacing: 9) {
+                Image(systemName: vm.isConnected ? "checkmark.circle.fill" : "globe")
+                    .foregroundStyle(vm.isConnected ? ConnectionBriefStyle.mint : ConnectionBriefStyle.softWhite)
+                    .accessibilityHidden(true)
+                Text("Connection status")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(ConnectionBriefStyle.softWhite)
+            }
+
+            Text(vm.internetStatusText)
+                .font(.largeTitle.weight(.bold))
+                .tracking(-0.7)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("home.internetStatus")
                 .accessibilityAddTraits(.isHeader)
 
-                if vm.status.connectionType != nil {
-                    Label(vm.connectionTypeDescription, systemImage: vm.status.connectionType?.iconName ?? "network")
+            if vm.status.connectionType != nil {
+                Label(activeConnectionLabel, systemImage: vm.status.connectionType?.iconName ?? "network")
+                    .font(.subheadline)
+                    .foregroundStyle(ConnectionBriefStyle.softWhite)
+            }
+
+            if let verdict = vm.verdict {
+                if let score = verdict.score {
+                    Text("Connection quality \(score.value)/100 · \(score.band.word)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(ConnectionBriefStyle.softWhite)
+                }
+                if verdict.state == .degraded || verdict.state == .broken {
+                    Text(verdict.headline)
                         .font(.subheadline)
-                        .foregroundStyle(AppColors.textSecondary)
+                        .foregroundStyle(ConnectionBriefStyle.softWhite)
                 }
 
-                if let verdict = vm.verdict {
-                    if let score = verdict.score {
-                        Text("Connection quality \(score.value)/100 · \(score.band.word)")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(score.band.color)
-                    }
-
-                    if verdict.state == .degraded || verdict.state == .broken {
-                        Text(verdict.headline)
-                            .font(.subheadline)
-                            .foregroundStyle(AppColors.textSecondary)
-                    }
-
-                    DisclosureGroup("Check details") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            if verdict.score == nil {
-                                Text("Connection quality score unavailable")
-                                    .font(.subheadline)
-                            }
-                            CoverageLine(coverage: verdict.coverage)
+                Rectangle().fill(.white.opacity(0.23)).frame(height: 1)
+                    .accessibilityHidden(true)
+                coverageButton
+                if showCoverage {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if verdict.score == nil {
+                            Text("Connection quality score unavailable")
+                                .font(.subheadline.weight(.semibold))
                         }
-                        .padding(.top, 6)
+                        CoverageLine(coverage: verdict.coverage)
                     }
+                    .environment(\.colorScheme, .dark)
+                    .transition(reduceMotion ? .identity : .opacity)
+                }
+            } else if vm.status.measurementsPending || vm.status.measurementsIncomplete {
+                Text(vm.status.measurementsPending ? "Measuring connection quality…" : "Some connection checks couldn’t finish.")
                     .font(.subheadline)
-                } else if vm.status.measurementsPending {
-                    Text("Measuring connection quality…")
-                        .font(.subheadline)
-                        .foregroundStyle(AppColors.textSecondary)
-                } else if vm.status.measurementsIncomplete {
-                    Text("Some connection checks couldn’t finish.")
-                        .font(.subheadline)
-                        .foregroundStyle(AppColors.textSecondary)
+                    .foregroundStyle(ConnectionBriefStyle.softWhite)
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+        .background(ConnectionBriefStyle.hero, in: RoundedRectangle(cornerRadius: 25))
+    }
+
+    private var activeConnectionLabel: String {
+        if vm.status.connectionType == .cellular, let generation = cellularRadio.generation {
+            return "\(generation) cellular"
+        }
+        return vm.connectionTypeDescription
+    }
+
+    private var coverageButton: some View {
+        Button {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                showCoverage.toggle()
+            }
+        } label: {
+            HStack {
+                Text("Check details").font(.subheadline.weight(.semibold))
+                Spacer()
+                Image(systemName: showCoverage ? "chevron.up" : "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .accessibilityHidden(true)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(showCoverage ? "Expanded" : "Collapsed")
+    }
+
+    private var overviewDetails: some View {
+        let layout = widthClass == .regular && !dynamicType.isAccessibilitySize
+            ? AnyLayout(HStackLayout(alignment: .top, spacing: 16))
+            : AnyLayout(VStackLayout(spacing: 20))
+        return layout {
+            readings
+            nextActions
+        }
+    }
+
+    private var readings: some View {
+        let latency = ConnectionCards.internetLatencyText(
+            status: vm.status, smoothedLatency: vm.smoothedInternetLatency
+        )
+        let missingReading = vm.isInitializing || vm.status.measurementsPending ? "Measuring…" : "Unavailable"
+        let https = vm.status.internet.httpRTT.map { "\(Int($0)) ms" }
+        let dns = (vm.smoothedDNSLatency ?? vm.status.dns.displayableLatency).map { "\(Int($0)) ms" }
+        let layout = dynamicType.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+
+        return CardView {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Text("Live readings")
+                        .font(.headline)
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    Button {
+                        showingInternetLatencyInfo = true
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AppColors.accent)
+                    .accessibilityLabel("How latency is measured")
+                }
+
+                layout {
+                    reading("Network latency", value: vm.isInitializing ? missingReading : latency)
+                    reading("HTTPS response", value: https ?? missingReading)
+                    reading("DNS lookup", value: dns ?? missingReading)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func reading(_ label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(value)
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var nextActions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            BriefSectionTitle(title: "Check your network")
+            CardView {
+                VStack(spacing: 0) {
+                    Button { openTab(.diagnose) } label: {
+                        BriefActionLabel(title: "Diagnose a problem", icon: "stethoscope")
+                    }
+                    .accessibilityIdentifier("home.openDiagnose")
+                    Divider()
+                    Button { openTab(.speed) } label: {
+                        BriefActionLabel(title: "Test speed and streaming", icon: "speedometer")
+                    }
+                    .accessibilityIdentifier("home.openSpeed")
+                    Divider()
+                    Button { openTab(.security) } label: {
+                        BriefActionLabel(title: "Review security and devices", icon: "shield.checkerboard")
+                    }
+                    .accessibilityIdentifier("home.openSecurity")
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
@@ -496,13 +593,6 @@ struct DashboardView: View {
                         StatusRow(title: "Status", value: vm.isInitializing ? "Detecting..." : m.statusText,
                                   color: vm.isInitializing ? .secondary : AppColors.green)
 
-                        if let text = m.latencyText {
-                            StatusRow(title: "Network latency", value: text,
-                                      color: m.latencyMs.map { latencyColor($0) } ?? .secondary)
-                        }
-                        if let dns = m.dnsMs {
-                            StatusRow(title: "DNS", value: "\(Int(dns))ms", color: dnsLatencyColor(dns))
-                        }
                         if let down = m.downloadMbps {
                             StatusRow(title: "Download", value: String(format: "%.1f Mbps", down), color: NetworkColors.forSpeed(down))
                         }
@@ -610,61 +700,15 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Internet Card (PART 1: Uses smoothed latency)
-
-    private var internetCard: some View {
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-
+    private var internetWarning: some View {
+        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive == true
         return CardView {
-            VStack(alignment: .leading, spacing: UIConstants.spacingM) {
-                // Title
-                HStack {
-                    Image(systemName: "globe")
-                        .font(.system(size: UIConstants.iconSizeM))
-                        .foregroundColor(AppColors.textSecondary)
-                    Text("Internet")
-                        .font(.headline)
-                    Spacer()
-                    // (i): explains what "Latency" measures and surfaces the
-                    // secondary "App response time" (HTTP RTT) + methodology.
-                    Button {
-                        showingInternetLatencyInfo = true
-                    } label: {
-                        Image(systemName: "info.circle")
-                            .font(.subheadline)
-                            .foregroundColor(AppColors.accent)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("How latency is measured")
-                }
-
-                if !ConnectionCards.showsCellularCard(vm.status) {
-                    let validLatency = vm.latencyIntercepted ? nil : (vm.smoothedInternetLatency ?? vm.status.internet.displayableLatency)
-                    StatusRow(title: "Network latency",
-                              value: ConnectionCards.internetLatencyText(status: vm.status, smoothedLatency: vm.smoothedInternetLatency),
-                              color: validLatency.map { latencyColor($0) } ?? .secondary)
-                }
-                if let response = vm.status.internet.httpRTT {
-                    StatusRow(title: "HTTPS response", value: "\(Int(response)) ms", color: .secondary)
-                }
-
-                // FIXED: Latency warning - attribute correctly based on VPN status
-                if vm.hasISPWarning {
-                    if vpnActive {
-                        // VPN is active - latency is caused by VPN routing, not ISP
-                        Text("ℹ️ High endpoint latency while VPN is active; cause unverified")
-                            .font(.caption)
-                            .foregroundColor(AppColors.yellow)
-                            .padding(.top, 4)
-                    } else {
-                        // No VPN - could be ISP congestion
-                        Text("⚠️ High latency — possible ISP congestion")
-                            .font(.caption)
-                            .foregroundColor(AppColors.yellow)
-                            .padding(.top, 4)
-                    }
-                }
-            }
+            Text(vpnActive
+                 ? "High endpoint latency while VPN is active. The cause needs a comparison."
+                 : "High latency to the test endpoint. Rerun Diagnose to check where the delay starts.")
+                .font(.subheadline)
+                .foregroundStyle(AppColors.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -684,6 +728,11 @@ struct DashboardView: View {
                         .font(.headline)
                     Text(vm.status.internet.httpRTT.map { "\(Int($0)) ms" } ?? "Unavailable")
                     Text("This times an HTTPS request to a test endpoint. It can include connection setup, encryption, and server response time.")
+                        .foregroundStyle(.secondary)
+                    Divider()
+                    Text("DNS lookup")
+                        .font(.headline)
+                    Text("This times how long the system takes to find a server address for a hostname. It can include a cached reply.")
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -798,21 +847,8 @@ struct DashboardView: View {
                     )
                 }
 
-                // Latency — smoothed, never a sentinel
-                let dnsLatencyMs = vm.smoothedDNSLatency ?? vm.status.dns.displayableLatency
-                let latencyValue = dnsLatencyMs.map { "\(Int($0))ms" }
-                let latencyColor = dnsLatencyMs.map(dnsLatencyColor) ?? .secondary
-
-                if let value = latencyValue {
-                    StatusRow(
-                        title: "Latency",
-                        value: value,
-                        color: latencyColor
-                    )
-                }
-
                 if vm.hasDNSWarning {
-                    Text("⚠️ Slow DNS - consider switching to 1.1.1.1 or 8.8.8.8")
+                    Text("DNS lookups are slow. Compare resolver response times in Diagnose before changing your settings.")
                         .font(.caption)
                         .foregroundColor(AppColors.yellow)
                         .padding(.top, 4)
@@ -884,12 +920,6 @@ struct DashboardView: View {
                         }
                     }
 
-                    // Tap for more
-                    Text("Tap for full IP details")
-                        .font(.caption2)
-                        .foregroundColor(AppColors.accent)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 4)
                 }
             }
         }

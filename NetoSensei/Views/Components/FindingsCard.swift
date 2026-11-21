@@ -15,6 +15,7 @@ struct FindingsCard: View {
     var title: String = "What to do"
     var maxFindings: Int = 4
     @State private var expanded: UUID?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let shown = Array(verdict.findings.prefix(maxFindings))
@@ -31,7 +32,7 @@ struct FindingsCard: View {
                 VStack(spacing: 8) {
                     ForEach(shown) { finding in
                         FindingRow(finding: finding, isExpanded: expanded == finding.id) {
-                            withAnimation(.easeInOut(duration: 0.25)) {
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
                                 expanded = expanded == finding.id ? nil : finding.id
                             }
                         }
@@ -54,7 +55,7 @@ struct FindingRow: View {
     let onTap: () -> Void
 
     private var tint: Color {
-        if finding.byDesign { return .yellow }
+        if finding.byDesign || finding.severity == .fair || finding.severity == .poor { return ConnectionBriefStyle.cautionInk }
         return finding.severity.color
     }
 
@@ -89,6 +90,7 @@ struct FindingRow: View {
                 .padding()
             }
             .buttonStyle(.plain)
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 10) {
@@ -119,8 +121,12 @@ struct FindingRow: View {
                 .padding([.horizontal, .bottom])
             }
         }
-        .background(Color(UIColor.secondarySystemGroupedBackground))
-        .cornerRadius(12)
+        .background(ConnectionBriefStyle.surface, in: RoundedRectangle(cornerRadius: 16))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(ConnectionBriefStyle.rule, lineWidth: 1)
+                .allowsHitTesting(false)
+        }
     }
 
     private var icon: String {
@@ -158,7 +164,7 @@ struct FindingRow: View {
             }
         case .notFixable(let why, let expect, let workarounds):
             VStack(alignment: .leading, spacing: 4) {
-                Text("Not fixable right now").font(.caption.bold()).foregroundColor(.yellow)
+                Text("Not fixable right now").font(.caption.bold()).foregroundColor(ConnectionBriefStyle.cautionInk)
                 Text(why).font(.caption)
                 Text("What to expect: \(expect)").font(.caption)
                 if !workarounds.isEmpty {
