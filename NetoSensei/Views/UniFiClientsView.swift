@@ -77,7 +77,11 @@ struct UniFiClientsView: View {
             }
             .navigationTitle("UniFi Clients")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Done") { dismiss() } }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
             .onChange(of: console) { _, _ in
                 sites = []
                 site = ""

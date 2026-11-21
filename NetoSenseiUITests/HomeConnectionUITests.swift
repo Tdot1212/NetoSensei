@@ -106,8 +106,10 @@ final class HomeConnectionUITests: XCTestCase {
                 XCTAssertTrue(app.navigationBars["Alerts"].waitForExistence(timeout: 3))
                 app.navigationBars["Alerts"].buttons["Done"].tap()
             }
-            navigation.buttons["Done"].tap()
-            XCTAssertTrue(navigation.waitForNonExistence(timeout: 5))
+            let done = navigation.buttons["Done"]
+            XCTAssertTrue(done.isHittable, title)
+            done.tap()
+            XCTAssertTrue(navigation.waitForNonExistence(timeout: 5), title)
         }
     }
 
