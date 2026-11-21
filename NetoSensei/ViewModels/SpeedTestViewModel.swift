@@ -27,6 +27,9 @@ class SpeedTestViewModel: ObservableObject {
     // FIXED: Removed nonisolated - these are @MainActor services
 
     private let speedTestEngine: SpeedTestEngine
+    @Published private(set) var failureStep: ConnectionNextStep?
+    @Published private(set) var canCancel = false
+
     private let historyManager: HistoryManager
     private let networkMonitor: NetworkMonitorService
 
@@ -91,10 +94,8 @@ class SpeedTestViewModel: ObservableObject {
     }
 
     func runSpeedTest() {
+        guard currentSpeedTestTask == nil, !isRunning, !speedTestEngine.isRunning else { return }
         debugLog("🚀 SpeedTestViewModel: Starting speed test")
-
-        // Cancel any existing speed test
-        currentSpeedTestTask?.cancel()
 
         // Disable idle timer to prevent screen from turning off during test
         UIApplication.shared.isIdleTimerDisabled = true
@@ -103,6 +104,8 @@ class SpeedTestViewModel: ObservableObject {
         isRunning = true
         progress = 0.0
         errorMessage = nil
+        failureStep = nil
+        canCancel = true
         result = nil
 
         // Use Task with weak self to prevent retain cycles and allow cancellation
@@ -114,16 +117,16 @@ class SpeedTestViewModel: ObservableObject {
 
             defer {
                 // Re-enable idle timer when test completes
-                Task { @MainActor in
-                    UIApplication.shared.isIdleTimerDisabled = false
-                }
+                self.currentSpeedTestTask = nil
+                self.canCancel = false
+                UIApplication.shared.isIdleTimerDisabled = false
             }
 
             // Check for cancellation before starting
             guard !Task.isCancelled else { return }
 
             // Run actual speed test in background (nonisolated)
-            let final = await speedTestEngine.runSpeedTest()
+            let final = await speedTestEngine.runSpeedTest(measureResponsiveness: true)
 
             // Check for cancellation before updating UI
             guard !Task.isCancelled else { return }
@@ -136,6 +139,7 @@ class SpeedTestViewModel: ObservableObject {
                     guard let self = self else { return }
                     self.result = nil
                     self.errorMessage = reason
+                    self.failureStep = .speedFailed(reason, connectionType: final.connectionType, vpnActive: final.vpnActive)
                     self.isRunning = false
                     self.progress = 0.0
                     self.currentPhase = .idle
@@ -183,7 +187,7 @@ class SpeedTestViewModel: ObservableObject {
                 let historyEntry = NetworkHistoryEntry(
                     healthScore: healthScore,
                     downloadSpeed: final.downloadSpeed,
-                    uploadSpeed: final.uploadSpeed,
+                    uploadSpeed: final.measuredUploadSpeed,
                     latency: final.ping,
                     gatewayLatency: networkStatus.router.displayableLatency,
                     dnsLatency: networkStatus.dns.displayableLatency,
@@ -206,8 +210,9 @@ class SpeedTestViewModel: ObservableObject {
     }
 
     func cancelSpeedTest() {
+        guard canCancel else { return }
+        canCancel = false
         currentSpeedTestTask?.cancel()
-        currentSpeedTestTask = nil
         isRunning = false
         UIApplication.shared.isIdleTimerDisabled = false
     }

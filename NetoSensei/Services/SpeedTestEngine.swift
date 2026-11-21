@@ -105,28 +105,20 @@ class SpeedTestEngine: ObservableObject {
         transferSession = environment?.makeSession() ?? Self.makeTransferSession()
         defer { transferSession?.invalidateAndCancel(); transferSession = nil }
 
-        let decision = await selectServer(exitCountry: publicCountry, vpnActive: vpnActive, comparisonServer: comparisonServer)
-        let serverLabel: String
-        let serverRegion: SpeedTestServerSelection.Region
-        switch decision {
-        case .selected(let candidate, let region):
-            selectedCandidate = candidate
-            serverLabel = candidate.label
-            serverRegion = region
-            debugLog("✅ Server selected: \(candidate.label) (\(region.text))")
-        case .unavailable(let reason):
-            debugLog("⛔ Speed test not run — \(reason)")
-            self.isRunning = false
-            self.currentPhase = .idle
+        let (servers, selectionError) = await selectServers(
+            exitCountry: publicCountry, vpnActive: vpnActive, comparisonServer: comparisonServer
+        )
+        guard let firstServer = servers.first else {
             var unavailable = SpeedTestResult(
                 downloadSpeed: 0, uploadSpeed: 0, ping: nil, jitter: nil, packetLoss: nil,
-                serverUsed: nil, serverLocation: nil, testDuration: 0,
-                connectionType: connectionType, vpnActive: vpnActive, ipAddress: ipAddress,
-                networkSSID: networkSSID, localSubnet: localSubnet, publicCountry: publicCountry
+                testDuration: clock() - started, connectionType: connectionType, vpnActive: vpnActive,
+                ipAddress: ipAddress, networkSSID: networkSSID, localSubnet: localSubnet, publicCountry: publicCountry
             )
-            unavailable.testUnavailableReason = reason
+            unavailable.testUnavailableReason = Task.isCancelled ? "Speed test cancelled." : selectionError
             return unavailable
         }
+
+        var server = firstServer
 
         // Phase 2: Testing Ping (20%)
         self.currentPhase = .testingPing; self.progress = 0.2
@@ -139,33 +131,45 @@ class SpeedTestEngine: ObservableObject {
         debugLog("✅ Ping: \(ping.map { String(format: "%.0f", $0) + "ms" } ?? "unmeasurable")\(pingIntercepted ? " (intercepted)" : ""), Jitter: \(jitter.map { String(format: "%.0f", $0) + "ms" } ?? "—")")
         self.progress = 0.3
 
-        let probeURL = measureResponsiveness && environment == nil ? selectedCandidate.probeURL : nil
-        let probeSession = probeURL.map { _ in
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = 2
-            configuration.timeoutIntervalForResource = 3
-            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-            return URLSession(configuration: configuration)
-        }
-        defer { probeSession?.invalidateAndCancel() }
+        var probeURL: URL?
+        var probeSession: URLSession?
         var idleSamples: [Double] = []
-        if let probeURL, let probeSession {
-            for _ in 0..<5 {
-                guard !Task.isCancelled else { break }
-                if let elapsed = await Self.responseTime(probeURL, session: probeSession) {
-                    idleSamples.append(elapsed)
-                }
-                try? await Task.sleep(for: .milliseconds(250))
-            }
-        }
+        var downloadSpeed: Double = 0
+        var downloadSamples: [Double] = []
+        var failures: [String] = []
+        defer { probeSession?.invalidateAndCancel() }
 
-        // Phase 3: Testing Download (40%) - 30s timeout
-        self.currentPhase = .testingDownload; self.progress = 0.4
-        let (downloadSpeed, downloadSamples) = await testDownloadSpeed(probeURL: probeURL, probes: probeSession)
-        if downloadSpeed == 0 {
-            debugLog("⚠️ Download test failed against \(serverLabel) (\(serverRegion.text)) — no bytes moved")
-        } else {
-            debugLog("✅ Download: \(downloadSpeed) Mbps")
+        // Keep each transfer and its latency samples on one endpoint.
+        for attempt in servers.prefix(2) {
+            guard !Task.isCancelled, (environment?.pathChange() ?? ExitPath.lastPathChange) == pathChangedAt else { break }
+            server = attempt
+            selectedCandidate = attempt.candidate
+            probeSession?.invalidateAndCancel()
+            probeURL = measureResponsiveness && environment == nil ? selectedCandidate.probeURL : nil
+            probeSession = probeURL.map { _ in
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.timeoutIntervalForRequest = 2
+                configuration.timeoutIntervalForResource = 3
+                configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+                return URLSession(configuration: configuration)
+            }
+            idleSamples = []
+            if let probeURL, let probeSession {
+                for _ in 0..<5 {
+                    guard !Task.isCancelled else { break }
+                    if let elapsed = await Self.responseTime(probeURL, session: probeSession) {
+                        idleSamples.append(elapsed)
+                    }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
+            self.currentPhase = .testingDownload
+            self.progress = 0.4
+            let (speed, samples, failure) = await testDownloadSpeed(probeURL: probeURL, probes: probeSession)
+            downloadSpeed = speed
+            downloadSamples = samples
+            if speed > 0 { break }
+            failures.append("\(attempt.candidate.label): \(failure ?? "no complete download")")
         }
         self.progress = 0.7
 
@@ -175,10 +179,15 @@ class SpeedTestEngine: ObservableObject {
         let uploadSpeed: Double
         let uploadUnavailableReason: String?
         var uploadSamples: [Double] = []
-        switch SpeedTestServerSelection.uploadPlan(for: selectedCandidate) {
+        switch SpeedTestServerSelection.uploadPlan(for: server.candidate) {
         case .measure(let url):
-            (uploadSpeed, uploadSamples) = await testUploadSpeed(to: url, probeURL: probeURL, probes: probeSession)
-            uploadUnavailableReason = nil
+            if downloadSpeed > 0, !Task.isCancelled, (environment?.pathChange() ?? ExitPath.lastPathChange) == pathChangedAt {
+                (uploadSpeed, uploadSamples) = await testUploadSpeed(to: url, probeURL: probeURL, probes: probeSession)
+                uploadUnavailableReason = uploadSpeed > 0 ? nil : "The download completed. The server did not confirm a complete upload."
+            } else {
+                uploadSpeed = 0
+                uploadUnavailableReason = "Upload was skipped after the download could not complete."
+            }
             debugLog("✅ Upload: \(uploadSpeed) Mbps")
         case .unsupported(let reason):
             uploadSpeed = 0
@@ -198,8 +207,8 @@ class SpeedTestEngine: ObservableObject {
             ping: ping,
             jitter: jitter,
             packetLoss: packetLoss,
-            serverUsed: serverLabel,
-            serverLocation: serverRegion.text,
+            serverUsed: server.candidate.label,
+            serverLocation: server.region.text,
             testDuration: clock() - started,
             connectionType: connectionType,
             vpnActive: vpnActive,
@@ -218,14 +227,13 @@ class SpeedTestEngine: ObservableObject {
             )
         }
         result.measurementVersion = 2
-        result.serverRegion = serverRegion.text
+        result.serverRegion = server.region.text
         result.uploadUnavailableReason = uploadUnavailableReason
         if (environment?.pathChange() ?? ExitPath.lastPathChange) != pathChangedAt {
             result.testUnavailableReason = "The network path changed during the test. Repeat on a stable connection."
-        }
-
-        if downloadSpeed <= 0 {
-            result.testUnavailableReason = "No valid download transfer completed. Repeat the test when the endpoint is reachable."
+        } else if downloadSpeed <= 0 {
+            let detail = failures.joined(separator: " · ")
+            result.testUnavailableReason = detail.isEmpty ? "No complete download was measured." : "Test downloads could not complete. \(detail)."
         }
         if Task.isCancelled { result.testUnavailableReason = "Speed test cancelled." }
         self.isRunning = false
@@ -256,24 +264,25 @@ class SpeedTestEngine: ObservableObject {
     /// Probe every candidate for the exit country in order, then let the pure
     /// rules decide. Every candidate is probed (not just until the first
     /// qualifies) so the log — and the "Test Not Run" reason — show all of them.
-    private func selectServer(exitCountry: String?, vpnActive: Bool, comparisonServer: String?) async -> SpeedTestServerSelection.Decision {
+    private func selectServers(exitCountry: String?, vpnActive: Bool, comparisonServer: String?) async
+        -> ([SpeedTestServerSelection.TransferServer], String?) {
         let eligible = SpeedTestServerSelection.candidates(forExitCountry: exitCountry)
         let candidates = comparisonServer.map { label in eligible.filter { $0.label == label } } ?? eligible
         if candidates.isEmpty {
-            return .unavailable(reason: "The baseline test server is unavailable on this route. Choose another VPN exit or repeat the baseline.")
+            return ([], "The baseline test server is unavailable on this route. Choose another VPN exit or measure a new baseline.")
         }
         var probes: [SpeedTestServerSelection.Probe] = []
-        for c in candidates {
+        for candidate in candidates {
             if Task.isCancelled { break }
-            let (ok, rtt) = await Self.probe(c, injectedSession: environment?.makeSession())
-            debugLog("[SpeedTest] Candidate \(c.label) (\(c.hostname)) exit=\(exitCountry ?? "unknown") vpn=\(vpnActive): \(ok ? "reachable" : "unreachable")\(rtt.map { ", probe \(Int($0)) ms" } ?? "")")
-            probes.append(.init(candidate: c, reachable: ok, rttMs: rtt))
+            let (reachable, rtt) = await Self.probe(candidate, injectedSession: environment?.makeSession())
+            probes.append(.init(candidate: candidate, reachable: reachable, rttMs: rtt))
         }
-        let decision = SpeedTestServerSelection.decide(probes: probes, vpnActive: vpnActive, exitCountry: exitCountry)
-        if case .unavailable(let reason) = decision {
-            debugLog("[SpeedTest] No suitable server: \(reason)")
-        }
-        return decision
+        let plan = SpeedTestServerSelection.transferPlan(
+            probes: probes, vpnActive: vpnActive, exitCountry: exitCountry,
+            allowUnverifiedProximity: comparisonServer == nil
+        )
+        let reason = plan.isEmpty ? "The configured speed test servers did not return a usable response on this route." : nil
+        return (plan, reason)
     }
 
     /// Commit 12 probe: GET the candidate's own zero-byte test endpoint on a
@@ -421,7 +430,8 @@ class SpeedTestEngine: ObservableObject {
     // FIXED: Increased timeout to 90 seconds (25MB at 2 Mbps = ~100s each, so 2 tests need buffer)
     // FIXED: Return successful results even if second test times out
 
-    private func testDownloadSpeed(probeURL: URL?, probes: URLSession?) async -> (Double, [Double]) {
+    private func testDownloadSpeed(probeURL: URL?, probes: URLSession?) async -> (Double, [Double], String?) {
+        var failure: String?
         var collectedSpeeds: [Double] = []
         var matchingSamples: [Double] = []
 
@@ -481,7 +491,15 @@ class SpeedTestEngine: ObservableObject {
                     matchingSamples = samples
                 }
             } catch {
-                debugLog("⚠️ Download test \(i+1) (\(testSize.label)) failed: \(error.localizedDescription)")
+                switch error {
+                case let error as SpeedTestTransferError: failure = error.localizedDescription
+                case is TimeoutError: failure = "download timed out"
+                case let error as URLError where error.code == .timedOut: failure = "download timed out"
+                default: failure = "the connection ended before the download finished"
+                }
+                // Try the alternate server before spending time on a larger
+                // transfer from a server that could not serve the first one.
+                if collectedSpeeds.isEmpty { break }
             }
 
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -492,9 +510,9 @@ class SpeedTestEngine: ObservableObject {
         // this naturally handles both single- and multi-result cases.
         guard let bestSpeed = collectedSpeeds.last else {
             debugLog("⚠️ All download tests failed")
-            return (0, [])
+            return (0, [], failure)
         }
-        return (bestSpeed, matchingSamples)
+        return (bestSpeed, matchingSamples, nil)
     }
 
     // MARK: - Upload Speed Test

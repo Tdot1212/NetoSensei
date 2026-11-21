@@ -44,6 +44,7 @@ struct SpeedTestContentView: View {
     @AppStorage("ispPlanDownloadMbps") private var ispPlanDownload: Double = 0
     @AppStorage("ispPlanUploadMbps") private var ispPlanUpload: Double = 0
     @State private var showingISPPlanSheet = false
+    @State private var showingBeforeAfter = false
 
     var body: some View {
         ZStack {
@@ -67,14 +68,8 @@ struct SpeedTestContentView: View {
                 .padding()
             }
 
-            // Loading overlay
-            if vm.isRunning {
-                LoadingOverlay(
-                    message: vm.currentTest,
-                    progress: vm.progress
-                )
-            }
         }
+        .sheet(isPresented: $showingBeforeAfter) { WiFiAssistantView(guide: .speed) }
         .sheet(isPresented: $showingISPPlanSheet) {
             ISPPlanSettingsSheet(
                 downloadMbps: $ispPlanDownload,
@@ -153,6 +148,11 @@ struct SpeedTestContentView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
+            if vm.canCancel {
+                Button("Stop speed test", role: .cancel) { vm.cancelSpeedTest() }
+                    .buttonStyle(.bordered)
+            }
+
             Spacer()
         }
     }
@@ -162,7 +162,7 @@ struct SpeedTestContentView: View {
     @ViewBuilder
     private func resultsView(result: SpeedTestResult) -> some View {
         // FIXED: Show complete failure state when BOTH download AND upload fail
-        if result.downloadSpeed < 0.1 && result.uploadSpeed < 0.1 {
+        if result.downloadSpeed <= 0 && (result.measuredUploadSpeed ?? 0) <= 0 {
             completeFailureView
         } else {
             // Big download number
@@ -181,17 +181,15 @@ struct SpeedTestContentView: View {
 
             // Quality card with VPN awareness
             qualityCard(result: result)
+            improvementTips(result: result)
 
             // ISP Plan comparison (only when not on VPN — VPN measures the tunnel, not the plan)
-            if !result.vpnActive {
+            if !result.vpnActive && result.serverRegion?.contains("proximity unverified") != true {
                 ispPlanCard(result: result)
             }
 
             // What can you do with this speed
             activityChecklist(result: result)
-
-            // How to improve
-            improvementTips(result: result)
 
             // Retest button
             retestButton
@@ -242,13 +240,17 @@ struct SpeedTestContentView: View {
                 .foregroundColor(AppColors.yellow)
 
             VStack(spacing: UIConstants.spacingM) {
-                Text("Test Not Run")
+                Text("Speed could not be measured")
                     .font(.title.bold())
 
                 Text(reason)
                     .multilineTextAlignment(.center)
                     .foregroundColor(AppColors.textSecondary)
                     .padding(.horizontal)
+            }
+
+            CardView {
+                ConnectionNextStepView(step: vm.failureStep ?? .speedFailed(reason))
             }
 
             Button(action: {
@@ -708,56 +710,14 @@ struct SpeedTestContentView: View {
 
     private func improvementTips(result: SpeedTestResult) -> some View {
         CardView {
-            VStack(alignment: .leading, spacing: UIConstants.spacingM) {
-                Text("How to improve your speed")
-                    .font(.headline)
-
-                if result.vpnActive {
-                    tipRow(number: 1, tip: "Switch VPN server", detail: "In your VPN app, pick another server you trust. Stay on the same Wi-Fi and repeat the check before keeping the change.")
-                    tipRow(number: 2, tip: "Compare routes on trusted Wi-Fi", detail: "If your network policy permits, briefly disconnect the VPN, rerun the test, then reconnect it. Compare the two runs on the same Wi-Fi.")
-                } else {
-                    // FIXED: Check quality rating, not just download speed
-                    // Prevents saying "Your speed is good" when quality is "Poor" due to latency
-                    if result.quality == .poor || result.quality == .fair {
-                        if let ping = result.ping, ping > 100 {
-                            tipRow(number: 1, tip: "High latency detected (\(Int(ping))ms)", detail: "This makes browsing feel sluggish. Try restarting your router or check your ISP connection.")
-                        }
-                        if result.downloadSpeed < 10 {
-                            tipRow(number: 2, tip: "Move closer to your WiFi router", detail: "WiFi signal weakens with distance and walls.")
-                        }
-                        tipRow(number: 3, tip: "Restart your router", detail: "Unplug for 30 seconds, then plug back in. This clears the router's memory.")
-                    } else {
-                        HStack(spacing: 12) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(AppColors.green)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Your speed is good")
-                                    .font(.subheadline.bold())
-                                Text("No immediate improvements needed.")
-                                    .font(.caption)
-                                    .foregroundColor(AppColors.textSecondary)
-                            }
-                        }
-                    }
+            VStack(alignment: .leading, spacing: 12) {
+                BriefSectionTitle(title: "What to try next")
+                ConnectionNextStepView(step: .speed(result, passesPlan: !result.vpnActive && ispPlanDownload > 0 && result.serverRegion?.contains("proximity unverified") != true
+                    ? result.downloadSpeed >= ispPlanDownload * 0.7 : nil))
+                if result.connectionType == "WiFi" {
+                    Button("Compare before and after") { showingBeforeAfter = true }
+                        .buttonStyle(.bordered)
                 }
-            }
-        }
-    }
-
-    private func tipRow(number: Int, tip: String, detail: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text("\(number)")
-                .font(.caption.bold())
-                .foregroundColor(.white)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(AppColors.accent))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(tip)
-                    .font(.subheadline.bold())
-                Text(detail)
-                    .font(.caption)
-                    .foregroundColor(AppColors.textSecondary)
             }
         }
     }

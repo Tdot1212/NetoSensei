@@ -49,6 +49,8 @@ struct SpeedTabView: View {
 
     private struct PerformanceSummary {
         let speed: SpeedTestResult?
+        let speedError: String?
+        let speedFailureStep: ConnectionNextStep?
         let streaming: StreamingDiagnosticResult?
         let sites: [VPNBenchmark.BenchmarkResult]
         let path: Date
@@ -207,6 +209,9 @@ struct SpeedTabView: View {
                     }
                 } else {
                     Label("Speed could not be measured", systemImage: "speedometer")
+                    if let reason = summary.speedError {
+                        Text(reason).font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 if let streaming = summary.streaming {
                     let response = streaming.cdnPing.map { String(format: "%.0f ms HTTPS response", $0) } ?? "No HTTPS response"
@@ -220,7 +225,14 @@ struct SpeedTabView: View {
                     .font(.footnote).foregroundStyle(.secondary)
                 Divider()
                 Text("Try this next").font(.headline)
-                Text(summary.nextStep).font(.subheadline)
+                if let result = summary.speed {
+                    ConnectionNextStepView(step: .speed(result))
+                } else if let reason = summary.speedError {
+                    ConnectionNextStepView(step: summary.speedFailureStep ?? .speedFailed(reason))
+                }
+                if summary.speedError == nil {
+                    Text(summary.nextStep).font(.subheadline)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityIdentifier("performance.summary")
@@ -243,7 +255,8 @@ struct SpeedTabView: View {
             runPhase = .sites
             await vpnBenchmark.runBenchmark()
             guard checkPath(path) else { return }
-            runSummary = PerformanceSummary(speed: speedVM.result, streaming: streamingVM.result,
+            runSummary = PerformanceSummary(speed: speedVM.result, speedError: speedVM.errorMessage,
+                                            speedFailureStep: speedVM.failureStep, streaming: streamingVM.result,
                                             sites: vpnBenchmark.results, path: path)
         }
     }
@@ -256,110 +269,25 @@ struct SpeedTabView: View {
 
     // MARK: - Speed Test Content
 
+    @ViewBuilder
     private var speedTestContent: some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                // Show either the start card OR the full results view (not both)
-                if speedVM.hasResult {
-                    // Full results view (no duplicate small card)
-                    SpeedTestContentView(vm: speedVM)
-                } else {
-                    // Start card (only when no results)
-                    speedTestCard
-                }
-            }
-            .padding()
-        }
-    }
-
-    private var speedTestCard: some View {
-        CardView {
-            VStack(spacing: 16) {
-                HStack {
-                    Image(systemName: "speedometer")
-                        .font(.title2)
-                        .foregroundColor(AppColors.accent)
-                    Text("Speed Test")
-                        .font(.headline)
-                    Spacer()
-                }
-
-                if speedVM.isRunning {
-                    VStack(spacing: 12) {
-                        ProgressView(value: speedVM.progress)
-                            .tint(AppColors.accent)
-
-                        Text(speedVM.phaseDescription)
+        if speedVM.isRunning || speedVM.hasResult || speedVM.errorMessage != nil {
+            SpeedTestContentView(vm: speedVM)
+        } else {
+            ScrollView {
+                CardView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        BriefSectionTitle(title: "Speed Test")
+                        Text("Measure download and upload speed, and check how web requests respond during the transfer.")
                             .font(.subheadline)
-                            .foregroundColor(.secondary)
-
-                        Text("\(Int(speedVM.progress * 100))%")
-                            .font(.title2.bold())
-                            .foregroundColor(AppColors.accent)
+                            .foregroundStyle(.secondary)
+                        Button("Start Speed Test", systemImage: "play.fill", action: speedVM.runSpeedTest)
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
                     }
-                    .padding()
-                } else if !speedVM.hasResult {
-                    VStack(spacing: 12) {
-                        Text("Measure your download speed, upload speed, ping, and jitter.")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-
-                        Button(action: {
-                            speedVM.runSpeedTest()
-                        }) {
-                            HStack {
-                                Image(systemName: "play.fill")
-                                Text("Start Speed Test")
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(AppColors.accent)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                        }
-                    }
-                } else if let result = speedVM.result {
-                    // Quick summary
-                    HStack(spacing: 20) {
-                        // Download
-                        VStack {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .foregroundColor(.blue)
-                            Text("\(String(format: "%.1f", result.downloadSpeed))")
-                                .font(.title2.bold())
-                                .foregroundColor(NetworkColors.forSpeed(result.downloadSpeed))
-                            Text("Mbps")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        // Upload
-                        VStack {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .foregroundColor(.green)
-                            Text("\(String(format: "%.1f", result.uploadSpeed))")
-                                .font(.title2.bold())
-                                .foregroundColor(NetworkColors.forSpeed(result.uploadSpeed))
-                            Text("Mbps")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        // Ping (Phase 3: nil = unmeasurable → "—", never 999)
-                        VStack {
-                            Image(systemName: "clock.fill")
-                                .foregroundColor(.orange)
-                            Text(result.ping.map { "\(Int($0))" } ?? "—")
-                                .font(.title2.bold())
-                                .foregroundColor(result.ping.map { NetworkColors.forLatency($0) } ?? AppColors.yellow)
-                            Text("ms")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .connectionBriefColumn()
             }
         }
     }

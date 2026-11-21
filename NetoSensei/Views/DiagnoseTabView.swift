@@ -157,6 +157,9 @@ struct DiagnoseTabView: View {
                 }
                 if let result {
                     checkDetails(result)
+                    if check == .speed, case .unavailable(let reason) = result {
+                        ConnectionNextStepView(step: .speedFailed(reason, connectionType: monitor.currentStatus.connectionType?.displayName))
+                    }
                 } else if isChecking {
                     ProgressView("Checking…").font(.subheadline)
                 } else if diagnosis.isRunning {
@@ -185,6 +188,7 @@ struct DiagnoseTabView: View {
             if let verdict {
                 Text(verdict.headline).font(.subheadline.bold())
                 note(verdict.coverage.line)
+                FindingsCard(verdict: verdict)
             }
             ForEach(Array(result.testsPerformed.enumerated()), id: \.offset) { _, check in
                 reading(check.name, check.latency.map { ms($0) } ?? testStatus(check.result))
@@ -226,6 +230,7 @@ struct DiagnoseTabView: View {
             if let server = result.serverUsed { note(server) }
             reading("Download", String(format: "%.1f Mbps", result.downloadSpeed))
             reading("Upload", result.measuredUploadSpeed.map { String(format: "%.1f Mbps", $0) } ?? "Unavailable")
+            ConnectionNextStepView(step: .speed(result))
             if let response = result.responsiveness {
                 reading("Idle HTTPS response", ms(response.idleMs))
                 reading("During download", ms(response.downloadMs))

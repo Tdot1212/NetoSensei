@@ -15,7 +15,7 @@ struct SecurityTabView: View {
     @ObservedObject private var vpnDetector = SmartVPNDetector.shared
 
     private enum Tool: Identifiable {
-        case fullCheck, portScanner, deviceHistory, deviceAssistant, uniFi
+        case fullCheck, portScanner, deviceHistory, deviceAssistant, uniFi, verifyDNS, verifyIPv6
         var id: Self { self }
     }
 
@@ -79,6 +79,8 @@ struct SecurityTabView: View {
                     }
                     .navigationViewStyle(.stack)
                 case .deviceHistory: DeviceHistoryView()
+                case .verifyDNS: PrivacyVerificationView(topic: .dns)
+                case .verifyIPv6: PrivacyVerificationView(topic: .ipv6)
                 }
             }
             .task {
@@ -113,11 +115,13 @@ struct SecurityTabView: View {
                                 VStack(spacing: 12) {
                                     privacyCheckRow(status.vpnStatus, term: "VPN")
                                     privacyCheckRow(status.dnsPrivacy, term: "DNS")
+                                    verificationButton(.dns, location: "row")
                                     privacyCheckRow(status.ipHidden, term: "IP Address")
                                     privacyCheckRow(status.webRTCLeak, term: "WebRTC")
                                     privacyCheckRow(status.httpsIntegrity, term: "HTTPS")
                                     // FIX (Sec Issue 2): 6th row — IPv6 leak.
                                     privacyCheckRow(status.ipv6Leak, term: "IPv6")
+                                    verificationButton(.ipv6, location: "row")
                                 }
 
                                 // FIX (Sec Issue 2): Recommendation block when
@@ -165,6 +169,14 @@ struct SecurityTabView: View {
                 }
             }
         }
+    }
+
+    private func verificationButton(_ topic: PrivacyVerification, location: String) -> some View {
+        Button(topic.title) { tool = topic == .dns ? .verifyDNS : .verifyIPv6 }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(.leading, location == "row" ? 32 : 0)
+            .accessibilityIdentifier("privacy.\(location).\(topic.rawValue)")
     }
 
     private func overallShieldStatus(_ status: PrivacyShieldStatus.OverallStatus) -> some View {
@@ -325,7 +337,7 @@ struct SecurityTabView: View {
                 Label("Security check", systemImage: "checkmark.shield")
                     .font(.title2.bold())
                     .accessibilityAddTraits(.isHeader)
-                Text("Review the evidence from certificate, DNS and VPN checks and see what to do next.")
+                Text("Check certificates, DNS and VPN observations, or go directly to a privacy check.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Button {
@@ -336,6 +348,8 @@ struct SecurityTabView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                verificationButton(.dns, location: "shortcut")
+                verificationButton(.ipv6, location: "shortcut")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

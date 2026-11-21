@@ -10,11 +10,14 @@ private final class TransferFixture: URLProtocol, @unchecked Sendable {
         let mode = request.value(forHTTPHeaderField: "X-Fixture-Mode") ?? "success"
         let isUpload = request.httpMethod == "POST"
         let count = Int(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "bytes" })?.value ?? "0") ?? 0
-        let status = mode == "unreachable" ? 503 : (mode == "rejected" && isUpload ? 405 : 200)
+        let mib = Int(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "ckSize" })?.value ?? "0") ?? 0
+        let size = count > 0 ? count : mib * 1_048_576
+        let failsCloudflare = mode == "fallback" && url.host == "speed.cloudflare.com" && count > 0
+        let status = failsCloudflare ? 503 : mode == "unreachable" ? 503 : (mode == "rejected" && isUpload ? 405 : 200)
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: mode == "compressed" ? ["Content-Encoding": "gzip", "Content-Type": "application/octet-stream"] : ["Content-Type": mode == "html" ? "text/html" : "application/octet-stream"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        if !isUpload && count > 0 {
-            client?.urlProtocol(self, didLoad: Data(repeating: 0x55, count: mode == "rejected" ? 32 : count))
+        if !isUpload && status == 200 && size > 0 {
+            client?.urlProtocol(self, didLoad: Data(repeating: 0x55, count: mode == "rejected" ? 32 : size))
         }
         client?.urlProtocolDidFinishLoading(self)
     }
@@ -49,6 +52,18 @@ struct SpeedTransportTests {
         #expect(result.testUnavailableReason != nil)
         #expect(result.measuredUploadSpeed == nil)
         #expect(!engine.isRunning)
+    }
+
+    @MainActor @Test func answeringProbeWithFailedTransferUsesAlternateServer() async {
+        let engine = makeEngine(mode: "fallback")
+        let result = await engine.runSpeedTest()
+        #expect(result.testUnavailableReason == nil)
+        #expect(result.serverUsed == SpeedTestServerSelection.libreSpeedLosAngeles.label)
+        #expect(result.downloadSpeed > 0)
+
+        let pinned = await engine.runSpeedTest(comparisonServer: SpeedTestServerSelection.cloudflare.label)
+        #expect(pinned.testUnavailableReason?.contains("503") == true)
+        #expect(pinned.serverUsed == SpeedTestServerSelection.cloudflare.label)
     }
 
     @MainActor @Test func noReachableCandidateReturnsUnavailableWithoutTransfers() async {

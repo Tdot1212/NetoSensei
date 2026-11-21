@@ -33,7 +33,7 @@ enum WiFiRepairGuide: String, CaseIterable, Identifiable {
             ]
         case .browsing:
             return [
-                "In Diagnose → Detailed Checks → Endpoint Checks, enter the affected site’s hostname and record its HTTPS response. Try one other site as a reference.",
+                "Open Diagnose → Choose a website, enter the affected site’s hostname, then run the full check. Record its HTTPS response. Try one other site as a reference.",
                 "If several sites are slow, measure before and after pausing large transfers on devices you control. Stay on the same Wi-Fi and VPN server.",
                 "If just one site is affected, try loading it in Safari on a trusted second connection and repeat the same hostname check. Keep both results if you contact the service."
             ]

@@ -143,11 +143,13 @@ enum SpeedTestServerSelection {
         case nearby(probeMs: Double)
         /// VPN on: the probe crosses the tunnel; distance to the exit can't be judged from the phone.
         case viaVPN(probeMs: Double?)
+        case currentRoute(probeMs: Double)
 
         var text: String {
             switch self {
             case .nearby(let ms): return "nearby — \(Int(ms)) ms probe"
             case .viaVPN(let ms): return "through your VPN" + (ms.map { " — \(Int($0)) ms probe" } ?? "")
+            case .currentRoute(let ms): return "current route · \(Int(ms)) ms HTTPS probe · server proximity unverified"
             }
         }
     }
@@ -211,6 +213,28 @@ enum SpeedTestServerSelection {
             // Unknown or unlisted exit: the probe alone decides.
             return [cloudflare, libreSpeedLosAngeles, libreSpeedFrankfurt]
         }
+    }
+
+    struct TransferServer {
+        let candidate: Candidate
+        let region: Region
+    }
+
+    /// A nearby-qualified server comes first. If the user asked for an
+    /// ordinary speed test, a reachable server can also measure its own
+    /// route. Keep the route label and the measured server with the result.
+    static func transferPlan(probes: [Probe], vpnActive: Bool, exitCountry: String?,
+                             allowUnverifiedProximity: Bool) -> [TransferServer] {
+        var preferred: [TransferServer] = []
+        var fallback: [TransferServer] = []
+        for probe in probes where probe.reachable {
+            if case .selected(let candidate, let region) = decide(probes: [probe], vpnActive: vpnActive, exitCountry: exitCountry) {
+                preferred.append(TransferServer(candidate: candidate, region: region))
+            } else if allowUnverifiedProximity, let rtt = probe.rttMs {
+                fallback.append(TransferServer(candidate: probe.candidate, region: .currentRoute(probeMs: rtt)))
+            }
+        }
+        return preferred + fallback
     }
 
     // MARK: Decision (Commit 11 rules, unchanged)

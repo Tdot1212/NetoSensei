@@ -228,6 +228,7 @@ final class CombinedSecurityCheckViewModel: ObservableObject {
 struct CombinedSecurityCheckSheet: View {
     @StateObject private var vm = CombinedSecurityCheckViewModel()
     @State private var followUp: WiFiRepairGuide?
+    @State private var verification: PrivacyVerification?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -239,6 +240,14 @@ struct CombinedSecurityCheckSheet: View {
                     } else if let result = vm.result {
                         verdictHeader(result)
                         recommendationsSection(result)
+                        CardView {
+                            VStack(alignment: .leading, spacing: 8) {
+                                BriefSectionTitle(title: "Verify privacy settings")
+                                Button(PrivacyVerification.dns.title) { verification = .dns }
+                                Button(PrivacyVerification.ipv6.title) { verification = .ipv6 }
+                            }
+                            .buttonStyle(.bordered)
+                        }
                         if result.certificateInspections.contains(where: { $0.severity == .critical }) {
                             Button("Retest a website security warning") { followUp = .certificate }
                                 .buttonStyle(.bordered)
@@ -272,6 +281,7 @@ struct CombinedSecurityCheckSheet: View {
                 .padding()
             }
             .sheet(item: $followUp) { WiFiAssistantView(guide: $0) }
+            .sheet(item: $verification) { PrivacyVerificationView(topic: $0) }
             .navigationTitle("Full Security Check")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

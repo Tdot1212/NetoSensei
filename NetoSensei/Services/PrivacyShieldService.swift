@@ -315,8 +315,8 @@ class PrivacyShieldService: ObservableObject {
         guard vpnActive else {
             return PrivacyShieldStatus.CheckResult(
                 passed: false,
-                title: "DNS Private",
-                detail: "DNS privacy is unverified; a VPN is not detected",
+                title: "DNS Privacy Unverified",
+                detail: "The active DNS transport has not been measured. Encrypted DNS can also be configured without a VPN.",
                 recommendation: nil, severity: .warning
             )
         }

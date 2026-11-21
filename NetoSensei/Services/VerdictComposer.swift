@@ -230,7 +230,7 @@ enum VerdictComposer {
                 headline: "Website addresses can't be looked up",
                 evidence: [],
                 cause: "Your phone can't turn names like apple.com into addresses, so nothing loads by name.",
-                action: .userFixable(steps: ["Settings → Wi-Fi → your network → Configure DNS → Manual → add 1.1.1.1", "If a VPN is on, reconnect it", "Restart the router if it is yours"]),
+                action: .userFixable(steps: ["If a VPN is connected, reconnect it and check its DNS setting using Security → Verify DNS privacy.", "On your own Wi-Fi, open Settings → Wi-Fi → tap ⓘ beside the network → Configure DNS. If an unintended manual setting is listed, switch to Automatic and save.", "Run Diagnose again. Check whether DNS Lookup now succeeds, then try the same website."]),
                 basedOn: [.dnsResolve]
             ))
         } else if let dns = coverage.value(.dnsLatency), !explained(.dnsLatency) {
@@ -242,7 +242,7 @@ enum VerdictComposer {
                     headline: "Website address lookups are slow",
                     evidence: [Evidence(label: "Address lookup", value: dns, unit: "ms", band: band, comparedTo: "under 75 ms is normal")],
                     cause: "Every new site waits for a slow address lookup before it starts loading.",
-                    action: .userFixable(steps: ["Settings → Wi-Fi → your network → Configure DNS → Manual → add 1.1.1.1 or 8.8.8.8"]),
+                    action: .userFixable(steps: ["Run Diagnose and compare the DNS and resolvers results on the same connection. If you use a VPN, follow its recommended DNS settings.", "On your own Wi-Fi, note the current Configure DNS setting before making any change. Retest the same sites. Restore the original setting if lookups get slower or fail."]),
                     basedOn: [.dnsLatency]
                 ))
             }

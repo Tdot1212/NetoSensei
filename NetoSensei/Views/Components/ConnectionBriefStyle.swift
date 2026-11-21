@@ -68,3 +68,16 @@ struct BriefActionLabel: View {
         .contentShape(Rectangle())
     }
 }
+
+struct ConnectionNextStepView: View {
+    let step: ConnectionNextStep
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(step.title).font(.headline)
+            Text(step.change).font(.subheadline)
+            Text(step.verify).font(.subheadline).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}

@@ -29,6 +29,7 @@ struct NetworkHistoryView: View {
 
     // NEW: Toolbar / sheet management
     @State private var showingExportSheet = false
+    @State private var showingComparisonGuide = false
     @State private var showingDeleteConfirm = false
     @State private var deleteKeepBookmarked = false
     @State private var exportCSVContent: String = ""
@@ -62,6 +63,8 @@ struct NetworkHistoryView: View {
 
                     // Connection Stability Card
                     stabilityCard
+
+                    comparisonGuideCard
 
                     // Chart section
                     if !historyManager.entries.isEmpty {
@@ -137,11 +140,24 @@ struct NetworkHistoryView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             }
+            .sheet(isPresented: $showingComparisonGuide) { WiFiAssistantView(guide: .speed) }
             .sheet(isPresented: $showingExportSheet) {
                 ShareSheet(activityItems: [exportCSVContent])
             }
         }
         .navigationViewStyle(.stack)
+    }
+
+    private var comparisonGuideCard: some View {
+        CardView {
+            VStack(alignment: .leading, spacing: 8) {
+                BriefSectionTitle(title: "Did a change help?")
+                Text("Compare tests from the same Wi-Fi, location and test server. Change one setting at a time.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Button("Compare before and after") { showingComparisonGuide = true }
+                    .buttonStyle(.bordered)
+            }
+        }
     }
 
     // MARK: - Network Filter Chips
