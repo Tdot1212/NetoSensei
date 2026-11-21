@@ -298,8 +298,6 @@ struct NetoSenseiApp: App {
             }
         }
 
-        // Force synchronize to ensure cleanup is persisted
-        UserDefaults.standard.synchronize()
         debugLog("🧹 UserDefaults cleanup complete")
     }
 

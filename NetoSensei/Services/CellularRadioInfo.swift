@@ -35,34 +35,42 @@ final class CellularRadioInfo: ObservableObject {
     /// The raw CoreTelephony constant, for logs and the (i) detail.
     @Published private(set) var rawTechnology: String?
 
-    private let info = CTTelephonyNetworkInfo()
+    private let reader = RadioReader()
     private var observer: NSObjectProtocol?
 
     private init() {
-        refresh()
+        Task { [weak self] in await self?.refresh() }
         observer = NotificationCenter.default.addObserver(
             forName: .CTServiceRadioAccessTechnologyDidChange, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.refresh() }
+            Task { @MainActor [weak self] in await self?.refresh() }
         }
     }
 
     /// Re-read the current radio for the service that carries data.
-    func refresh() {
-        let raw = Self.currentRawTechnology(info)
-        let label = Self.generationLabel(forRawTechnology: raw)
-        if raw != rawTechnology {
-            debugLog("📡 Cellular radio: \(raw ?? "none") → \(label ?? "unknown generation")")
-        }
+    private func refresh() async {
+        let raw = await reader.currentRawTechnology()
+        guard raw != rawTechnology else { return }
         rawTechnology = raw
-        generation = label
+        generation = Self.generationLabel(forRawTechnology: raw)
     }
 
-    /// The RAT of the data service (falls back to the only/first service).
-    private static func currentRawTechnology(_ info: CTTelephonyNetworkInfo) -> String? {
-        guard let techs = info.serviceCurrentRadioAccessTechnology, !techs.isEmpty else { return nil }
-        if let id = info.dataServiceIdentifier, let t = techs[id] { return t }
-        return techs.count == 1 ? techs.values.first : nil   // ambiguous with two SIMs and no data id → don't guess
+    // CoreTelephony getters can make synchronous IPC calls. Keep both
+    // creation and reads off the main actor.
+    private actor RadioReader {
+        #if !targetEnvironment(simulator)
+        private lazy var info = CTTelephonyNetworkInfo()
+        #endif
+
+        func currentRawTechnology() -> String? {
+            #if targetEnvironment(simulator)
+            return nil
+            #else
+            guard let techs = info.serviceCurrentRadioAccessTechnology, !techs.isEmpty else { return nil }
+            if let id = info.dataServiceIdentifier, let technology = techs[id] { return technology }
+            return techs.count == 1 ? techs.values.first : nil
+            #endif
+        }
     }
 
     /// Pure mapping (unit-tested). Only the generations iOS actually reports;

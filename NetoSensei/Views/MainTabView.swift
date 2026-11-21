@@ -3,7 +3,7 @@
 //  NetoSensei
 //
 //  Main tab navigation hub
-//  6 Tabs: Home, Diagnose, Speed, Security, AI Assist, History
+//  5 Tabs: Home, Diagnose, Speed, Security, History
 //
 
 import SwiftUI
@@ -12,7 +12,7 @@ import SwiftUI
 struct MainTabView: View {
     var body: some View {
         TabView {
-            // Tab 1: Home (Dashboard) — also hosts the AI Assistant FAB
+            // Tab 1: Home (Dashboard) — also hosts the AI Assistant toolbar action
             DashboardView()
                 .tabItem {
                     Label("Home", systemImage: "house.fill")

@@ -27,18 +27,14 @@ struct DashboardView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: UIConstants.spacingL) {
-                    // Header with smoothed health score
                     headerView
-
-                    // PART 2: Simple Summary Section (plain-English)
-                    simpleSummaryView
 
                     // Signal Strength Card (only when iOS gave us a REAL value)
                     // FIX (Issue 5): NEHotspotNetwork returns 0.0 when iOS doesn't
                     // know — never render "0% Poor" from that. SignalStrengthTracker
                     // already drops 0.0 samples, but guard here too in case
                     // currentStrength is exactly 0 from an older state.
-                    if let s = signalTracker.currentStrength, s > 0 {
+                    if vm.status.wifi.isConnected, let s = signalTracker.currentStrength, s > 0 {
                         signalStrengthCard
                     }
 
@@ -52,13 +48,12 @@ struct DashboardView: View {
                         wifiCard
                     }
 
-                    // Router Card (FIXED: yellow warning when VPN active)
-                    routerCard
-
-                    // Router Admin Button (only when available)
-                    if let adminURL = vm.status.router.adminURL,
-                       let url = URL(string: adminURL) {
-                        routerAdminButton(url: url)
+                    if ConnectionCards.showsRouterCard(vm.status) {
+                        routerCard
+                        if let adminURL = vm.status.router.adminURL,
+                           let url = URL(string: adminURL) {
+                            routerAdminButton(url: url)
+                        }
                     }
 
                     // Internet Card (uses smoothed latency)
@@ -92,6 +87,8 @@ struct DashboardView: View {
                     versionLabel
                 }
                 .padding()
+                .frame(maxWidth: 760)
+                .frame(maxWidth: .infinity)
             }
             .refreshable {
                 // Commit 8: never rate-limited, forces a fresh network read,
@@ -100,13 +97,17 @@ struct DashboardView: View {
                 await vm.refresh(trigger: .userInitiated)
             }
 
-            .overlay(alignment: .bottomTrailing) {
-                aiAssistantFAB
-            }
             .navigationTitle("Netosensei")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button {
+                        showingAIChat = true
+                    } label: {
+                        Image(systemName: "sparkles")
+                    }
+                    .accessibilityLabel("AI Assistant")
+
                     Button {
                         showingSettings = true
                     } label: {
@@ -146,25 +147,7 @@ struct DashboardView: View {
                 SettingsView()
             }
         }
-    }
-
-    // MARK: - AI Assistant Floating Action Button
-
-    private var aiAssistantFAB: some View {
-        Button {
-            showingAIChat = true
-        } label: {
-            Image(systemName: "sparkles")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundColor(.white)
-                .frame(width: 56, height: 56)
-                .background(Color.blue)
-                .clipShape(Circle())
-                .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
-        }
-        .accessibilityLabel("AI Assistant")
-        .padding(.trailing, 20)
-        .padding(.bottom, 20)
+        .navigationViewStyle(.stack)
     }
 
     // MARK: - Version Label (tap 5 times for debug panel)
@@ -197,83 +180,63 @@ struct DashboardView: View {
         #endif
     }
 
-    // MARK: - Header View (PART 1: Uses smoothed/stable health rating)
+    // MARK: - Connection overview
 
     private var headerView: some View {
         CardView {
-            HStack(spacing: UIConstants.spacingM) {
-                // Health score circle
-                ZStack {
-                    Circle()
-                        .stroke(stableStatusColor.opacity(0.3), lineWidth: 8)
-                        .frame(width: 60, height: 60)
-
-                    // Diagnosis v2: the ring is the verdict's score — "—" and an
-                    // empty ring below the coverage floor, never a default number.
-                    Circle()
-                        .trim(from: 0, to: CGFloat(vm.verdict?.score?.value ?? 0) / 100)
-                        .stroke(stableStatusColor, style: StrokeStyle(lineWidth: 8, lineCap: .round))
-                        .frame(width: 60, height: 60)
-                        .rotationEffect(.degrees(-90))
-
-                    Text(vm.verdict?.scoreText ?? "—")
-                        .font(.title3.bold())
-                        .foregroundColor(stableStatusColor)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    // ONE vocabulary: the score's band word; the state word when unscored.
-                    Text(vm.verdict?.score?.band.word ?? vm.verdict?.state.word ?? "Detecting…")
+            VStack(alignment: .leading, spacing: UIConstants.spacingM) {
+                Label {
+                    Text(vm.internetStatusText)
                         .font(.title2.bold())
-                        .foregroundColor(AppColors.textPrimary)
+                        .accessibilityIdentifier("home.internetStatus")
+                } icon: {
+                    Image(systemName: vm.isConnected ? "checkmark.circle.fill" : "globe")
+                        .foregroundStyle(vm.isConnected ? AppColors.green : .secondary)
+                        .accessibilityHidden(true)
+                }
+                .accessibilityAddTraits(.isHeader)
 
-                    Text(vm.connectionQuality)
+                if vm.status.connectionType != nil {
+                    Label(vm.connectionTypeDescription, systemImage: vm.status.connectionType?.iconName ?? "network")
                         .font(.subheadline)
-                        .foregroundColor(AppColors.textSecondary)
-
-                    if let coverage = vm.verdict?.coverage {
-                        CoverageLine(coverage: coverage)
-                    }
-
-                    // Connection type indicator
-                    HStack(spacing: 4) {
-                        Image(systemName: vm.status.connectionType?.iconName ?? "network")
-                            .font(.caption)
-                        Text(vm.connectionTypeDescription)
-                            .font(.caption)
-                    }
-                    .foregroundColor(AppColors.accent)
+                        .foregroundStyle(AppColors.textSecondary)
                 }
 
-                Spacer()
-            }
-        }
-    }
+                if let verdict = vm.verdict {
+                    if let score = verdict.score {
+                        Text("Connection quality \(score.value)/100 · \(score.band.word)")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(score.band.color)
+                    }
 
-    // MARK: - Simple Summary View (PART 2: Plain-English summary)
+                    if verdict.state == .degraded || verdict.state == .broken {
+                        Text(verdict.headline)
+                            .font(.subheadline)
+                            .foregroundStyle(AppColors.textSecondary)
+                    }
 
-    private var simpleSummaryView: some View {
-        let items = vm.generateSimpleSummary()
-
-        return CardView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("What's happening")
-                    .font(.headline)
-
-                ForEach(items) { item in
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(item.emoji)
-                            .font(.title3)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.title)
-                                .font(.subheadline.bold())
-                            Text(item.explanation)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                    DisclosureGroup("Check details") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if verdict.score == nil {
+                                Text("Connection quality score unavailable")
+                                    .font(.subheadline)
+                            }
+                            CoverageLine(coverage: verdict.coverage)
                         }
+                        .padding(.top, 6)
                     }
+                    .font(.subheadline)
+                } else if vm.status.measurementsPending {
+                    Text("Measuring connection quality…")
+                        .font(.subheadline)
+                        .foregroundStyle(AppColors.textSecondary)
+                } else if vm.status.measurementsIncomplete {
+                    Text("Some connection checks couldn’t finish.")
+                        .font(.subheadline)
+                        .foregroundStyle(AppColors.textSecondary)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -534,8 +497,8 @@ struct DashboardView: View {
                                   color: vm.isInitializing ? .secondary : AppColors.green)
 
                         if let text = m.latencyText {
-                            StatusRow(title: "Latency", value: text,
-                                      color: m.latencyMs.map { latencyColor($0) } ?? AppColors.yellow)
+                            StatusRow(title: "Network latency", value: text,
+                                      color: m.latencyMs.map { latencyColor($0) } ?? .secondary)
                         }
                         if let dns = m.dnsMs {
                             StatusRow(title: "DNS", value: "\(Int(dns))ms", color: dnsLatencyColor(dns))
@@ -595,7 +558,7 @@ struct DashboardView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("What is measured here")
                             .font(.headline)
-                        Text("Latency is a TCP handshake to a public resolver over the cellular path (\"Via VPN/proxy\" when a local tunnel answers it instead). DNS is a real lookup. Download, upload, packet loss and jitter come from the most recent speed test, shown only if it ran on this same connection in the last 10 minutes. Carrier name is not shown: iOS no longer provides it to apps.")
+                        Text("Network latency times a TCP connection to a test endpoint. A VPN or proxy can make that timing unreliable. DNS times a lookup. Throughput, packet loss and jitter use measurements from a speed test on this connection in the past 10 minutes.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -618,120 +581,33 @@ struct DashboardView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
     }
 
     // MARK: - Router Card (Diagnosis v2: no interpreter; live latency + MetricBands)
 
     private var routerCard: some View {
-        let vpnActive = SmartVPNDetector.shared.detectionResult?.isVPNActive ?? false
-
-        // Pre-compute health status values outside ViewBuilder.
-        // FIX (Issue 2): a real measured latency to the gateway is proof it's
-        // reachable — never label it "Unknown" / "Unreachable" in that case.
-        // FIX (Phase 2 / audit A2): when a live latency exists, derive the
-        // Status WORD from that magnitude — the same value shown in the Latency
-        // row and used for the colour — so the word, its colour, and the number
-        // can never contradict (previously this hard-coded "Excellent" for ANY
-        // live latency, producing "Status: Excellent" above "Latency: 95ms").
-        let liveGatewayLatency = vm.smoothedGatewayLatency ?? vm.status.router.displayableLatency
-        let routerHasLiveLatency = liveGatewayLatency != nil
-        let healthText: String = {
-            if let l = liveGatewayLatency {
-                return routerStatusWord(forLatency: l)
-            }
-            if vm.status.router.gatewayIP == nil {
-                return "Not applicable"
-            }
-            return vpnActive && !vm.status.router.isReachable && vm.status.vpn.vpnState.isLikelyOn
-                ? "Hidden by VPN"
-                : vm.status.router.health.displayName
-        }()
-        let healthColor: Color = {
-            if let l = liveGatewayLatency {
-                return latencyColor(l)
-            }
-            return routerStatusColor(vpnActive: vpnActive)
-        }()
+        let latency = vm.smoothedGatewayLatency ?? vm.status.router.displayableLatency
 
         return CardView {
             VStack(alignment: .leading, spacing: UIConstants.spacingM) {
-                // Title
-                HStack {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                        .font(.system(size: UIConstants.iconSizeM))
-                        .foregroundColor(AppColors.textSecondary)
-                    Text("Router")
-                        .font(.headline)
-                }
+                Label("Router", systemImage: "antenna.radiowaves.left.and.right")
+                    .font(.headline)
+                    .accessibilityIdentifier("home.router")
 
-                // Gateway
-                // FIX (Issue 2): use displayedGatewayIP — which falls back to the
-                // gateway derived from the local IP — so we never show "Unknown"
-                // alongside a successful latency reading to that very gateway.
-                if let gateway = vm.displayedGatewayIP {
-                    StatusRow(
-                        title: "Gateway",
-                        value: gateway,
-                        color: vm.isInitializing ? .secondary : routerStatusColor(vpnActive: vpnActive)
-                    )
+                StatusRow(title: "Gateway", value: vm.status.router.gatewayIP ?? "Unavailable", color: .secondary)
+
+                if let latency {
+                    StatusRow(title: "Response", value: "\(Int(latency)) ms", color: latencyColor(latency))
+                } else if vm.status.measurementsPending {
+                    StatusRow(title: "Status", value: "Checking router…", color: .secondary)
+                } else if vm.status.router.isReachable {
+                    StatusRow(title: "Status", value: "Responded", color: AppColors.green)
                 } else {
-                    let value = vm.isInitializing ? "Detecting..." : (vpnActive && vm.status.vpn.vpnState.isLikelyOn ? "Hidden by VPN" : "Not applicable")
-                    let color: Color = vm.isInitializing ? .secondary : (vpnActive ? AppColors.yellow : .gray)
-                    StatusRow(
-                        title: "Gateway",
-                        value: value,
-                        color: color
-                    )
-                }
-
-                // Health status - using pre-computed values
-                StatusRow(
-                    title: "Status",
-                    value: vm.isInitializing || vm.status.measurementsPending ? "Checking router…" : healthText,
-                    color: vm.isInitializing || vm.status.measurementsPending ? .secondary : healthColor
-                )
-
-                // Latency (use smoothed value, but never a sentinel)
-                // FIX (Issue 3): displayableLatency strips 999/sentinel timeouts.
-                if let latency = vm.smoothedGatewayLatency ?? vm.status.router.displayableLatency {
-                    StatusRow(
-                        title: "Latency",
-                        value: "\(Int(latency))ms",
-                        color: latencyColor(latency)
-                    )
-                }
-
-                // Warning text - use interpreter's detail for consistency
-                // FIX (Issue 2/6): suppress "Router may be unreachable" when we
-                // just measured a working latency to it, OR when the failure
-                // tracker hasn't seen a hard run of consecutive misses.
-                if vm.hasRouterProblem && !routerHasLiveLatency {
-                    if vpnActive && vm.status.vpn.vpnState.isLikelyOn {
-                        Text("ℹ️ Gateway unreachable while VPN active — this is normal")
-                            .font(.caption)
-                            .foregroundColor(AppColors.textSecondary)
-                            .padding(.top, 4)
-                    } else if !vpnActive {
-                        Text("⚠️ Router may be unreachable")
-                            .font(.caption)
-                            .foregroundColor(AppColors.red)
-                            .padding(.top, 4)
-                    }
+                    StatusRow(title: "Status", value: "Response unconfirmed", color: .secondary)
                 }
             }
         }
-    }
-
-    /// Router status color (PART 2: yellow when VPN hides it)
-    private func routerStatusColor(vpnActive: Bool) -> Color {
-        if !vm.status.router.isReachable {
-            return vpnActive ? AppColors.yellow : AppColors.red  // Yellow when VPN, red when broken
-        } else if let latency = vm.status.router.latency {
-            if latency > 100 { return AppColors.red }
-            else if latency > 30 { return AppColors.yellow }  // Use yellow instead of orange
-            else { return AppColors.green }
-        }
-        return vpnActive ? AppColors.yellow : AppColors.green
     }
 
     // MARK: - Internet Card (PART 1: Uses smoothed latency)
@@ -762,32 +638,14 @@ struct DashboardView: View {
                     .accessibilityLabel("How latency is measured")
                 }
 
-                // Connection status
-                StatusRow(
-                    title: "Status",
-                    value: vm.internetStatusText,
-                    color: vm.isInitializing || vm.status.measurementsPending || vm.status.measurementsIncomplete ? .secondary : (vm.isConnected ? AppColors.green : AppColors.red)
-                )
-
-                // PART 1: smoothed network-layer latency (single source of truth).
-                // PHASE 2: this is the TCP-handshake RTT, not the old HTTP timing.
-                // PHASE 2.1: when a local VPN/proxy intercepted the handshake the
-                // direct network RTT cannot be measured — show that honestly
-                // (neutral yellow, not red: it is not a fault) instead of the
-                // fabricated ~1-4ms stub value. Checked first so a stale smoothed
-                // value can't leak through (the buffer survives a VPN toggle).
-                if vm.latencyIntercepted {
-                    StatusRow(
-                        title: "Latency",
-                        value: "Probe uncertain",
-                        color: AppColors.yellow
-                    )
-                } else if let latency = vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal {
-                    StatusRow(
-                        title: "Latency",
-                        value: "\(Int(latency))ms",
-                        color: latencyColor(latency)
-                    )
+                if !ConnectionCards.showsCellularCard(vm.status) {
+                    let validLatency = vm.latencyIntercepted ? nil : (vm.smoothedInternetLatency ?? vm.status.internet.displayableLatency)
+                    StatusRow(title: "Network latency",
+                              value: ConnectionCards.internetLatencyText(status: vm.status, smoothedLatency: vm.smoothedInternetLatency),
+                              color: validLatency.map { latencyColor($0) } ?? .secondary)
+                }
+                if let response = vm.status.internet.httpRTT {
+                    StatusRow(title: "HTTPS response", value: "\(Int(response)) ms", color: .secondary)
                 }
 
                 // FIXED: Latency warning - attribute correctly based on VPN status
@@ -810,84 +668,25 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Internet Latency Info Sheet (PHASE 2)
-    // Honest, technical explanation of the two latency numbers so users
-    // understand what each measures and why they can differ.
-
     private var internetLatencyInfoSheet: some View {
-        // PHASE 2.1: when intercepted, the direct network RTT is unmeasurable —
-        // show "Probe uncertain" rather than a stale/fake number.
-        let intercepted = vm.latencyIntercepted
-        let primary = intercepted ? nil : (vm.smoothedInternetLatency ?? vm.status.internet.latencyToExternal)
-        let appResponse = vm.status.internet.httpRTT
-
-        return NavigationView {
+        NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: UIConstants.spacingL) {
-                    // Primary metric
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Latency")
-                                .font(.headline)
-                            Spacer()
-                            if intercepted {
-                                Text("Probe uncertain")
-                                    .font(.subheadline.bold())
-                                    .foregroundColor(AppColors.yellow)
-                            } else {
-                                Text(primary.map { "\(Int($0))ms" } ?? "—")
-                                    .font(.title3.bold().monospaced())
-                                    .foregroundColor(primary.map { latencyColor($0) } ?? .secondary)
-                            }
-                        }
-                        Text("Network round-trip time. Measured as a TCP handshake to a stable public resolver (Cloudflare 1.1.1.1, or a China-domestic resolver when applicable), dialled by IP. It contains no HTTP request, no TLS negotiation, and no DNS lookup — so it reflects the network path itself. This is the primary number shown on the card.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
+                    Text("Network latency")
+                        .font(.headline)
+                    Text(ConnectionCards.internetLatencyText(status: vm.status, smoothedLatency: vm.smoothedInternetLatency))
+                    Text(vm.latencyIntercepted
+                         ? "A VPN or proxy may have answered the TCP probe locally. Use HTTPS response time to compare web responsiveness on the current connection."
+                         : "This measures how long a TCP connection takes to open to a test endpoint.")
+                        .foregroundStyle(.secondary)
                     Divider()
-
-                    // Secondary metric
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("App response time")
-                                .font(.headline)
-                            Spacer()
-                            Text(appResponse.map { "\(Int($0))ms" } ?? "—")
-                                .font(.title3.bold().monospaced())
-                                .foregroundColor(.secondary)
-                        }
-                        Text("A full HTTPS request round-trip (apple.com). It includes the TCP handshake plus TLS negotiation and server processing, so it is normally higher than the network latency above. Shown here for reference only — it is never used as the primary latency.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
-                    Divider()
-
-                    Text("Why two numbers? The network latency tells you how fast packets reach the internet; the app response time tells you how long a typical secure web request takes end-to-end. A large gap usually means TLS/server overhead, not a slow network.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    // PHASE 2.1: third section — shown only while a local
-                    // VPN/proxy is intercepting the probe. Explains honestly why
-                    // the network latency is unmeasurable and which number still
-                    // reflects real performance.
-                    if intercepted {
-                        Divider()
-
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "lock.shield")
-                                    .foregroundColor(AppColors.yellow)
-                                Text("Why \"Via VPN/proxy\"?")
-                                    .font(.headline)
-                            }
-                            Text("A local VPN or proxy (V2BOX, Shadowrocket, Clash, etc.) answers the connection test on your device itself and opens the real connection in the background. Because the handshake never leaves the phone, the direct network latency cannot be measured while it is active — any number here would be the proxy's own ~1-2ms response, not your real network distance, so we don't show it.\n\nThe \"App response time\" above still reflects real end-to-end performance through the tunnel, because it waits for a full request to come back from the server.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
+                    Text("HTTPS response")
+                        .font(.headline)
+                    Text(vm.status.internet.httpRTT.map { "\(Int($0)) ms" } ?? "Unavailable")
+                    Text("This times an HTTPS request to a test endpoint. It can include connection setup, encryption, and server response time.")
+                        .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
             }
             .navigationTitle("About Latency")
@@ -898,9 +697,8 @@ struct DashboardView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
     }
-
-    // MARK: - VPN Card
 
     private var vpnCard: some View {
         CardView {
@@ -1105,20 +903,6 @@ struct DashboardView: View {
 
     // MARK: - Helper Computed Properties
 
-    /// PART 1: Use stableOverallHealth (with hysteresis) for status color
-    /// Ring colour from the verdict: the score's band when scored, else the state.
-    private var stableStatusColor: Color {
-        if vm.isInitializing { return .gray }
-        guard let v = vm.verdict else { return .gray }
-        if let s = v.score { return s.band.color }
-        switch v.state {
-        case .broken: return AppColors.red
-        case .degraded: return AppColors.yellow
-        case .working: return AppColors.green
-        case .unknown: return .gray
-        }
-    }
-
     private var wifiStatusColor: Color {
         if vm.isInitializing { return .secondary }
         // FIX (Issue 1): match wifiStatusText logic — a private LAN IP is also
@@ -1147,14 +931,6 @@ struct DashboardView: View {
 
     private func latencyColor(_ latency: Double) -> Color {
         NetworkColors.forLatency(latency)
-    }
-
-    /// Status word for a latency value, using the SAME band edges as
-    /// `latencyColor` (NetworkColors.forLatency) so the verdict word and its
-    /// colour always agree with the latency number on the card.
-    private func routerStatusWord(forLatency ms: Double) -> String {
-        // Diagnosis v2: ONE vocabulary — the router-delay band from MetricBands.
-        MetricBands.gatewayDelay(ms: ms).word
     }
 
     private func dnsLatencyColor(_ latency: Double) -> Color {

@@ -15,7 +15,7 @@ struct CellularCardModel: Equatable {
     let statusText: String
     /// nil = iOS reported no generation; no default is invented.
     let generation: String?
-    /// One of: measured ms, "Via VPN/proxy" (intercepted), or nil (not measured).
+    /// One of: measured ms or a measurement status.
     let latencyText: String?
     let latencyMs: Double?
     let dnsMs: Double?
@@ -40,6 +40,28 @@ enum ConnectionCards {
     /// The active path is cellular with no Wi-Fi association.
     static func isCellularOnly(_ status: NetworkStatus) -> Bool {
         status.connectionType == .cellular && !status.wifi.isConnected
+    }
+
+    static func showsRouterCard(_ status: NetworkStatus) -> Bool {
+        status.wifi.isConnected || status.connectionType == .wifi || status.connectionType == .wiredEthernet
+    }
+
+    static func internetHeadline(status: NetworkStatus, initializing: Bool) -> String {
+        if status.internet.isReachable { return "Internet connected" }
+        if initializing { return "Detecting connection…" }
+        if status.connectionType == nil { return "No network connection" }
+        if status.measurementsPending { return "Checking internet…" }
+        if status.measurementsIncomplete { return "Internet check incomplete" }
+        return "Internet access unconfirmed"
+    }
+
+    static func internetLatencyText(status: NetworkStatus, smoothedLatency: Double?) -> String {
+        if !status.internet.latencyIntercepted,
+           let latency = smoothedLatency ?? status.internet.displayableLatency {
+            return "\(Int(latency)) ms"
+        }
+        if status.measurementsPending { return "Measuring…" }
+        return "Unavailable"
     }
 
     /// Wi-Fi card: shown whenever Wi-Fi is associated (including dual-stack,
@@ -73,7 +95,7 @@ enum ConnectionCards {
 
         let intercepted = status.internet.latencyIntercepted
         let latency = intercepted ? nil : (smoothedLatency ?? status.internet.displayableLatency)
-        let latencyText: String? = intercepted ? "Via VPN/proxy" : latency.map { "\(Int($0))ms" }
+        let latencyText = internetLatencyText(status: status, smoothedLatency: smoothedLatency)
         let dns = smoothedDNS ?? status.dns.displayableLatency
 
         let vpnOn = status.vpn.isActive || status.vpn.vpnState.isLikelyOn

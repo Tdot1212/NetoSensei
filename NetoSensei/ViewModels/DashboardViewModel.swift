@@ -21,7 +21,7 @@ class DashboardViewModel: ObservableObject {
     /// Loading state
     @Published var isLoading: Bool = false
 
-    /// True until NetworkMonitorService completes its first real status update
+    /// True until the first system path has been received.
     @Published var isInitializing: Bool = true
 
     /// Last update timestamp
@@ -32,9 +32,6 @@ class DashboardViewModel: ObservableObject {
 
     /// ISP name
     @Published var ispName: String = ""
-
-    /// Connection quality rating
-    @Published var connectionQuality: String = ""
 
     /// Error state
     @Published var errorMessage: String?
@@ -96,6 +93,10 @@ class DashboardViewModel: ObservableObject {
     private let minRefreshInterval: TimeInterval = 60.0  // Changed from 3.0 to 60.0
     private var hasRefreshedOnLaunch = false
 
+    #if DEBUG
+    private let usesCellularTestStatus = ProcessInfo.processInfo.arguments.contains("-testCellularHome")
+    #endif
+
     // MARK: - Initialization
 
     init() {
@@ -103,6 +104,22 @@ class DashboardViewModel: ObservableObject {
         self.geoIPService = GeoIPService.shared
         self.historyManager = HistoryManager.shared
         self.stabilityMonitor = ConnectionStabilityMonitor.shared
+        #if DEBUG
+        if usesCellularTestStatus {
+            var snapshot = NetworkStatus.empty
+            snapshot.connectionType = .cellular
+            snapshot.internet.recordWebSuccess()
+            snapshot.internet.httpRTT = 162
+            snapshot.internet.latencyIntercepted = true
+            snapshot.dns.lookupSuccess = true
+            snapshot.dns.latency = 6
+            snapshot.vpn.vpnState = .probablyOn
+            isInitializing = false
+            status = snapshot
+            updateUIStatus()
+            return
+        }
+        #endif
         setupBindings()
     }
 
@@ -118,6 +135,10 @@ class DashboardViewModel: ObservableObject {
 
     /// Bind to service publishers
     private func setupBindings() {
+        status = networkMonitor.currentStatus
+        isInitializing = networkMonitor.isInitializing
+        updateUIStatus()
+
         // Observe network status changes
         // FIXED: Apply smoothing to prevent flip-flopping ratings
         networkMonitor.$currentStatus
@@ -146,7 +167,11 @@ class DashboardViewModel: ObservableObject {
 
         networkMonitor.$isInitializing
             .receive(on: DispatchQueue.main)
-            .assign(to: &$isInitializing)
+            .sink { [weak self] initializing in
+                self?.isInitializing = initializing
+                self?.updateUIStatus()
+            }
+            .store(in: &cancellables)
 
         // Observe GeoIP changes
         geoIPService.$currentGeoIP
@@ -226,6 +251,9 @@ class DashboardViewModel: ObservableObject {
 
     /// Refresh all network data (see RefreshTrigger for the policy).
     func refresh(trigger: RefreshTrigger) async {
+        #if DEBUG
+        if usesCellularTestStatus { return }
+        #endif
         let decision = Self.refreshDecision(trigger: trigger,
                                             inFlight: inFlightRefresh != nil,
                                             hasRefreshedOnLaunch: hasRefreshedOnLaunch,
@@ -297,9 +325,7 @@ class DashboardViewModel: ObservableObject {
     // MARK: - Diagnosis v2: the ONE verdict
 
     /// Compose the verdict from the monitor's status, the probe failure
-    /// streaks and the latest same-network speed test, then derive the status
-    /// line from it. This replaces the dashboard's own health rubric, the
-    /// diagnostic-root-cause string logic and the interpreter summary.
+    /// streaks and the latest same-network speed test.
     func updateUIStatus() {
         guard !isUpdatingUIStatus else {
             debugLog("🔄 updateUIStatus skipped - already in progress")
@@ -310,50 +336,12 @@ class DashboardViewModel: ObservableObject {
 
         if isInitializing || status.measurementsPending || status.measurementsIncomplete {
             verdict = nil
-            connectionQuality = "Detecting..."
             return
         }
 
         let v = VerdictInputs.currentVerdict(status: status)
         verdict = v
-        connectionQuality = v.headline
     }
-
-    struct SimpleSummaryItem: Hashable, Identifiable {
-        let id = UUID()
-        let emoji: String
-        let title: String
-        let explanation: String
-    }
-
-    /// "What's happening": the verdict headline with its coverage line, then
-    /// the top findings — what's wrong, and which action category applies.
-    func generateSimpleSummary() -> [SimpleSummaryItem] {
-        guard let v = verdict else {
-            return [SimpleSummaryItem(emoji: "⏳", title: "Checking your connection…", explanation: "Results appear after the first checks complete.")]
-        }
-        var items: [SimpleSummaryItem] = []
-        let stateEmoji: String
-        switch v.state {
-        case .working: stateEmoji = "✅"
-        case .degraded: stateEmoji = "⚠️"
-        case .broken: stateEmoji = "🔴"
-        case .unknown: stateEmoji = "❔"
-        }
-        items.append(SimpleSummaryItem(emoji: stateEmoji, title: v.headline, explanation: v.coverage.line))
-        for f in v.findings.filter({ $0.headline != v.headline }).prefix(2) {
-            let emoji: String
-            switch f.action {
-            case .userFixable: emoji = "🔧"
-            case .fixableElsewhere: emoji = "🏢"
-            case .notFixable: emoji = "ℹ️"
-            case .none: emoji = "💬"
-            }
-            items.append(SimpleSummaryItem(emoji: emoji, title: f.headline, explanation: "\(f.action.categoryWord). \(f.cause)"))
-        }
-        return items
-    }
-
 
     /// Start monitoring network status
     func startMonitoring() {
@@ -438,16 +426,8 @@ class DashboardViewModel: ObservableObject {
         return "VPN/Proxy Detected (inferred)"
     }
 
-    /// Internet status text
-    /// FIX (Phase 2): The card previously embedded a RAW latency here
-    /// ("Connected (98ms)") while the Latency row below showed the SMOOTHED
-    /// value ("Latency 342ms") — two contradictory numbers on one card.
-    /// The status now states connectivity only; the single, smoothed,
-    /// network-layer latency is shown once in the dedicated "Latency" row.
     var internetStatusText: String {
-        if isInitializing || status.measurementsPending { return "Checking internet…" }
-        if status.measurementsIncomplete && !status.internet.isReachable { return "Internet check incomplete" }
-        return status.internet.isReachable ? "Connected" : "No Internet"
+        ConnectionCards.internetHeadline(status: status, initializing: isInitializing)
     }
 
     /// Signal strength description
@@ -487,49 +467,6 @@ class DashboardViewModel: ObservableObject {
         return "Unknown"
     }
 
-    /// Gateway reachability warning
-    /// STEP 4 Requirement: "If gateway unreachable → flag router problem"
-    /// FIX (Issue 2/6): a successfully measured gateway latency is proof of
-    /// reachability. Don't flag "router problem" just because the gatewayIP
-    /// field is momentarily nil (e.g. a timeout cleared it) while the smoothed
-    /// latency keeps showing a healthy reading.
-    var hasRouterProblem: Bool {
-        // If we have a measured (non-sentinel) latency to the gateway — even
-        // smoothed from prior polls — the router is reachable.
-        if status.router.displayableLatency != nil { return false }
-        if smoothedGatewayLatency != nil { return false }
-        // Use the hard-failure tracker to require multiple consecutive misses.
-        if MeasurementValidityTracker.shared.gatewayHasHardFailure { return true }
-        // Otherwise be conservative — only flag if router.health says .poor
-        // (don't flag merely because gatewayIP is nil — we may still be probing).
-        return status.router.health == .poor
-    }
-
-    /// Gateway IP to display. Falls back to:
-    ///   1. router.gatewayIP if present
-    ///   2. derived gateway from local IP (we know we measured to it)
-    /// FIX (Issue 2): never display "Unknown" when we just successfully
-    /// measured a latency to the gateway.
-    var displayedGatewayIP: String? {
-        if let gw = status.router.gatewayIP { return gw }
-        // Derive from local IP — same logic NetworkMonitorService uses.
-        guard let localIP = status.localIP else { return nil }
-        if localIP.hasPrefix("192.168.") {
-            let parts = localIP.split(separator: ".")
-            guard parts.count == 4 else { return nil }
-            return "192.168.\(parts[2]).1"
-        }
-        if localIP.hasPrefix("10.") {
-            return "10.0.0.1"
-        }
-        if localIP.hasPrefix("172.") {
-            let parts = localIP.split(separator: ".")
-            guard parts.count >= 2 else { return nil }
-            return "172.\(parts[1]).0.1"
-        }
-        return nil
-    }
-
     /// DNS warning
     /// STEP 4 Requirement: "If DNS slow → show warning"
     var hasDNSWarning: Bool {
@@ -540,7 +477,7 @@ class DashboardViewModel: ObservableObject {
     }
 
     /// True when a local TUN-mode proxy/VPN intercepted the latency probe, so
-    /// the dashboard must show "Via VPN/proxy" instead of a fabricated number.
+    /// the dashboard omits that timing from the displayed network latency.
     /// See LatencyInterception / InternetInfo.latencyIntercepted.
     var latencyIntercepted: Bool {
         status.internet.latencyIntercepted

@@ -166,12 +166,12 @@ class NetworkMonitorService: ObservableObject {
         var status = NetworkStatus.empty
         guard path.status == .satisfied else { return status }
         let interface = getCurrentInterface()
-        status.connectionType = interface
+        status.connectionType = interface ?? .other
         status.localIP = getLocalIP()
         status.isIPv4Enabled = path.supportsIPv4
         status.isIPv6Enabled = path.supportsIPv6
         status.wifi = WiFiInfo(isConnected: interface == .wifi || pathHasWiFiAvailable(path) || hasIPOnInterface(named: "en0"))
-        status.router.gatewayIP = estimateGateway()
+        if ConnectionCards.showsRouterCard(status) { status.router.gatewayIP = estimateGateway() }
         status.measurementsPending = true
         return status
     }
@@ -197,18 +197,23 @@ class NetworkMonitorService: ObservableObject {
     }
 
     private enum Reading {
-        case wifi(WiFiInfo), router(RouterInfo), internet(InternetInfo), dns(DNSInfo), vpn(VPNInfo)
+        case wifi(WiFiInfo), router(RouterInfo), internet(InternetInfo), web(Bool), dns(DNSInfo), vpn(VPNInfo)
         case deadline
     }
 
     private func readStatus(generation: Int) async {
         guard let path = currentPath else { return }
-        let timeout: Duration = path.usesInterfaceType(.cellular) ? .seconds(5) : .seconds(8)
+        let onCellular = path.usesInterfaceType(.cellular)
+        let timeout: Duration = onCellular ? .seconds(5) : .seconds(8)
+        let probeTimeout: TimeInterval = onCellular ? 2 : 3
         var snapshot = localSnapshot(path: path)
         await withTaskGroup(of: Reading.self) { group in
             group.addTask { .wifi(await self.getWiFi()) }
             group.addTask { .router(await self.getRouter()) }
-            group.addTask { .internet(await self.getInternet()) }
+            group.addTask { .internet(await self.getInternet(timeout: probeTimeout)) }
+            group.addTask {
+                .web(await self.safeHTTPCheck(url: "https://www.apple.com/library/test/success.html", timeout: probeTimeout))
+            }
             group.addTask { .dns(await self.getDNS()) }
             group.addTask { .vpn(await VPNEngine.shared.getVPNInfo()) }
             group.addTask {
@@ -216,6 +221,7 @@ class NetworkMonitorService: ObservableObject {
                 return .deadline
             }
 
+            let expectedReadings = 6
             var completed = 0
             for await reading in group {
                 guard generation == pathGeneration, !Task.isCancelled else {
@@ -225,16 +231,20 @@ class NetworkMonitorService: ObservableObject {
                 switch reading {
                 case .wifi(let value): snapshot.wifi = value
                 case .router(let value): snapshot.router = value
-                case .internet(let value): snapshot.internet = value
+                case .internet(var value):
+                    if snapshot.internet.httpTestSuccess { value.recordWebSuccess() }
+                    snapshot.internet = value
+                case .web(let succeeded):
+                    if succeeded { snapshot.internet.recordWebSuccess() }
                 case .dns(let value): snapshot.dns = value
                 case .vpn(let value): snapshot.vpn = value
                 case .deadline:
-                    completed = 4
+                    completed = expectedReadings - 1
                     snapshot.measurementsIncomplete = true
                 }
                 completed += 1
                 snapshot.timestamp = Date()
-                let finished = completed == 5
+                let finished = completed == expectedReadings
                 snapshot.measurementsPending = !finished
                 // On a same-path refresh, keep the prior readings visible
                 // until the replacement is ready.
@@ -488,11 +498,7 @@ class NetworkMonitorService: ObservableObject {
 
     // MARK: - Internet Check (iOS-safe, China-aware)
 
-    nonisolated private func getInternet() async -> InternetInfo {
-        let path = currentPath
-        let isCellular = path?.usesInterfaceType(NWInterface.InterfaceType.cellular) ?? false
-        let timeout: TimeInterval = isCellular ? 2.0 : 3.0
-
+    nonisolated private func getInternet(timeout: TimeInterval) async -> InternetInfo {
         // FIXED: China-aware latency target
         // If user is in China without VPN, ping domestic servers for meaningful latency
         // Otherwise use Cloudflare (works globally, including through VPN)
@@ -521,10 +527,9 @@ class NetworkMonitorService: ObservableObject {
         async let gatewayRef = measureGatewayReferenceRTT()
         // SECONDARY: full HTTPS round-trip — kept as "App response time" + used
         // for the reachability verdict.
-        async let test1 = safeHTTPCheck(url: "https://www.apple.com/library/test/success.html", timeout: timeout)
-        async let test2 = safePing(host: pingHost, timeout: timeout)
+        async let httpsResponse = safePing(host: pingHost, timeout: timeout)
 
-        let (primaryLatencySec, gatewayRefMs, httpOk, pingResult) = await (primary, gatewayRef, test1, test2)
+        let (primaryLatencySec, gatewayRefMs, pingResult) = await (primary, gatewayRef, httpsResponse)
         let measuredExternalMs = primaryLatencySec.map { $0 * 1000.0 }
         let httpRTTms = pingResult.1
 
@@ -532,8 +537,8 @@ class NetworkMonitorService: ObservableObject {
         // latencyToExternal = nil (never the fake number) and raise the flag —
         // every numeric consumer already excludes nil, so the fabricated value
         // enters no smoothing buffer, health score, quality verdict or trend.
-        // Reachability stays honest: the connection DID succeed (through the
-        // proxy), we just don't trust its timing.
+        // A local handshake cannot establish remote reachability. Preserve
+        // independent HTTPS evidence even when the TCP timing is discarded.
         var intercepted = false
         var honestLatencyMs = measuredExternalMs
         if let ext = measuredExternalMs {
@@ -550,12 +555,12 @@ class NetworkMonitorService: ObservableObject {
         }
 
         return InternetInfo(
-            isReachable: httpOk || pingResult.0 || measuredExternalMs != nil,
-            externalPingSuccess: pingResult.0 || measuredExternalMs != nil,
+            isReachable: pingResult.0 || honestLatencyMs != nil,
+            externalPingSuccess: pingResult.0 || honestLatencyMs != nil,
             // PRIMARY only — never fall back to HTTP RTT here (no silent mixing).
             latencyToExternal: honestLatencyMs,
-            httpTestSuccess: httpOk,
-            cdnReachable: httpOk,
+            httpTestSuccess: false,
+            cdnReachable: false,
             httpRTT: httpRTTms,
             latencyIntercepted: intercepted
         )
@@ -718,7 +723,8 @@ class NetworkMonitorService: ObservableObject {
             return try await withThrowingTaskGroup(of: Bool.self) { group in
                 group.addTask {
                     guard let url = URL(string: url) else { return false }
-                    let (_, response) = try await URLSession.shared.data(from: url)
+                    let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+                    let (_, response) = try await URLSession.shared.data(for: request)
                     return (response as? HTTPURLResponse)?.statusCode == 200
                 }
 

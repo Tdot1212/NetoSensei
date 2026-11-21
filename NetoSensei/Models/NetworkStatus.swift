@@ -168,10 +168,16 @@ struct InternetInfo {
 
     /// True when a local TUN-mode proxy/VPN intercepted the external handshake
     /// on-device, so `latencyToExternal` is deliberately nil (the fake ~1-4ms
-    /// stub RTT is never stored). The UI shows "Via VPN/proxy" instead of a
+    /// stub RTT is never stored). The UI shows an unavailable result instead of a
     /// number; every numeric consumer already excludes nil automatically.
     /// See LatencyInterception. Defaulted so existing initializers compile.
     var latencyIntercepted: Bool = false
+
+    mutating func recordWebSuccess() {
+        isReachable = true
+        httpTestSuccess = true
+        cdnReachable = true
+    }
 
     /// Latency that is safe to display (no sentinels).
     var displayableLatency: Double? {

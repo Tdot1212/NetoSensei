@@ -10,36 +10,50 @@ import SwiftUI
 
 /// A row showing a status with title, value, and colored dot
 struct StatusRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var title: String
     var value: String
     var color: Color
     var icon: String? = nil
 
     var body: some View {
-        HStack(alignment: .center, spacing: UIConstants.spacingM) {
-            // Icon (optional)
-            if let iconName = icon {
-                Image(systemName: iconName)
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 4) {
+                titleLabel
+                HStack {
+                    valueLabel
+                    StatusDot(color: color)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            HStack(spacing: UIConstants.spacingM) {
+                titleLabel
+                Spacer()
+                valueLabel
+                StatusDot(color: color)
+            }
+        }
+    }
+
+    private var titleLabel: some View {
+        HStack(spacing: UIConstants.spacingM) {
+            if let icon {
+                Image(systemName: icon)
                     .font(.system(size: UIConstants.iconSizeM))
-                    .foregroundColor(AppColors.textSecondary)
                     .frame(width: UIConstants.iconSizeM)
             }
-
-            // Title
             Text(title)
                 .font(.subheadline)
-                .foregroundColor(AppColors.textSecondary)
-
-            Spacer()
-
-            // Value
-            Text(value)
-                .font(.body.bold())
-                .foregroundColor(AppColors.textPrimary)
-
-            // Status dot
-            StatusDot(color: color)
         }
+        .foregroundStyle(AppColors.textSecondary)
+    }
+
+    private var valueLabel: some View {
+        Text(value)
+            .font(.body.bold())
+            .foregroundStyle(AppColors.textPrimary)
     }
 }
 

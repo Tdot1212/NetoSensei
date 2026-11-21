@@ -108,5 +108,6 @@ struct SettingsView: View {
                 InAppBrowserView(url: wrapped.url)
             }
         }
+        .navigationViewStyle(.stack)
     }
 }

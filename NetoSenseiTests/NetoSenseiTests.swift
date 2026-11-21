@@ -1230,6 +1230,23 @@ struct CellularCardTests {
         #expect(ConnectionCards.showsWiFiCard(Self.status(type: nil, wifi: false)))
     }
 
+    @Test func internetStateKeepsReachabilityIndependentOfMissingLatency() {
+        var cellular = Self.status(type: .cellular, wifi: false, latency: nil, intercepted: true)
+        cellular.internet.isReachable = false
+        cellular.measurementsPending = true
+        #expect(ConnectionCards.internetHeadline(status: cellular, initializing: false) == "Checking internet…")
+        cellular.internet.recordWebSuccess()
+        #expect(ConnectionCards.internetHeadline(status: cellular, initializing: false) == "Internet connected")
+        cellular.measurementsPending = false
+        #expect(ConnectionCards.internetHeadline(status: cellular, initializing: false) == "Internet connected")
+        #expect(ConnectionCards.internetLatencyText(status: cellular, smoothedLatency: 2) == "Unavailable")
+        #expect(!ConnectionCards.showsRouterCard(cellular))
+        #expect(ConnectionCards.showsRouterCard(Self.status(type: .cellular, wifi: true)))
+        #expect(ConnectionCards.showsRouterCard(Self.status(type: .wifi, wifi: true)))
+        #expect(ConnectionCards.internetHeadline(status: .empty, initializing: true) == "Detecting connection…")
+        #expect(ConnectionCards.internetHeadline(status: .empty, initializing: false) == "No network connection")
+    }
+
     @Test func cellularCard_statesConnectionPositively_withGenerationOnlyWhenKnown() {
         let s = Self.status(type: .cellular, wifi: false)
         let known = ConnectionCards.cellularCard(status: s, generation: "5G", smoothedLatency: nil, smoothedDNS: nil, recentSpeedTest: nil, publicCountry: "CN")
@@ -1242,12 +1259,12 @@ struct CellularCardTests {
     @Test func cellularCard_carriesTheExistingMeasurements_andInterception() {
         let s = Self.status(type: .cellular, wifi: false, latency: 48, dns: 30)
         let m = ConnectionCards.cellularCard(status: s, generation: "LTE", smoothedLatency: 52, smoothedDNS: nil, recentSpeedTest: nil, publicCountry: "CN")
-        #expect(m?.latencyText == "52ms" && m?.latencyMs == 52)      // smoothed value preferred
+        #expect(m?.latencyText == "52 ms" && m?.latencyMs == 52)      // smoothed value preferred
         #expect(m?.dnsMs == 30)
         #expect(m?.downloadMbps == nil)                              // no speed test → no invented throughput
         let intercepted = ConnectionCards.cellularCard(status: Self.status(type: .cellular, wifi: false, latency: nil, intercepted: true),
                                                        generation: "LTE", smoothedLatency: 3, smoothedDNS: nil, recentSpeedTest: nil, publicCountry: "CN")
-        #expect(intercepted?.latencyText == "Via VPN/proxy" && intercepted?.latencyMs == nil)   // stale smoothed value never leaks
+        #expect(intercepted?.latencyText == "Unavailable" && intercepted?.latencyMs == nil)   // stale smoothed value never leaks
     }
 
     @Test func cellularCard_usesSpeedTest_onlyIfFreshAndSameSegment() {

@@ -119,12 +119,12 @@ struct NetworkHistoryView: View {
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
+                    .accessibilityLabel("History actions")
                 }
             }
-            .confirmationDialog(
+            .alert(
                 deleteKeepBookmarked ? "Delete all except bookmarked entries?" : "Delete all history?",
-                isPresented: $showingDeleteConfirm,
-                titleVisibility: .visible
+                isPresented: $showingDeleteConfirm
             ) {
                 Button(deleteKeepBookmarked ? "Delete Unbookmarked" : "Delete All", role: .destructive) {
                     historyManager.clearHistory(keepBookmarked: deleteKeepBookmarked)
@@ -135,6 +135,7 @@ struct NetworkHistoryView: View {
                 ShareSheet(activityItems: [exportCSVContent])
             }
         }
+        .navigationViewStyle(.stack)
     }
 
     // MARK: - Network Filter Chips

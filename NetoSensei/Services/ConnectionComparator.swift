@@ -9,7 +9,7 @@
 
 import Foundation
 import Network
-import CoreTelephony
+import Combine
 
 // MARK: - Data Models
 
@@ -162,7 +162,9 @@ class ConnectionComparator: ObservableObject {
     nonisolated static let manualToggleError = "MANUAL_TOGGLE_REQUIRED"
 
     private init() {
-        updateCellularInfo()
+        CellularRadioInfo.shared.$generation
+            .map { CellularInfo(carrierName: nil, radioTechnology: $0) }
+            .assign(to: &$cellularInfo)
     }
 
     // MARK: - Run Comparison
@@ -482,16 +484,5 @@ class ConnectionComparator: ObservableObject {
                 suggestedConnection: .cellular
             )
         }
-    }
-
-    // MARK: - Cellular Info
-
-    /// Commit 9: radio generation comes from CellularRadioInfo (current API,
-    /// change-notified). Carrier name is NOT read — CTCarrier is deprecated
-    /// with no replacement and returns "--" on modern iOS; a placeholder would
-    /// be a fabrication.
-    private func updateCellularInfo() {
-        CellularRadioInfo.shared.refresh()
-        cellularInfo = CellularInfo(carrierName: nil, radioTechnology: CellularRadioInfo.shared.generation)
     }
 }

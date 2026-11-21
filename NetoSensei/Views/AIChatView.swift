@@ -9,6 +9,7 @@
 import SwiftUI
 
 struct AIChatView: View {
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var chatService = AIChatService.shared
     @StateObject private var preflight = AIPreflightCollector.shared
     @StateObject private var keyManager = AIKeyManager.shared
@@ -51,16 +52,20 @@ struct AIChatView: View {
                             Button(action: { showSessions = true }) {
                                 Image(systemName: "clock.arrow.circlepath")
                             }
+                            .accessibilityLabel("Chat history")
                         }
                         if !messages.isEmpty {
                             Button("New") { newChat() }
                         }
                     }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button(action: { showSettings = true }) {
                         Image(systemName: "gearshape")
                     }
+                    .accessibilityLabel("AI settings")
+
+                    Button("Done") { dismiss() }
                 }
             }
             .sheet(isPresented: $showSettings) {

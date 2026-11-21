@@ -11,6 +11,7 @@ import SwiftUI
 // MARK: - Device History View
 
 struct DeviceHistoryView: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject private var historyManager = DeviceHistoryManager.shared
     @ObservedObject private var discovery = NetworkDeviceDiscovery.shared
 
@@ -82,30 +83,33 @@ struct DeviceHistoryView: View {
                             }
                         }
                     }
+                    .accessibilityLabel("Network alerts")
                 }
 
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack(spacing: 12) {
-                        Button(action: {
-                            Task { await discovery.scanNetwork() }
-                        }) {
-                            if discovery.isScanning {
-                                ProgressView()
-                                    .frame(width: 16, height: 16)
-                            } else {
-                                Image(systemName: "arrow.clockwise")
-                            }
-                        }
-                        .disabled(discovery.isScanning)
-
-                        Menu {
-                            Button(role: .destructive, action: { showingClearConfirmation = true }) {
-                                Label("Clear All History", systemImage: "trash")
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button(action: {
+                        Task { await discovery.scanNetwork() }
+                    }) {
+                        if discovery.isScanning {
+                            ProgressView()
+                                .frame(width: 16, height: 16)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
                         }
                     }
+                    .disabled(discovery.isScanning)
+                    .accessibilityLabel("Refresh devices")
+
+                    Menu {
+                        Button(role: .destructive, action: { showingClearConfirmation = true }) {
+                            Label("Clear All History", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("Device history actions")
+
+                    Button("Done") { dismiss() }
                 }
             }
             .sheet(isPresented: $showingAlerts) {

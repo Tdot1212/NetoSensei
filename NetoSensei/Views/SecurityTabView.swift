@@ -14,26 +14,25 @@ struct SecurityTabView: View {
     @StateObject private var privacyService = PrivacyShieldService.shared
     @ObservedObject private var vpnDetector = SmartVPNDetector.shared
 
-    // FIX: WiFi Safety + VPN Leak buttons replaced by a single
-    // "Run Full Security Check" entry. Old standalone sheets are kept in the
-    // codebase but no longer have an entry point on this tab.
-    @State private var showingFullSecurityCheck = false
-    @State private var showingPortScanner = false
-    @State private var showingDeviceHistory = false
-    @State private var showingDeviceAssistant = false
-    @State private var showingUniFi = false
+    private enum Tool: Identifiable {
+        case fullCheck, portScanner, deviceHistory, deviceAssistant, uniFi
+        var id: Self { self }
+    }
+
+    @State private var tool: Tool?
 
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
                     Button {
-                        showingFullSecurityCheck = true
+                        tool = .fullCheck
                     } label: {
                         Label("Check security and get next steps", systemImage: "checkmark.shield")
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .buttonStyle(.borderedProminent)
+                    deviceTools
                     privacyShieldSection
 
                     // Section 2: Exposure Check
@@ -51,25 +50,7 @@ struct SecurityTabView: View {
                     // Device Count on Network — Port Scanner moved here as a
                     // secondary action ("Scan ports on these devices →")
                     // because port-scanning targets these LAN devices.
-                    DeviceCountCard(onScanPorts: { showingPortScanner = true })
-                    Button {
-                        showingDeviceAssistant = true
-                    } label: {
-                        Label("Match and save device names", systemImage: "person.text.rectangle")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button {
-                        showingUniFi = true
-                    } label: {
-                        Label("View UniFi connected clients", systemImage: "wifi.router")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.bordered)
-
-                    // Section 3: Security Tools
-                    securityToolsSection
+                    DeviceCountCard(onScanPorts: { tool = .portScanner })
                 }
                 .padding()
             }
@@ -87,26 +68,23 @@ struct SecurityTabView: View {
                     .disabled(privacyService.isCheckingPrivacy)
                 }
             }
-            // Combined check sheet — replaces the two old standalone sheets.
-            .sheet(isPresented: $showingUniFi) { UniFiClientsView() }
-            .sheet(isPresented: $showingDeviceAssistant) {
-                WiFiAssistantView(guide: .security)
-            }
-            .sheet(isPresented: $showingFullSecurityCheck) {
-                CombinedSecurityCheckSheet()
-            }
-            .sheet(isPresented: $showingPortScanner) {
-                NavigationView {
-                    PortScanView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarTrailing) {
-                                Button("Done") { showingPortScanner = false }
+            .sheet(item: $tool) { tool in
+                switch tool {
+                case .uniFi: UniFiClientsView()
+                case .deviceAssistant: WiFiAssistantView(guide: .security)
+                case .fullCheck: CombinedSecurityCheckSheet()
+                case .portScanner:
+                    NavigationView {
+                        PortScanView()
+                            .toolbar {
+                                ToolbarItem(placement: .navigationBarTrailing) {
+                                    Button("Done") { self.tool = nil }
+                                }
                             }
-                        }
+                    }
+                    .navigationViewStyle(.stack)
+                case .deviceHistory: DeviceHistoryView()
                 }
-            }
-            .sheet(isPresented: $showingDeviceHistory) {
-                DeviceHistoryView()
             }
             .task {
                 // Check privacy on first appear (only if no cached result)
@@ -346,45 +324,33 @@ struct SecurityTabView: View {
         }
     }
 
-    // MARK: - Section 3: Network Activity
-    // Renamed from "Security Tools". The four old buttons have been
-    // consolidated:
-    //   • "Is This WiFi Safe?" + "VPN Leak Test"  →  single
-    //     "Run Full Security Check" (CombinedSecurityCheckSheet)
-    //   • "Port Scanner"  →  moved into the Devices on Network card as a
-    //     secondary action.
-    //   • "Device History"  →  unchanged, lives here under the renamed
-    //     section.
-
-    private var securityToolsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Network Activity")
-                .font(.headline)
-                .padding(.leading, 4)
-
-            VStack(spacing: 12) {
-                // Combined WiFi Safety + VPN Leak check
-                SecurityToolButton(
-                    icon: "shield.lefthalf.filled.badge.checkmark",
-                    title: "Run Full Security Check",
-                    subtitle: "Connection and certificate checks with next steps",
-                    duration: "~20s",
-                    isLoading: privacyService.isCheckingWiFi || privacyService.isRunningLeakTest
-                ) {
-                    showingFullSecurityCheck = true
+    private var deviceTools: some View {
+        CardView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Network devices")
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                Button {
+                    tool = .deviceAssistant
+                } label: {
+                    Label("Match and save device names", systemImage: "person.text.rectangle")
                 }
-
-                // Device History (passive viewer, not a test)
-                SecurityToolButton(
-                    icon: "desktopcomputer",
-                    title: "Device History",
-                    subtitle: "Track all devices seen on your network",
-                    duration: "",
-                    isLoading: false
-                ) {
-                    showingDeviceHistory = true
+                .accessibilityIdentifier("security.deviceAssistant")
+                Button {
+                    tool = .uniFi
+                } label: {
+                    Label("View UniFi connected clients", systemImage: "wifi.router")
                 }
+                .accessibilityIdentifier("security.uniFi")
+                Button {
+                    tool = .deviceHistory
+                } label: {
+                    Label("Device History", systemImage: "clock.arrow.circlepath")
+                }
+                .accessibilityIdentifier("security.deviceHistory")
             }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -407,57 +373,6 @@ struct SecurityTabView: View {
         case .exposed:
             return "One or more checks could not complete successfully. Review the endpoint evidence; the cause may be a connection failure."
         }
-    }
-}
-
-// MARK: - Security Tool Button
-
-struct SecurityToolButton: View {
-    let icon: String
-    let title: String
-    let subtitle: String
-    let duration: String
-    let isLoading: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack {
-                if isLoading {
-                    ProgressView()
-                        .frame(width: 24, height: 24)
-                } else {
-                    Image(systemName: icon)
-                        .font(.title2)
-                        .foregroundColor(.blue)
-                        .frame(width: 24)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.subheadline.bold())
-                        .foregroundColor(.primary)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                Text(duration)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-            .background(Color(UIColor.secondarySystemGroupedBackground))
-            .cornerRadius(12)
-        }
-        .buttonStyle(.plain)
-        .disabled(isLoading)
     }
 }
 

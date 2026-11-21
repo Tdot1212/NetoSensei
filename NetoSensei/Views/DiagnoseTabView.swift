@@ -39,6 +39,7 @@ struct DiagnoseTabView: View {
             }
             .sheet(isPresented: $showingWiFiAssistant) { WiFiAssistantView() }
         }
+        .navigationViewStyle(.stack)
     }
 
     private var connectionSnapshot: some View {
@@ -89,6 +90,13 @@ struct DiagnoseTabView: View {
                     ProgressView(value: Double(diagnosis.results.count), total: Double(FullDiagnosticViewModel.Check.allCases.count))
                     Text("\(diagnosis.results.count) of \(FullDiagnosticViewModel.Check.allCases.count) checks finished")
                         .font(.subheadline).foregroundStyle(.secondary)
+                    if diagnosis.running.contains(.speed) {
+                        DiagnosticSpeedProgress()
+                    } else if diagnosis.running.contains(.endpointSpeeds) {
+                        note("Measuring download speed against individual endpoints…")
+                    } else if diagnosis.running.contains(.comparison) {
+                        note("Checking which connections can be compared…")
+                    }
                     Button("Stop checks", role: .cancel) { diagnosis.cancel() }
                         .buttonStyle(.bordered)
                 } else {
@@ -233,5 +241,26 @@ struct DiagnoseTabView: View {
 
     private func ms(_ value: Double?) -> String {
         value.map { String(format: "%.0f ms", $0) } ?? "Unavailable"
+    }
+}
+
+
+private struct DiagnosticSpeedProgress: View {
+    @ObservedObject private var speed = SpeedTestEngine.shared
+
+    var body: some View {
+        Text(phaseDescription)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+    }
+
+    private var phaseDescription: String {
+        switch speed.currentPhase {
+        case .idle, .findingServer: return "Finding a speed test server…"
+        case .testingPing: return "Measuring latency and idle responsiveness…"
+        case .testingDownload: return "Measuring download speed…"
+        case .testingUpload: return "Measuring upload speed…"
+        case .complete: return "Saving speed readings…"
+        }
     }
 }
