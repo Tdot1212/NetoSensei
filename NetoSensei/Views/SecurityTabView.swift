@@ -16,7 +16,7 @@ struct SecurityTabView: View {
     @ObservedObject private var network = NetworkMonitorService.shared
 
     private enum Tool: Identifiable {
-        case fullCheck, portScanner, deviceHistory, deviceAssistant, uniFi, verifyDNS, verifyIPv6
+        case fullCheck, portScanner, deviceHistory, deviceAssistant, uniFi, verifyDNS, verifyIPv6, investigate
         var id: Self { self }
     }
 
@@ -85,6 +85,7 @@ struct SecurityTabView: View {
                 case .deviceHistory: DeviceHistoryView()
                 case .verifyDNS: PrivacyVerificationView(topic: .dns)
                 case .verifyIPv6: PrivacyVerificationView(topic: .ipv6)
+                case .investigate: ConnectionInvestigationView(topic: .privacy)
                 }
             }
             .task {
@@ -374,6 +375,11 @@ struct SecurityTabView: View {
                 .controlSize(.large)
                 verificationButton(.dns, location: "shortcut")
                 verificationButton(.ipv6, location: "shortcut")
+                Button("Investigate privacy or security", systemImage: "arrow.triangle.branch") {
+                    tool = .investigate
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("investigation.openSecurity")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

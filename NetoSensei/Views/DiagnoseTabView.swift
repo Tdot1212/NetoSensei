@@ -5,6 +5,7 @@ struct DiagnoseTabView: View {
     @ObservedObject private var monitor = NetworkMonitorService.shared
     @State private var host = "www.apple.com"
     @State private var showingWiFiAssistant = false
+    @State private var showingInvestigation = false
     @FocusState private var editingHost: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -41,6 +42,7 @@ struct DiagnoseTabView: View {
                 }
             }
             .sheet(isPresented: $showingWiFiAssistant) { WiFiAssistantView() }
+            .sheet(isPresented: $showingInvestigation) { ConnectionInvestigationView(topic: .connection, host: host) }
         }
         .navigationViewStyle(.stack)
     }
@@ -127,6 +129,12 @@ struct DiagnoseTabView: View {
                     .disabled(monitor.isInitializing)
                     Text("Speed checks transfer data on the active connection, including cellular when it’s active.")
                         .font(.footnote).foregroundStyle(.secondary)
+                    Button("Investigate a specific problem", systemImage: "arrow.triangle.branch") {
+                        editingHost = false
+                        showingInvestigation = true
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("investigation.openDiagnose")
                 }
                 if let message = diagnosis.message {
                     Text(message).font(.subheadline)

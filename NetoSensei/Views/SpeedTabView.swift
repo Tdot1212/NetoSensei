@@ -18,6 +18,7 @@ struct SpeedTabView: View {
     @State private var runPhase: PerformancePhase?
     @State private var runSummary: PerformanceSummary?
     @State private var runNotice: String?
+    @State private var showingInvestigation = false
 
     private enum PerformancePhase: Int, CaseIterable, Identifiable {
         case speed, streaming, sites
@@ -125,6 +126,7 @@ struct SpeedTabView: View {
             }
         }
         .navigationViewStyle(.stack)
+        .sheet(isPresented: $showingInvestigation) { ConnectionInvestigationView(topic: .speed) }
     }
 
     private var overview: some View {
@@ -148,6 +150,12 @@ struct SpeedTabView: View {
                                 .controlSize(.large)
                                 .disabled(speedVM.isRunning || streamingVM.isRunning || vpnBenchmark.isRunning)
                                 .accessibilityIdentifier("performance.runAll")
+                            Button("Investigate slow downloads", systemImage: "arrow.triangle.branch") {
+                                showingInvestigation = true
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(speedVM.isRunning || streamingVM.isRunning || vpnBenchmark.isRunning)
+                            .accessibilityIdentifier("investigation.openSpeed")
                         }
                         if let runNotice {
                             Text(runNotice).font(.footnote).foregroundStyle(.secondary)

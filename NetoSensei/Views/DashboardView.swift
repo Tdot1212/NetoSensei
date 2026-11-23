@@ -15,6 +15,7 @@ struct DashboardView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showCoverage = false
     @State private var showConnectionRepair = false
+    @State private var showingInvestigation = false
     @StateObject private var vm = DashboardViewModel()
     @ObservedObject private var signalTracker = SignalStrengthTracker.shared
     // PART 3: Removed showingDiagnostic, showingAdvancedDiagnostic, showingVPNTools
@@ -122,6 +123,9 @@ struct DashboardView: View {
             }
             #endif
             .sheet(isPresented: $showConnectionRepair) { WiFiAssistantView(guide: .lag) }
+            .sheet(isPresented: $showingInvestigation) {
+                ConnectionInvestigationView(topic: vm.status.connectionType == .wifi ? .wifi : .connection)
+            }
             .sheet(isPresented: $showingAIChat) {
                 AIChatView()
             }
@@ -352,6 +356,11 @@ struct DashboardView: View {
             BriefSectionTitle(title: "Network tools")
             CardView {
                 VStack(spacing: 0) {
+                    Button { showingInvestigation = true } label: {
+                        BriefActionLabel(title: "Investigate and verify a fix", icon: "arrow.triangle.branch")
+                    }
+                    .accessibilityIdentifier("investigation.openHome")
+                    Divider()
                     if nextCheck?.tab != .diagnose {
                         Button { openTab(.diagnose) } label: {
                             BriefActionLabel(title: "Find the cause and what to try", icon: "stethoscope")
