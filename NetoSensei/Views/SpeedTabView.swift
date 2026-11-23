@@ -11,6 +11,7 @@ struct SpeedTabView: View {
     @StateObject private var speedVM = SpeedTestViewModel()
     @StateObject private var streamingVM = StreamingDiagnosticViewModel()
     @StateObject private var vpnBenchmark = VPNBenchmark()
+    @ObservedObject private var network = NetworkMonitorService.shared
     @State private var selectedSection: SpeedSection = .overview
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -302,7 +303,7 @@ struct SpeedTabView: View {
 
                 // Results (if available)
                 if streamingVM.hasResult {
-                    StreamingDiagnosticContentView(vm: streamingVM, currentSpeed: speedVM.result)
+                    StreamingDiagnosticContentView(vm: streamingVM, currentSpeed: speedVM.resultForCurrentPath)
                 }
             }
             .padding()

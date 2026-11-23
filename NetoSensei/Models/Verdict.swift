@@ -198,7 +198,7 @@ enum Action: Codable, Sendable, Equatable {
 
     var categoryWord: String {
         switch self {
-        case .userFixable: return "You can fix this"
+        case .userFixable: return "Steps to try"
         case .fixableElsewhere: return "Someone else has to fix this"
         case .notFixable: return "Not fixable right now"
         case .none: return "Nothing to do"

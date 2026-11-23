@@ -16,6 +16,7 @@ class SpeedTestViewModel: ObservableObject {
     // MARK: - Published Properties
 
     @Published var result: SpeedTestResult?
+    @Published private(set) var resultPath: Date?
     @Published var history: [SpeedTestResult] = []
     @Published var isRunning = false
     @Published var progress: Double = 0.0
@@ -95,6 +96,7 @@ class SpeedTestViewModel: ObservableObject {
 
     func runSpeedTest() {
         guard currentSpeedTestTask == nil, !isRunning, !speedTestEngine.isRunning else { return }
+        let path = ExitPath.lastPathChange
         debugLog("🚀 SpeedTestViewModel: Starting speed test")
 
         // Disable idle timer to prevent screen from turning off during test
@@ -154,6 +156,7 @@ class SpeedTestViewModel: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
                 debugLog("📱 Updating UI...")
+                self.resultPath = path
                 self.result = final
                 self.history.insert(final, at: 0)
                 self.isRunning = false
@@ -245,6 +248,10 @@ class SpeedTestViewModel: ObservableObject {
 
     var hasResult: Bool {
         result != nil
+    }
+
+    var resultForCurrentPath: SpeedTestResult? {
+        resultPath == ExitPath.lastPathChange ? result : nil
     }
 
     var downloadSpeedFormatted: String {

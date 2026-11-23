@@ -69,13 +69,16 @@ enum VerdictInputs {
             r.append(.failed(.externalLatency, .timeout, streak: max(1, streaks.external)))
         }
 
-        // Web reachability (the monitor's HTTPS test) and domestic reachability.
-        if status.internet.isReachable {
-            r.append(.ran(.httpReach, status.internet.httpTestSuccess ? 1 : 0, unit: ""))
+        // A TCP response establishes reachability to that target. Only HTTPS
+        // results belong in the web checks, with the timed probe's actual scope.
+        let timedHTTPSResponded = status.internet.httpRTT != nil
+        if timedHTTPSResponded, status.internet.httpsProbeWasDomestic == true {
             r.append(.ran(.domesticReach, 1, unit: ""))
+        }
+        if status.internet.httpTestSuccess || (timedHTTPSResponded && status.internet.httpsProbeWasDomestic != true) {
+            r.append(.ran(.httpReach, 1, unit: ""))
         } else {
             r.append(.failed(.httpReach, .timeout, streak: max(1, streaks.external)))
-            r.append(.ran(.domesticReach, 0, unit: ""))
         }
 
         // Address lookup.

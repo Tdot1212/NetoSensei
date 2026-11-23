@@ -211,6 +211,7 @@ class PrivacyShieldService: ObservableObject {
     static let shared = PrivacyShieldService()
 
     @Published var privacyStatus: PrivacyShieldStatus?
+    @Published private(set) var privacyPath: Date?
     @Published var exposureInfo: ExposureInfo?
     @Published var wifiSafetyResult: WiFiSafetyResult?
     @Published var isCheckingPrivacy = false
@@ -223,6 +224,8 @@ class PrivacyShieldService: ObservableObject {
     // MARK: - Main Privacy Check
 
     func checkPrivacyShield() async {
+        guard !isCheckingPrivacy else { return }
+        let path = ExitPath.lastPathChange
         isCheckingPrivacy = true
         defer { isCheckingPrivacy = false }
 
@@ -231,29 +234,24 @@ class PrivacyShieldService: ObservableObject {
         // Full Check just ran, this is a no-op.
         _ = await SmartVPNDetector.shared.detectVPN(forceRefresh: false)
 
-        // Run all checks concurrently
-        async let vpnCheck = checkVPNStatus()
-        async let dnsCheck = checkDNSPrivacy()
-        async let ipCheck = checkIPHidden()
-        async let webRTCCheck = checkWebRTCLeak()
-        async let httpsCheck = checkHTTPSIntegrity()
-        // FIX (Sec Issue 2): 6th check — surface native IPv6 leak.
-        async let ipv6Check = checkIPv6Leak()
+        let route = SmartVPNDetector.shared.detectionResult.flatMap { result in
+            !result.isStaleData && result.timestamp >= path ? result : nil
+        }
+        let https = await checkHTTPSIntegrity()
 
-        let (vpn, dns, ip, webrtc, https, ipv6) =
-            await (vpnCheck, dnsCheck, ipCheck, webRTCCheck, httpsCheck, ipv6Check)
-
+        guard path == ExitPath.lastPathChange, !Task.isCancelled else { return }
+        privacyPath = path
         privacyStatus = PrivacyShieldStatus(
-            vpnStatus: vpn,
-            dnsPrivacy: dns,
-            ipHidden: ip,
-            webRTCLeak: webrtc,
+            vpnStatus: checkVPNStatus(route?.vpnState),
+            dnsPrivacy: checkDNSPrivacy(vpnActive: route?.isVPNActive == true),
+            ipHidden: checkIPHidden(route?.publicIP),
+            webRTCLeak: checkWebRTCLeak(),
             httpsIntegrity: https,
-            ipv6Leak: ipv6
+            ipv6Leak: checkIPv6Leak()
         )
 
         // Also update exposure info
-        await updateExposureInfo()
+        updateExposureInfo(route)
     }
 
     // MARK: - IPv6 Leak Check (Sec Issue 2)
@@ -261,7 +259,7 @@ class PrivacyShieldService: ObservableObject {
     /// Checks whether native ISP IPv6 is present alongside an active VPN.
     /// SmartVPNDetector already detects this via `IPv6 Check` method — this
     /// surfaces the same finding as a top-level Privacy Shield row.
-    private func checkIPv6Leak() async -> PrivacyShieldStatus.CheckResult {
+    private func checkIPv6Leak() -> PrivacyShieldStatus.CheckResult {
         PrivacyShieldStatus.CheckResult(passed: false, title: "IPv6 Protection Unverified",
             detail: "An interface address does not establish whether a remote IPv6 request bypasses a VPN. No end-to-end IPv6 routing test was completed.",
             recommendation: nil, severity: .warning)
@@ -269,11 +267,8 @@ class PrivacyShieldService: ObservableObject {
 
     // MARK: - VPN Status Check
 
-    private func checkVPNStatus() async -> PrivacyShieldStatus.CheckResult {
-        let vpnResult = SmartVPNDetector.shared.detectionResult
-        let vpnState = vpnResult?.vpnState ?? .unknown
-
-        switch vpnState {
+    private func checkVPNStatus(_ state: VPNState?) -> PrivacyShieldStatus.CheckResult {
+        switch state ?? .unknown {
         case .on:
             return PrivacyShieldStatus.CheckResult(
                 passed: true,
@@ -283,10 +278,10 @@ class PrivacyShieldService: ObservableObject {
             )
         case .probablyOn:
             return PrivacyShieldStatus.CheckResult(
-                passed: true,
+                passed: false,
                 title: "VPN",
-                detail: "VPN/Proxy detected (inferred from IP, not confirmed by system)",
-                recommendation: nil
+                detail: "The current route suggests a VPN or proxy. Check its app for the connection status.",
+                recommendation: nil, severity: .warning
             )
         case .connecting:
             return PrivacyShieldStatus.CheckResult(
@@ -295,22 +290,23 @@ class PrivacyShieldService: ObservableObject {
                 detail: "VPN is connecting...",
                 recommendation: "Wait for VPN connection to complete"
             )
-        default:
+        case .off:
             return PrivacyShieldStatus.CheckResult(
                 passed: false,
                 title: "VPN",
                 detail: "No VPN detected; HTTPS can still encrypt application traffic",
                 recommendation: nil, severity: .warning
             )
+        default:
+            return PrivacyShieldStatus.CheckResult(passed: false, title: "VPN status unverified",
+                detail: "Check the connection status in the VPN app if you use one.",
+                recommendation: nil, severity: .warning)
         }
     }
 
     // MARK: - DNS Privacy Check
 
-    private func checkDNSPrivacy() async -> PrivacyShieldStatus.CheckResult {
-        let vpnResult = SmartVPNDetector.shared.detectionResult
-        let vpnActive = vpnResult?.isVPNActive ?? false
-
+    private func checkDNSPrivacy(vpnActive: Bool) -> PrivacyShieldStatus.CheckResult {
         // If no VPN, DNS privacy isn't expected
         guard vpnActive else {
             return PrivacyShieldStatus.CheckResult(
@@ -334,8 +330,7 @@ class PrivacyShieldService: ObservableObject {
 
     // MARK: - IP Hidden Check
 
-    private func checkIPHidden() async -> PrivacyShieldStatus.CheckResult {
-        let ip = SmartVPNDetector.shared.detectionResult?.publicIP
+    private func checkIPHidden(_ ip: String?) -> PrivacyShieldStatus.CheckResult {
         return PrivacyShieldStatus.CheckResult(passed: false, title: "IP Routing Unverified",
             detail: ip.map { "Observed public egress: \($0). A baseline and per-route comparison are needed to establish VPN bypass." }
                 ?? "Public egress unavailable; VPN bypass cannot be assessed.",
@@ -344,7 +339,7 @@ class PrivacyShieldService: ObservableObject {
 
     // MARK: - WebRTC Leak Check
 
-    private func checkWebRTCLeak() async -> PrivacyShieldStatus.CheckResult {
+    private func checkWebRTCLeak() -> PrivacyShieldStatus.CheckResult {
         // WebRTC leaks are a BROWSER issue, not relevant for native iOS apps.
         // iOS apps do not use WebRTC for IP discovery.
         // Showing this check as always-passed with honest explanation.
@@ -419,8 +414,7 @@ class PrivacyShieldService: ObservableObject {
 
     // MARK: - Exposure Info Update
 
-    func updateExposureInfo() async {
-        let vpnResult = SmartVPNDetector.shared.detectionResult
+    private func updateExposureInfo(_ vpnResult: SmartVPNDetector.VPNDetectionResult?) {
         let vpnActive = vpnResult?.isVPNActive ?? false
 
         let publicIP = vpnResult?.publicIP

@@ -13,6 +13,7 @@ struct DiagnoseTabView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     runCard
+                    firstFinding
                     connectionSnapshot
 
                     Button { showingWiFiAssistant = true } label: {
@@ -42,6 +43,15 @@ struct DiagnoseTabView: View {
             .sheet(isPresented: $showingWiFiAssistant) { WiFiAssistantView() }
         }
         .navigationViewStyle(.stack)
+    }
+
+    @ViewBuilder private var firstFinding: some View {
+        if diagnosis.path == ExitPath.lastPathChange,
+           case let .connection(_, verdict?) = diagnosis.results[.connection],
+           !verdict.findings.isEmpty {
+            FindingsCard(verdict: verdict, title: "What to try first", expandsFirstFinding: true)
+                .id(verdict.generatedAt)
+        }
     }
 
     private var connectionSnapshot: some View {
@@ -188,7 +198,6 @@ struct DiagnoseTabView: View {
             if let verdict {
                 Text(verdict.headline).font(.subheadline.bold())
                 note(verdict.coverage.line)
-                FindingsCard(verdict: verdict)
             }
             ForEach(Array(result.testsPerformed.enumerated()), id: \.offset) { _, check in
                 reading(check.name, check.latency.map { ms($0) } ?? testStatus(check.result))

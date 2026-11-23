@@ -32,7 +32,9 @@ struct DashboardView: View {
     var body: some View {
         NavigationView {
             ScrollView {
-                LazyVStack(spacing: 20) {
+                // Home has a bounded number of cards. Keeping their layout
+                // stable avoids repeated lazy placement while scrolling.
+                VStack(spacing: 20) {
                     headerView
                     overviewDetails
 
@@ -186,24 +188,31 @@ struct DashboardView: View {
                     .foregroundStyle(ConnectionBriefStyle.softWhite)
             }
 
-            if let verdict = vm.verdict {
-                if let score = verdict.score {
-                    Text("Connection quality \(score.value)/100 · \(score.band.word)")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(ConnectionBriefStyle.softWhite)
+            if let next = nextCheck {
+                Text(next.detail)
+                    .font(.subheadline)
+                    .foregroundStyle(ConnectionBriefStyle.softWhite)
+                    .accessibilityIdentifier("home.nextCheckReason")
+                Button(next.title, systemImage: next.tab == .speed ? "speedometer" : "stethoscope") {
+                    openTab(next.tab)
                 }
-                if verdict.state == .degraded || verdict.state == .broken {
-                    Text(verdict.headline)
-                        .font(.subheadline)
-                        .foregroundStyle(ConnectionBriefStyle.softWhite)
-                }
+                .buttonStyle(.borderedProminent)
+                .tint(.white)
+                .foregroundStyle(Color(red: 0.09, green: 0.18, blue: 0.39))
+                .controlSize(.large)
+                .accessibilityIdentifier(next.tab == .speed ? "home.openSpeed" : "home.openDiagnose")
+            }
 
+            if let verdict = vm.verdict {
                 Rectangle().fill(.white.opacity(0.23)).frame(height: 1)
                     .accessibilityHidden(true)
                 coverageButton
                 if showCoverage {
                     VStack(alignment: .leading, spacing: 6) {
-                        if verdict.score == nil {
+                        if let score = verdict.score {
+                            Text("Connection quality \(score.value)/100 · \(score.band.word)")
+                                .font(.subheadline.weight(.semibold))
+                        } else {
                             Text("Connection quality score unavailable")
                                 .font(.subheadline.weight(.semibold))
                         }
@@ -225,10 +234,34 @@ struct DashboardView: View {
     }
 
     private var activeConnectionLabel: String {
+        if vm.status.connectionType == .wifi {
+            return vm.status.wifi.ssid.map { "Wi-Fi · \($0)" } ?? "Wi-Fi"
+        }
         if vm.status.connectionType == .cellular, let generation = cellularRadio.generation {
             return "\(generation) cellular"
         }
         return vm.connectionTypeDescription
+    }
+
+    private var nextCheck: (title: String, detail: String, tab: NetoTab)? {
+        guard !vm.isInitializing else { return nil }
+        if vm.status.connectionType == nil {
+            return ("Open Diagnose", "To get online, join a network in Settings → Wi-Fi or turn on Cellular Data.", .diagnose)
+        }
+        if vm.isConnected, vm.verdict?.primary?.kind == .proxyInterception {
+            return ("Check speed and website response", "An internet target answered. Direct delay is unavailable, so use the speed and website checks if something feels slow.", .speed)
+        }
+        if let verdict = vm.verdict, verdict.state == .degraded || verdict.state == .broken {
+            return ("Open Diagnose", verdict.headline, .diagnose)
+        }
+        if vm.status.measurementsPending || vm.status.measurementsIncomplete { return nil }
+        if !vm.isConnected {
+            return ("Open Diagnose", "This connection hasn’t returned an internet response. Check website access and DNS to narrow it down.", .diagnose)
+        }
+        if vm.verdict?.state == .working, vm.verdict?.coverage.failed.isEmpty == true {
+            return ("Open Diagnose", "The checks that ran found no connection issue. If one site is slow, check that site by name.", .diagnose)
+        }
+        return ("Open Diagnose", "An internet target answered. Check your connection further if browsing, calls or streaming are still slow.", .diagnose)
     }
 
     private var coverageButton: some View {
@@ -316,19 +349,23 @@ struct DashboardView: View {
 
     private var nextActions: some View {
         VStack(alignment: .leading, spacing: 8) {
-            BriefSectionTitle(title: "Check your network")
+            BriefSectionTitle(title: "Network tools")
             CardView {
                 VStack(spacing: 0) {
-                    Button { openTab(.diagnose) } label: {
-                        BriefActionLabel(title: "Find the cause and what to try", icon: "stethoscope")
+                    if nextCheck?.tab != .diagnose {
+                        Button { openTab(.diagnose) } label: {
+                            BriefActionLabel(title: "Find the cause and what to try", icon: "stethoscope")
+                        }
+                        .accessibilityIdentifier("home.openDiagnose")
+                        Divider()
                     }
-                    .accessibilityIdentifier("home.openDiagnose")
-                    Divider()
-                    Button { openTab(.speed) } label: {
-                        BriefActionLabel(title: "Test speed and streaming", icon: "speedometer")
+                    if nextCheck?.tab != .speed {
+                        Button { openTab(.speed) } label: {
+                            BriefActionLabel(title: "Test speed and streaming", icon: "speedometer")
+                        }
+                        .accessibilityIdentifier("home.openSpeed")
+                        Divider()
                     }
-                    .accessibilityIdentifier("home.openSpeed")
-                    Divider()
                     Button { openTab(.security) } label: {
                         BriefActionLabel(title: "Review security and devices", icon: "shield.checkerboard")
                     }

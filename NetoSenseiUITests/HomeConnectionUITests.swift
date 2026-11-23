@@ -11,6 +11,10 @@ final class HomeConnectionUITests: XCTestCase {
         let status = app.staticTexts["home.internetStatus"]
         XCTAssertTrue(status.waitForExistence(timeout: 5))
         XCTAssertEqual(status.label, "Internet connected")
+        let nextCheck = app.staticTexts["home.nextCheckReason"]
+        XCTAssertTrue(nextCheck.isHittable)
+        XCTAssertTrue(nextCheck.label.contains("Direct delay is unavailable"))
+        XCTAssertTrue(app.buttons["home.openSpeed"].isHittable)
         XCTAssertTrue(app.staticTexts["Network latency"].exists)
         XCTAssertTrue(app.staticTexts["Unavailable"].exists)
         XCTAssertFalse(app.staticTexts["home.router"].exists)

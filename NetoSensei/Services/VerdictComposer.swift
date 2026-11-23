@@ -72,8 +72,7 @@ enum VerdictComposer {
 
     // MARK: - Score (one rubric, ran checks only)
 
-    /// The RootCauseAnalyzer-calibrated penalties, applied ONLY to checks that
-    /// ran. VPN overhead is charged once and only when both delays ran.
+    /// Quality penalties use the measured responses and repeated failures.
     static func computeScore(coverage: Coverage, context: VerdictContext) -> Score? {
         guard meetsFloor(coverage) else { return nil }
 
@@ -95,11 +94,6 @@ enum VerdictComposer {
             }
         }
 
-        if viaVPN, let ext = coverage.value(.externalLatency), let gw = coverage.value(.gatewayLatency) {
-            let overhead = ext - gw   // measured, never estimated (no `ext − 30`)
-            if overhead > 450 { score -= 20 } else if overhead > 300 { score -= 10 } else if overhead > 150 { score -= 5 }
-        }
-
         if let dns = coverage.value(.dnsLatency) {
             basedOn.append(.dnsLatency)
             if dns > 300 { score -= 10 } else if dns > 200 { score -= 7 } else if dns > 100 { score -= 5 } else if dns > 50 { score -= 3 } else if dns > 20 { score -= 1 }
@@ -112,7 +106,7 @@ enum VerdictComposer {
 
         // Hard failures count only when repeated (B1). A single timeout is coverage.
         if let r = coverage.record(.gatewayReach), r.status.didFail, r.consecutiveFailures >= failureStreakForFinding { score -= 40 }
-        if let r = coverage.record(.externalLatency), r.status.didFail, r.consecutiveFailures >= failureStreakForFinding { score -= 40 }
+        if externalDelayFailed(coverage), !webResponded(coverage) { score -= 40 }
         if let r = coverage.record(.dnsResolve), r.status.didFail, r.consecutiveFailures >= failureStreakForFinding { score -= 20 }
 
         let value = max(0, min(100, score))
@@ -151,25 +145,35 @@ enum VerdictComposer {
 
     // MARK: - Generic findings
 
+    private static func externalDelayFailed(_ coverage: Coverage) -> Bool {
+        guard let record = coverage.record(.externalLatency) else { return false }
+        return record.status.didFail && record.consecutiveFailures >= failureStreakForFinding
+    }
+
+    private static func webResponded(_ coverage: Coverage) -> Bool {
+        coverage.value(.httpReach) == 1 || coverage.value(.domesticReach) == 1
+    }
+
     static func genericFindings(coverage: Coverage, context: VerdictContext, alreadyExplained: Set<CheckID>) -> [Finding] {
         var out: [Finding] = []
         let viaVPN = context.vpn.isOn
         func explained(_ id: CheckID) -> Bool { alreadyExplained.contains(id) }
 
         // No internet: the internet delay failed repeatedly (or the web check did).
-        let extFailed = coverage.record(.externalLatency).map { $0.status.didFail && $0.consecutiveFailures >= failureStreakForFinding } ?? false
+        let extFailed = externalDelayFailed(coverage)
         let httpFailed = coverage.record(.httpReach).map { $0.status.didFail && $0.consecutiveFailures >= failureStreakForFinding } ?? false
-        if (extFailed || httpFailed) && !explained(.externalLatency) && !explained(.httpReach) {
+        let remoteResponded = webResponded(coverage) || coverage.value(.externalLatency) != nil
+        if (extFailed || httpFailed) && !remoteResponded && !explained(.externalLatency) && !explained(.httpReach) {
             out.append(Finding(
                 kind: .noInternet, severity: .critical,
                 confidence: Confidence(level: .high, reason: "Repeated probes to the internet got no answer"),
-                headline: "No internet connection",
+                headline: "Internet checks got no response",
                 evidence: [],
-                cause: "Your device is on a network, but nothing beyond it is answering.",
+                cause: "The tested internet targets did not respond. This can happen during an outage, a network sign-in requirement, or filtering along the route.",
                 action: .userFixable(steps: [
-                    "Toggle Wi-Fi off and on, or switch to cellular",
-                    "If you just joined this network, look for a login page (hotels and venues use them)",
-                    "Restart the router if it is yours"
+                    "Open two familiar sites in Safari. If a Wi-Fi sign-in page appears, complete it before retrying.",
+                    "If both sites fail, try them on another device on the same Wi-Fi. Rejoin the network if only this phone is affected.",
+                    "Run the full check again. If multiple devices still fail, check the router and ask the network operator about an outage."
                 ]),
                 basedOn: [.externalLatency, .httpReach].filter { coverage.record($0) != nil }
             ))

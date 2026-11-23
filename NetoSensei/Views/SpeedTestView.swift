@@ -40,6 +40,7 @@ struct SpeedTestView: View {
 /// Speed test content view (reusable in tabs or sheets)
 struct SpeedTestContentView: View {
     @ObservedObject var vm: SpeedTestViewModel
+    @ObservedObject private var network = NetworkMonitorService.shared
 
     @AppStorage("ispPlanDownloadMbps") private var ispPlanDownload: Double = 0
     @AppStorage("ispPlanUploadMbps") private var ispPlanUpload: Double = 0
@@ -54,6 +55,11 @@ struct SpeedTestContentView: View {
                         // Running test
                         runningView
                     } else if let result = vm.result {
+                        if vm.resultForCurrentPath == nil {
+                            Text("Previous connection. Run Again to measure the current route.")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                         // Results
                         resultsView(result: result)
                     } else if let reason = vm.errorMessage {
@@ -181,7 +187,9 @@ struct SpeedTestContentView: View {
 
             // Quality card with VPN awareness
             qualityCard(result: result)
-            improvementTips(result: result)
+            if vm.resultForCurrentPath != nil {
+                improvementTips(result: result)
+            }
 
             // ISP Plan comparison (only when not on VPN — VPN measures the tunnel, not the plan)
             if !result.vpnActive && result.serverRegion?.contains("proximity unverified") != true {

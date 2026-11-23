@@ -13,6 +13,7 @@ import SwiftUI
 struct SecurityTabView: View {
     @StateObject private var privacyService = PrivacyShieldService.shared
     @ObservedObject private var vpnDetector = SmartVPNDetector.shared
+    @ObservedObject private var network = NetworkMonitorService.shared
 
     private enum Tool: Identifiable {
         case fullCheck, portScanner, deviceHistory, deviceAssistant, uniFi, verifyDNS, verifyIPv6
@@ -25,6 +26,9 @@ struct SecurityTabView: View {
         NavigationView {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
+                    if privacyService.privacyStatus != nil, !privacyIsCurrent {
+                        stalePrivacyCard
+                    }
                     securityActions
                     deviceTools
                     privacyShieldSection
@@ -85,12 +89,32 @@ struct SecurityTabView: View {
             }
             .task {
                 // Check privacy on first appear (only if no cached result)
-                if privacyService.privacyStatus == nil {
+                if !privacyIsCurrent {
                     await privacyService.checkPrivacyShield()
                 }
             }
         }
         .navigationViewStyle(.stack)
+    }
+
+    private var privacyIsCurrent: Bool {
+        privacyService.privacyPath == ExitPath.lastPathChange
+    }
+
+    private var stalePrivacyCard: some View {
+        CardView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Your connection changed").font(.headline)
+                Text("Refresh to see privacy results for the current route.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Button("Refresh privacy checks") {
+                    Task { await privacyService.checkPrivacyShield() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(privacyService.isCheckingPrivacy)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: - Section 1: Privacy Shield
@@ -105,7 +129,7 @@ struct SecurityTabView: View {
                 VStack(spacing: 16) {
                     // Overall status with shield icon
                     Group {
-                        if let status = privacyService.privacyStatus {
+                        if let status = privacyService.privacyStatus, privacyIsCurrent {
                             VStack(spacing: 16) {
                                 overallShieldStatus(status.overallStatus)
 
@@ -249,7 +273,7 @@ struct SecurityTabView: View {
 
             CardView {
                 Group {
-                    if let exposure = privacyService.exposureInfo {
+                    if let exposure = privacyService.exposureInfo, privacyIsCurrent {
                         VStack(spacing: 12) {
                             exposureRow(
                                 icon: "globe",

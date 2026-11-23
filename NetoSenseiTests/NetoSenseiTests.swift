@@ -593,7 +593,18 @@ struct VerdictComposerTests {
         #expect(v.score == nil)
         #expect(v.state == .broken)
         #expect(v.primary?.kind == .noInternet)
-        #expect(v.headline == "No internet connection")
+        #expect(v.headline == "Internet checks got no response")
+    }
+
+    @Test func aSuccessfulRemoteCheckRulesOutATotalOutageFinding() {
+        for records: [CheckRecord] in [
+            [.failed(.externalLatency, .timeout, streak: 3), .ran(.httpReach, 1, unit: "")],
+            [.ran(.externalLatency, 20, unit: "ms"), .failed(.httpReach, .timeout, streak: 3)],
+            [.failed(.externalLatency, .timeout, streak: 3), .ran(.domesticReach, 1, unit: "")]
+        ] {
+            let verdict = VerdictComposer.compose(records: records, context: Self.wifiDirect)
+            #expect(!verdict.findings.contains { $0.kind == .noInternet })
+        }
     }
 
     // ---- B3: state derives from findings, never from arithmetic ----
@@ -647,17 +658,15 @@ struct VerdictComposerTests {
 
     // ---- B5: nothing is estimated ----
 
-    @Test func vpnOverhead_isOnlyChargedWhenBothDelaysRan() {
-        // Gateway not applicable (hidden by VPN): no `ext − 30` guess, no overhead term.
+    @Test func measuringTheGatewayDoesNotAddAVPNPenalty() {
         let noGateway = VerdictComposer.compose(records: [
             .notApplicable(.gatewayLatency, "hidden by VPN"), .ran(.externalLatency, 400, unit: "ms")
         ], context: Self.wifiVPN)
-        #expect(noGateway.score?.value == 82)   // 100 − 18 (VPN scale, > 250) and nothing else
-        // Gateway ran: overhead 396 ms is measured and charged once.
+        #expect(noGateway.score?.value == 82)
         let withGateway = VerdictComposer.compose(records: [
             .ran(.gatewayLatency, 4, unit: "ms"), .ran(.externalLatency, 400, unit: "ms")
         ], context: Self.wifiVPN)
-        #expect(withGateway.score?.value == 72) // 100 − 18 − 10
+        #expect(withGateway.score?.value == 82)
     }
 
     @Test func viaVPN_400ms_isFairNotCritical() {
@@ -691,7 +700,6 @@ struct VerdictPatternTests {
     static func oneAction(_ f: Finding?) -> Bool { f != nil }
     static func isNotFixable(_ f: Finding?) -> Bool { if case .notFixable = f?.action { return true } else { return false } }
     static func isUserFixable(_ f: Finding?) -> Bool { if case .userFixable(let s) = f?.action { return !s.isEmpty } else { return false } }
-    static func isElsewhere(_ f: Finding?) -> String? { if case .fixableElsewhere(let who, _, _) = f?.action { return who } else { return nil } }
 
     // ---- E1 tower congestion ----
 
@@ -783,12 +791,13 @@ struct VerdictPatternTests {
         #expect(f?.severity == .fair && v.state == .degraded)
     }
 
-    @Test func ispSlow_routerFineVPNOff_isFixableElsewhere_byTheProvider() {
+    @Test func slowRemoteTarget_leadsToComparisonBeforeProviderEscalation() {
         let v = VerdictComposer.compose(records: [.ran(.gatewayLatency, 6, unit: "ms"), .ran(.externalLatency, 240, unit: "ms"), .ran(.throughput, 3.2, unit: "Mbps")],
                                         context: VerdictContext(connectionType: "WiFi", vpn: .off))
         let f = v.primary
         #expect(f?.kind == .ispSlow)
-        #expect(Self.isElsewhere(f) == "Your internet provider")
+        #expect(Self.isUserFixable(f))
+        #expect(f?.confidence.level == .medium)
         #expect(f?.evidence.count == 3)
         #expect(!v.findings.contains { $0.kind == .internetSlow })            // pattern claims the check; no generic duplicate
     }
@@ -824,7 +833,7 @@ struct VerdictPatternTests {
         let v = VerdictComposer.compose(records: [.ran(.gatewayLatency, 3, unit: "ms"), .ran(.externalLatency, 18, unit: "ms"),
                                                   .ran(.domesticReach, 1, unit: ""), .failed(.httpReach, .timeout, streak: 2)], context: ctx)
         let f = v.findings.first { $0.kind == .crossBorderRestriction }
-        #expect(f != nil && f?.byDesign == true && Self.isNotFixable(f))
+        #expect(f != nil && f?.byDesign == true && Self.isUserFixable(f))
         #expect(!v.findings.contains { $0.kind == .noInternet })              // the web check is explained, not a "no internet"
         #expect(v.state == .degraded)
     }
@@ -897,6 +906,25 @@ struct VerdictInputsTests {
         let ext = recs.first { $0.id == .externalLatency }
         #expect(ext?.status == .failed(.intercepted))
         #expect(ext?.consecutiveFailures == 1)              // never promoted to "no internet" by the streak
+    }
+
+    @Test func tcpReachabilityDoesNotCountAsAWebResponse() {
+        var s = Self.status()
+        s.internet.httpTestSuccess = false
+        let tcpOnly = VerdictInputs.records(from: s, streaks: .init())
+        #expect(tcpOnly.first { $0.id == .httpReach }?.status == .failed(.timeout))
+        #expect(!tcpOnly.contains { $0.id == .domesticReach })
+
+        s.internet.httpRTT = 50
+        s.internet.httpsProbeWasDomestic = true
+        let domestic = VerdictInputs.records(from: s, streaks: .init())
+        #expect(domestic.first { $0.id == .domesticReach }?.status.measurement?.value == 1)
+        #expect(domestic.first { $0.id == .httpReach }?.status == .failed(.timeout))
+
+        s.internet.httpsProbeWasDomestic = false
+        let remote = VerdictInputs.records(from: s, streaks: .init())
+        #expect(remote.first { $0.id == .httpReach }?.status.measurement?.value == 1)
+        #expect(!remote.contains { $0.id == .domesticReach })
     }
 
     @Test func failureStreaks_flowThroughToRecords() {

@@ -14,11 +14,17 @@ struct FindingsCard: View {
     let verdict: NetworkVerdict
     var title: String = "What to do"
     var maxFindings: Int = 4
+    var expandsFirstFinding = false
     @State private var expanded: UUID?
+    @State private var didChooseFinding = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let shown = Array(verdict.findings.prefix(maxFindings))
+        let ordered = expandsFirstFinding
+            ? verdict.primary.map { primary in [primary] + verdict.findings.filter { $0.id != primary.id } } ?? verdict.findings
+            : verdict.findings
+        let shown = Array(ordered.prefix(maxFindings))
+        let openFinding = didChooseFinding ? expanded : (expandsFirstFinding ? shown.first?.id : nil)
         if !shown.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
@@ -31,9 +37,10 @@ struct FindingsCard: View {
 
                 VStack(spacing: 8) {
                     ForEach(shown) { finding in
-                        FindingRow(finding: finding, isExpanded: expanded == finding.id) {
+                        FindingRow(finding: finding, isExpanded: openFinding == finding.id) {
                             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
-                                expanded = expanded == finding.id ? nil : finding.id
+                                didChooseFinding = true
+                                expanded = openFinding == finding.id ? nil : finding.id
                             }
                         }
                     }
@@ -143,7 +150,6 @@ struct FindingRow: View {
         switch finding.action {
         case .userFixable(let steps):
             VStack(alignment: .leading, spacing: 4) {
-                Text("You can fix this").font(.caption.bold()).foregroundColor(.secondary)
                 ForEach(Array(steps.enumerated()), id: \.offset) { i, step in
                     HStack(alignment: .top, spacing: 6) {
                         Text("\(i + 1).").font(.caption.bold()).foregroundColor(.accentColor)

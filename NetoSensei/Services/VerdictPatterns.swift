@@ -118,14 +118,14 @@ enum VerdictPatterns {
         guard overseasBlocked else { return nil }
         return Finding(
             kind: .crossBorderRestriction, severity: .poor,
-            confidence: Confidence(level: .high, reason: "Domestic sites answer; overseas sites do not; no VPN is active"),
-            headline: "Overseas sites are blocked here, your network is fine",
+            confidence: Confidence(level: .medium, reason: "The domestic probe answered and the overseas probe did not."),
+            headline: "Only the domestic web check responded",
             evidence: [],
-            cause: "In mainland China, traffic to many overseas services is blocked at the border. Your Wi-Fi and provider are working — domestic sites load normally.",
-            action: .notFixable(
-                why: "This is network policy, not a fault on your phone or router.",
-                expect: "Chinese apps and sites work normally; overseas apps stay blocked until a VPN is on.",
-                workarounds: ["Turn on your VPN, then re-run this check"]),
+            cause: "At least one route works. The missing response could be due to filtering, routing or the endpoint.",
+            action: .userFixable(steps: [
+                "In Diagnose, open Choose a website and enter the affected hostname. Compare it with a site you know works.",
+                "If the affected site still fails, try the same hostname on another trusted connection."
+            ]),
             basedOn: [.domesticReach, .httpReach], byDesign: true
         )
     }
@@ -183,13 +183,13 @@ enum VerdictPatterns {
         return Finding(
             kind: .towerCongestion, severity: MetricBands.internetDelay(ms: ext, viaVPN: viaVPN),
             confidence: Confidence(level: .medium, reason: "Inferred from slow AND unsteady delay\(radio). iOS doesn't let apps read cellular signal strength, so a weak signal cannot be ruled out"),
-            headline: "The cell tower here is crowded",
+            headline: "Cellular responses are slow and uneven",
             evidence: evidence,
-            cause: "Nothing on your phone is broken. Many people are sharing this tower, so every packet waits in line — delay jumps around and speed drops.",
+            cause: "Congestion, weak signal or the route can cause this pattern. The measurements do not isolate which one.",
             action: .notFixable(
                 why: "The tower's capacity is the carrier's; your phone can't change how many people are on it.",
                 expect: "Messages fine, pages slow, calls and video choppy, uploads slow. It eases when the crowd thins.",
-                workarounds: ["Use the venue's Wi-Fi if there is one", "Step outside the crowd or near a window", "Switch between LTE and 5G in Settings — you may land on a less loaded cell", "Queue big uploads for later"]),
+            workarounds: ["Move near a window and repeat the check against the same endpoint. If it improves, retest from the original spot to confirm the difference.", "Try the affected app on trusted Wi-Fi. If cellular stays slow across locations, share the measurements with your carrier."]),
             basedOn: basedOn,
             wouldSharpen: coverage.value(.throughput) == nil ? [.throughput] : [],
             byDesign: true
@@ -208,11 +208,15 @@ enum VerdictPatterns {
         return Finding(
             kind: .vpnOverhead, severity: max(band, .fair),   // never worse than fair: the tunnel works, it is just far
             confidence: Confidence(level: .medium, reason: "Router and external response times were measured; the VPN contribution was not isolated"),
-            headline: "External responses are slower while VPN is active",
+            headline: "The remote target took longer to respond",
             evidence: [evidenceGateway(gw), evidenceInternet(ext, viaVPN: true),
                        Evidence(label: "Difference beyond gateway", value: overhead, unit: "ms", band: band, comparedTo: "under 150 ms is normal for an international tunnel")],
             cause: "The gateway responded in \(Int(gw)) ms and the external target in \(Int(ext)) ms. Their difference includes routing, endpoint processing and possible VPN effects; it is not a measured VPN penalty.",
-            action: .userFixable(steps: ["Pick a nearer server in your VPN app", "Try the WireGuard protocol if the app offers it", "Reconnect the VPN once — routes sometimes get stuck on a bad path"]),
+            action: .userFixable(steps: [
+                "Check the affected website and record its response time on this Wi-Fi.",
+                "If you use a VPN, pick another trusted server in its app. Keep the same Wi-Fi and repeat the website check.",
+                "If the site improves consistently on the new server, keep that route. If several sites stay slow, compare a trusted second connection."
+            ]),
             basedOn: [.gatewayLatency, .externalLatency]
         )
     }
@@ -253,14 +257,15 @@ enum VerdictPatterns {
         if let mbps = coverage.value(.throughput) { evidence.append(evidenceSpeed(mbps)); basedOn.append(.throughput) }
         return Finding(
             kind: .ispSlow, severity: band,
-            confidence: Confidence(level: .high, reason: "Router answers quickly; the delay starts beyond it"),
-            headline: "Your internet provider is slow right now",
+            confidence: Confidence(level: .medium, reason: "The router answered quickly and the external target was slow."),
+            headline: "The router responded quickly. The remote test was slow.",
             evidence: evidence,
-            cause: "Your router is fine (\(Int(gw)) ms). The slowdown starts after traffic leaves your home, on the provider's network.",
-            action: .fixableElsewhere(
-                who: "Your internet provider",
-                what: "Congestion or a fault on their side of the connection",
-                meanwhile: ["Retry in a few minutes — provider congestion often clears", "Use cellular for an urgent call", "If it lasts hours, report it to the provider with these numbers"]),
+            cause: "The local and remote readings measure different endpoints. The remote route, the provider or the endpoint could explain the delay.",
+            action: .userFixable(steps: [
+                "In Diagnose, check the affected website and a second website on the same Wi-Fi.",
+                "If both are slow, pause large transfers and run the same checks near the router. If possible, try a wired device on that router.",
+                "If several sites stay slow on the wired device, send the test times and results to your internet provider."
+            ]),
             basedOn: basedOn
         )
     }

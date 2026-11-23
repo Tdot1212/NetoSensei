@@ -562,6 +562,7 @@ class NetworkMonitorService: ObservableObject {
             httpTestSuccess: false,
             cdnReachable: false,
             httpRTT: httpRTTms,
+            httpsProbeWasDomestic: preferDomestic,
             latencyIntercepted: intercepted
         )
     }

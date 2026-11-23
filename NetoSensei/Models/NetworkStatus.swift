@@ -165,6 +165,8 @@ struct InternetInfo {
     /// shown only in the Internet card's (i) detail. NEVER mixed into the
     /// primary latency above.
     var httpRTT: Double?
+    /// Region of the timed HTTPS probe. Unknown for snapshots without a probe.
+    var httpsProbeWasDomestic: Bool? = nil
 
     /// True when a local TUN-mode proxy/VPN intercepted the external handshake
     /// on-device, so `latencyToExternal` is deliberately nil (the fake ~1-4ms

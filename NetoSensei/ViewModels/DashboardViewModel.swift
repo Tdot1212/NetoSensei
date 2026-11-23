@@ -574,7 +574,8 @@ class DashboardViewModel: ObservableObject {
             let parts = ip.split(separator: ".")
             return parts.count == 4 ? "\(parts[0]).\(parts[1]).\(parts[2])" : ip
         }()
-        return "\(type)|\(ssid)|\(subnet)"
+        let viaVPN = status.vpn.isActive || status.vpn.vpnState.isLikelyOn
+        return "\(type)|\(ssid)|\(subnet)|\(viaVPN)|\(ExitPath.lastPathChange.timeIntervalSinceReferenceDate)"
     }
 
     /// Clear the latency/health smoothing buffers when the network changes.
@@ -599,13 +600,19 @@ class DashboardViewModel: ObservableObject {
     /// Update all smoothed values from current status
     func updateSmoothedValues() {
         // Smooth internet latency
-        if let rawLatency = status.internet.latencyToExternal {
+        if !status.internet.latencyIntercepted, let rawLatency = status.internet.displayableLatency {
             smoothedInternetLatency = smoothLatency(rawLatency, history: &internetLatencyHistory)
+        } else {
+            internetLatencyHistory.removeAll()
+            smoothedInternetLatency = nil
         }
 
         // Smooth gateway latency
-        if let rawLatency = status.router.latency {
+        if let rawLatency = status.router.displayableLatency {
             smoothedGatewayLatency = smoothLatency(rawLatency, history: &gatewayLatencyHistory)
+        } else {
+            gatewayLatencyHistory.removeAll()
+            smoothedGatewayLatency = nil
         }
 
         // Smooth DNS latency
