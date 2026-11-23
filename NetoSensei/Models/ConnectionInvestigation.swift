@@ -156,6 +156,60 @@ struct InvestigationLead {
     }
 }
 
+enum ConnectionRepair: String {
+    case tryCellular = "NetoSensei Try Cellular"
+    case restoreWiFi = "NetoSensei Restore Wi-Fi"
+
+    var title: String {
+        self == .tryCellular ? "Try cellular and retest" : "Restore Wi-Fi"
+    }
+
+    var shortcutURL: URL {
+        var url = URLComponents()
+        url.scheme = "shortcuts"
+        url.host = "run-shortcut"
+        url.queryItems = [URLQueryItem(name: "name", value: rawValue)]
+        return url.url!
+    }
+
+    func confirmsChange(from original: InvestigationRoute, to current: InvestigationRoute) -> Bool {
+        guard original.generation != current.generation else { return false }
+        switch self {
+        case .tryCellular: return original.interface == "WiFi" && current.interface == "Cellular"
+        case .restoreWiFi: return original.interface != "WiFi" && current.interface == "WiFi"
+        }
+    }
+
+    static func isAvailable(topic: InvestigationTopic, baseline: InvestigationSample, lead: InvestigationLead) -> Bool {
+        guard baseline.route.interface == "WiFi" else { return false }
+        return switch topic {
+        case .wifi, .speed: true
+        case .connection, .security, .vpn: lead.change == .otherAccess
+        case .privacy: false
+        }
+    }
+
+    static func accessLead(from lead: InvestigationLead) -> InvestigationLead {
+        InvestigationLead(headline: lead.headline, evidence: lead.evidence,
+            change: .otherAccess, metric: lead.metric == .router ? .site : lead.metric,
+            nextIfUnchanged: "If the problem persists on both connections, return to Wi-Fi and share the comparison with your network or service provider.")
+    }
+}
+
+struct ConnectionRepairEvidence: Encodable {
+    let singleMbps: [Double]
+    let parallelMbps: [Double]
+    let completedSingleTrials: Int
+    let completedParallelTrials: Int
+
+    init(sample: InvestigationSample) {
+        singleMbps = (sample.readings[.single]?.samples ?? []).filter { $0.isFinite && $0 >= 0 }
+        parallelMbps = (sample.readings[.parallel]?.samples ?? []).filter { $0.isFinite && $0 >= 0 }
+        completedSingleTrials = singleMbps.count
+        completedParallelTrials = parallelMbps.count
+    }
+}
+
 enum InvestigationVerdict {
     case improved, worsened, noChange, couldNotCompare
 

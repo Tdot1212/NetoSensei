@@ -18,6 +18,7 @@ struct AIChatView: View {
     @State private var sessionSnapshotJSON: String?
     @State private var showSettings = false
     @State private var showSessions = false
+    @State private var repairTopic: InvestigationTopic?
 
     @FocusState private var isInputFocused: Bool
 
@@ -31,6 +32,19 @@ struct AIChatView: View {
                 // Provider indicator
                 if hasKey {
                     providerBar
+                }
+
+                if !preflight.isCollecting {
+                    Menu {
+                        ForEach(InvestigationTopic.allCases) { topic in
+                            Button(topic.rawValue) { repairTopic = topic }
+                        }
+                    } label: {
+                        Label("Try a fix", systemImage: "wrench.adjustable")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(minHeight: 44)
+                    }
+                    .accessibilityIdentifier("ai.repair")
                 }
 
                 if !hasKey {
@@ -73,6 +87,9 @@ struct AIChatView: View {
             }
             .sheet(isPresented: $showSessions) {
                 ChatSessionsView()
+            }
+            .sheet(item: $repairTopic) { topic in
+                ConnectionInvestigationView(topic: topic)
             }
         }
         .navigationViewStyle(.stack)

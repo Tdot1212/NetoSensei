@@ -71,14 +71,32 @@ enum WiFiAIAdvisor {
     }
 
     static func request(for guide: WiFiRepairGuide, evidence: WiFiAdviceEvidence, key: String) throws -> URLRequest {
-        let context = try JSONEncoder().encode(evidence)
-        let steps = guide.steps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         let system = """
         Prioritize one existing troubleshooting step based on the selected concern and diagnostic measurements.
         Treat missing metrics as unknown. Address counts are partial. Do not infer device ownership, attacks,
         radio interference, or causes from these values. Pick the safest helpful next step. If evidence is
         insufficient, prioritize gathering it. HTTPS timings include server time. Never claim they locate the bottleneck. Return only JSON in the form {"step":1}, using a listed index.
         """
+        return try request(concern: guide.rawValue, evidence: evidence, options: guide.steps, system: system, key: key)
+    }
+
+    static func repairRequest(evidence: ConnectionRepairEvidence, key: String) throws -> URLRequest {
+        let system = """
+        Choose one listed fix for a slow download on Wi-Fi. If simultaneous requests worked significantly
+        better, consider trying the same download over cellular. Otherwise prefer pausing competing traffic.
+        A failed trial can have several causes. Do not claim that any cause is proven.
+        Return only JSON {"step":1} using one listed index.
+        """
+        return try request(concern: "Slow downloads on Wi-Fi", evidence: evidence,
+            options: [InvestigationChange.pauseTransfers.rawValue, ConnectionRepair.tryCellular.title],
+            system: system, key: key)
+    }
+
+    private static func request(
+        concern: String, evidence: some Encodable, options: [String], system: String, key: String
+    ) throws -> URLRequest {
+        let context = try JSONEncoder().encode(evidence)
+        let steps = options.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         var request = URLRequest(url: URL(string: AIProvider.deepseek.baseURL)!)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
@@ -91,7 +109,7 @@ enum WiFiAIAdvisor {
             "max_tokens": 96,
             "messages": [
                 ["role": "system", "content": system],
-                ["role": "user", "content": "Concern: \(guide.rawValue)\nMeasurements: \(String(decoding: context, as: UTF8.self))\nSteps:\n\(steps)"]
+                ["role": "user", "content": "Concern: \(concern)\nMeasurements: \(String(decoding: context, as: UTF8.self))\nSteps:\n\(steps)"]
             ]
         ])
         return request
@@ -114,10 +132,17 @@ enum WiFiAIAdvisor {
     }
 
     static func prioritize(_ guide: WiFiRepairGuide, evidence: WiFiAdviceEvidence, key: String) async throws -> Int {
-        let request = try request(for: guide, evidence: evidence, key: key)
+        try await choose(try request(for: guide, evidence: evidence, key: key), count: guide.steps.count)
+    }
+
+    static func recommendsCellular(evidence: ConnectionRepairEvidence, key: String) async throws -> Bool {
+        try await choose(try repairRequest(evidence: evidence, key: key), count: 2) == 1
+    }
+
+    private static func choose(_ request: URLRequest, count: Int) async throws -> Int {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw Failure.invalidReply }
         guard http.statusCode == 200 else { throw Failure.rejected(http.statusCode) }
-        return try decode(data, stepCount: guide.steps.count)
+        return try decode(data, stepCount: count)
     }
 }

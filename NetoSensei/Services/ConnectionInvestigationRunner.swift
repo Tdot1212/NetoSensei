@@ -88,6 +88,9 @@ enum ConnectionInvestigationRunner {
             }
         }
 
+        if topic != .vpn && topic != .privacy && route().vpn.isLikelyOn && route().exit == nil {
+            _ = await ExitPath.resolveFresh(timeoutSeconds: 6)
+        }
         try checkPath(started)
         let status = route()
         if topic == .vpn {
@@ -97,7 +100,7 @@ enum ConnectionInvestigationRunner {
         return InvestigationSample(route: status, at: Date(), readings: readings, ipv6: observedIPv6)
     }
 
-    private static func route() -> InvestigationRoute {
+    static func route() -> InvestigationRoute {
         let network = NetworkMonitorService.shared.currentStatus
         let path = ExitPath.lastPathChange
         let detector = SmartVPNDetector.shared.detectionResult

@@ -68,6 +68,7 @@ struct PrivacyVerificationView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if topic == .dns { EncryptedDNSRepairCard() }
                     CardView {
                         VStack(alignment: .leading, spacing: 12) {
                             BriefSectionTitle(title: "What NetoSensei can check")

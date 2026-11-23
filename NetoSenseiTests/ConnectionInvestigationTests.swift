@@ -6,6 +6,67 @@ struct ConnectionInvestigationTests {
     private let first = InvestigationRoute(generation: .distantPast, interface: "WiFi", wifi: "Test",
         vpn: .off, exit: nil)
 
+    @Test func shortcutHandoffRequiresAnObservedInterfaceSwitch() {
+        let sameGeneration = InvestigationRoute(generation: first.generation, interface: "Cellular", wifi: nil,
+            vpn: .off, exit: nil)
+        let cellular = InvestigationRoute(generation: .now, interface: "Cellular", wifi: nil,
+            vpn: .off, exit: nil)
+        let wifi = InvestigationRoute(generation: .distantFuture, interface: "WiFi", wifi: "Test",
+            vpn: .off, exit: nil)
+        #expect(!ConnectionRepair.tryCellular.confirmsChange(from: first, to: first))
+        #expect(!ConnectionRepair.tryCellular.confirmsChange(from: first, to: sameGeneration))
+        #expect(ConnectionRepair.tryCellular.confirmsChange(from: first, to: cellular))
+        #expect(!ConnectionRepair.restoreWiFi.confirmsChange(from: cellular, to: cellular))
+        #expect(ConnectionRepair.restoreWiFi.confirmsChange(from: cellular, to: wifi))
+        let offline = InvestigationRoute(generation: .now, interface: nil, wifi: nil, vpn: .off, exit: nil)
+        #expect(ConnectionRepair.restoreWiFi.confirmsChange(from: offline, to: wifi))
+        for repair in [ConnectionRepair.tryCellular, .restoreWiFi] {
+            let url = URLComponents(url: repair.shortcutURL, resolvingAgainstBaseURL: false)
+            #expect(url?.scheme == "shortcuts")
+            #expect(url?.host == "run-shortcut")
+            #expect(url?.queryItems == [.init(name: "name", value: repair.rawValue)])
+        }
+    }
+
+    @Test func accessRepairCanOnlyCompareMatchedVPNConditions() {
+        let original = InvestigationRoute(generation: .distantPast, interface: "WiFi", wifi: "Test",
+            vpn: .on, exit: "203.0.113.1")
+        let sameExit = InvestigationRoute(generation: .now, interface: "Cellular", wifi: nil,
+            vpn: .on, exit: "203.0.113.1")
+        let differentExit = InvestigationRoute(generation: .now, interface: "Cellular", wifi: nil,
+            vpn: .on, exit: "203.0.113.2")
+        let baseline = InvestigationSample(route: original, at: .now, readings: [
+            .site: .init(label: "Website", detail: "No response", outcome: false)
+        ])
+        let lead = ConnectionRepair.accessLead(from: InvestigationReasoning.lead(for: .wifi, sample: baseline))
+        let changed: [InvestigationMetric: InvestigationReading] = [
+            .site: .init(label: "Website", detail: "HTTP 200", outcome: true)
+        ]
+        #expect(InvestigationReasoning.compare(baseline,
+            .init(route: sameExit, at: .now, readings: changed), using: lead).0 == .improved)
+        #expect(InvestigationReasoning.compare(baseline,
+            .init(route: differentExit, at: .now, readings: changed), using: lead).0 == .couldNotCompare)
+    }
+
+    @Test func speedRepairSendsOnlyAllowedMeasurementsToDeepSeek() throws {
+        let sample = InvestigationSample(route: first, at: .now, readings: [
+            .single: .init(label: "private.example", detail: "private-SSID", samples: [7, .nan, 8], outcome: true),
+            .parallel: .init(label: "Parallel", detail: "more data", samples: [30, 35, 36], outcome: true)
+        ])
+        let request = try WiFiAIAdvisor.repairRequest(evidence: .init(sample: sample), key: "placeholder")
+        let body = try #require(request.httpBody)
+        let payload = String(decoding: body, as: UTF8.self)
+        #expect(!payload.contains("private.example"))
+        #expect(!payload.contains("private-SSID"))
+        #expect(!payload.contains("placeholder"))
+        #expect(payload.contains("completedSingleTrials"))
+        #expect(payload.contains(ConnectionRepair.tryCellular.title))
+        let response = Data(#"{"choices":[{"finish_reason":"stop","message":{"content":"{\"step\":3}"}}]}"#.utf8)
+        #expect(throws: WiFiAIAdvisor.Failure.self) {
+            try WiFiAIAdvisor.decode(response, stepCount: 2)
+        }
+    }
+
     @Test func aSingleSiteFailureLeadsToASecondConnection() {
         let evidence: [InvestigationMetric: InvestigationReading] = [
             .site: .init(label: "Affected site", detail: "No response", outcome: false),

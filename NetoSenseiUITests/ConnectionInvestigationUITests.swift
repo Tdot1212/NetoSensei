@@ -22,6 +22,57 @@ final class ConnectionInvestigationUITests: XCTestCase {
         capture("Guided download evidence", app)
     }
 
+    @MainActor func testAIAssistantOpensAFixWithoutSendingARequest() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-hasCompletedOnboarding", "YES"]
+        app.launch()
+        let assistant = app.buttons["AI Assistant"]
+        XCTAssertTrue(assistant.waitForExistence(timeout: 10))
+        assistant.tap()
+        let repair = app.buttons["ai.repair"]
+        XCTAssertTrue(repair.waitForExistence(timeout: 5))
+        capture("AI Assistant repair action", app)
+        repair.tap()
+        app.collectionViews.buttons["Speed"].tap()
+        XCTAssertTrue(app.navigationBars["Guided investigation"].waitForExistence(timeout: 6))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Does one download stall")).firstMatch.exists)
+    }
+
+    @MainActor func testCellularActionWaitsForAnActualPathChange() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-hasCompletedOnboarding", "YES"]
+        app.launch()
+        app.tabBars.buttons["Diagnose"].tap()
+        let entry = app.buttons["investigation.openDiagnose"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 8))
+        if !entry.isHittable { app.swipeUp() }
+        entry.tap()
+        app.buttons["investigation.topic"].tap()
+        app.buttons["Wi-Fi"].tap()
+        app.buttons["investigation.baseline"].tap()
+        let repair = app.buttons["investigation.repair.cellular"]
+        XCTAssertTrue(repair.waitForExistence(timeout: 45))
+        capture("Cellular repair controls", app)
+        repair.tap()
+        let manual = app.buttons["I’ll switch in Settings"]
+        XCTAssertTrue(manual.waitForExistence(timeout: 5))
+        manual.tap()
+        let check = app.buttons["Check cellular"]
+        XCTAssertTrue(check.waitForExistence(timeout: 5))
+        check.tap()
+        let notSwitched = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "The connection did not switch")).firstMatch
+        XCTAssertTrue(notSwitched.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.staticTexts["investigation.verdict"].exists)
+        let restore = app.buttons["investigation.repair.restore"]
+        XCTAssertTrue(restore.isHittable)
+        capture("No path change with restore available", app)
+        restore.tap()
+        XCTAssertTrue(app.staticTexts["Wi-Fi is already active."].exists)
+        XCTAssertFalse(restore.exists)
+    }
+
     @MainActor func testWebsiteBaselineAndMatchedComparison() {
         continueAfterFailure = false
         let app = XCUIApplication()

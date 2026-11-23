@@ -75,6 +75,7 @@ class DashboardViewModel: ObservableObject {
     // MARK: - Services
 
     private let networkMonitor: NetworkMonitorService
+    private let updateNetworkStatus: @MainActor (Bool) async -> Void
     private let geoIPService: GeoIPService
     private let historyManager: HistoryManager
     private let stabilityMonitor: ConnectionStabilityMonitor
@@ -99,7 +100,10 @@ class DashboardViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init() {
+    init(updateNetworkStatus: @escaping @MainActor (Bool) async -> Void = { force in
+        await NetworkMonitorService.shared.updateNetworkStatus(force: force)
+    }) {
+        self.updateNetworkStatus = updateNetworkStatus
         self.networkMonitor = NetworkMonitorService.shared
         self.geoIPService = GeoIPService.shared
         self.historyManager = HistoryManager.shared
@@ -124,6 +128,7 @@ class DashboardViewModel: ObservableObject {
     }
 
     init(networkMonitor: NetworkMonitorService, geoIPService: GeoIPService, historyManager: HistoryManager, stabilityMonitor: ConnectionStabilityMonitor) {
+        self.updateNetworkStatus = { force in await networkMonitor.updateNetworkStatus(force: force) }
         self.networkMonitor = networkMonitor
         self.geoIPService = geoIPService
         self.historyManager = historyManager
@@ -277,11 +282,13 @@ class DashboardViewModel: ObservableObject {
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
+            // Clear the slot before completing. A waiter can resume before the
+            // caller that created this task and await its finished value repeatedly.
+            defer { self.inFlightRefresh = nil }
             await self.performRefresh(trigger: trigger)
         }
         inFlightRefresh = task
         await task.value
-        if inFlightRefresh == task { inFlightRefresh = nil }
     }
 
     private func performRefresh(trigger: RefreshTrigger) async {
@@ -290,7 +297,7 @@ class DashboardViewModel: ObservableObject {
         defer { isLoading = false }
         if trigger == .userInitiated { networkMonitor.invalidateVPNCache() }
         if !networkMonitor.isInitializing { refreshPublicIPInBackground() }
-        await networkMonitor.updateNetworkStatus(force: Self.forcesMonitorUpdate(trigger))
+        await updateNetworkStatus(Self.forcesMonitorUpdate(trigger))
         lastUpdated = Date()
     }
 

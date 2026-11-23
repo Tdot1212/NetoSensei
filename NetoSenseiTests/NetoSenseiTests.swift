@@ -1205,6 +1205,28 @@ struct RefreshPolicyTests {
                                    lastRefreshTime: nil, now: Self.now, minInterval: 60) == .waitForInFlightThenRun)
     }
 
+    @MainActor @Test func returningDuringAnActiveRefreshLetsBothRequestsComplete() async {
+        var requests: [Bool] = []
+        var finishFirst: CheckedContinuation<Void, Never>?
+        let viewModel = VM(updateNetworkStatus: { force in
+            requests.append(force)
+            if requests.count == 1 {
+                await withCheckedContinuation { finishFirst = $0 }
+            }
+        })
+        let initial = Task { await viewModel.refresh(trigger: .automatic) }
+        while finishFirst == nil { await Task.yield() }
+
+        let foreground = Task { await viewModel.refresh(trigger: .foreground) }
+        await Task.yield()
+        finishFirst?.resume()
+        await initial.value
+        await foreground.value
+
+        #expect(requests == [false, true])
+        #expect(!viewModel.isLoading)
+    }
+
     @Test func manualAndForegroundRefresh_forceAMonitorUpdate_automaticDoesNot() {
         #expect(VM.forcesMonitorUpdate(.userInitiated))
         #expect(VM.forcesMonitorUpdate(.foreground))

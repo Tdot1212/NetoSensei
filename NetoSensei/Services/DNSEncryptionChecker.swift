@@ -93,6 +93,12 @@ final class DNSEncryptionChecker {
         return a || b
     }
 
+    func probeQuad9DoH() async -> Bool {
+        guard let query = try? DNSWireCodec.query(domain: "example.com", id: 0) else { return false }
+        return await probeOneDoH(endpoint: "https://dns.quad9.net/dns-query",
+            dnsParam: query.base64URLEncodedString(), query: query)
+    }
+
     private func probeOneDoH(endpoint: String, dnsParam: String, query: Data) async -> Bool {
         guard var components = URLComponents(string: endpoint) else { return false }
         components.queryItems = [URLQueryItem(name: "dns", value: dnsParam)]
@@ -110,7 +116,8 @@ final class DNSEncryptionChecker {
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  http.url?.host == url.host, http.url?.scheme == "https" else {
                 return false
             }
             // Sanity-check the response is a DNS message: RFC 8484 §6 says
